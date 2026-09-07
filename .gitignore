@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller / Distribution / Packaging
+build/
+dist/
+*.spec.bak
+
+# SQLite database & local state
+*.db
+*.sqlite3
+
+# Environment variables
+.env
+.env.local
+
+# Visual Studio & VS Code
+.vs/
+.vscode/
+*.user
+*.suo

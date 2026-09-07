@@ -1,0 +1,28 @@
+services:
+  jellyball:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jellyball
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PORT=8000
+      - DB_FILE=/app/data/sports_proxy.db
+      - DASHBOARD_USERNAME=${DASHBOARD_USERNAME:-admin}
+      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - AGGREGATOR_1_URL=${AGGREGATOR_1_URL:-https://isportsurge.ws}
+      - AGGREGATOR_2_URL=${AGGREGATOR_2_URL:-https://mybuffstreams.plus}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/epg.xml"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
