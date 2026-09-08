@@ -175,6 +175,15 @@ def _safe_team_id(value: str) -> str:
     team_id = re.sub(r"[^a-zA-Z0-9_]+", "_", (value or "").lower()).strip("_")
     return team_id[:80] or f"team_{secrets.token_hex(4)}"
 
+
+def _resource_path(relative_path: str) -> Path:
+    """Resolve a packaged resource or a source-tree resource."""
+    bundle_dir = Path(getattr(sys, "_MEIPASS", APP_DIR))
+    bundled = bundle_dir / relative_path
+    if bundled.exists():
+        return bundled
+    return APP_DIR / relative_path
+
 # --- OPTIONAL DEPENDENCIES FALLBACKS ---
 try:
     from thefuzz import fuzz
@@ -447,9 +456,14 @@ class BaseProvider:
     categories: List[str] = []
 
     def get_scan_urls(self) -> List[str]:
-        urls = [self.base_url]
+        if not self.base_url:
+            return []
+        urls = [self.base_url.rstrip("/")]
+        base_url = self.base_url.rstrip("/") + "/"
         for cat in self.categories:
-            urls.append(urllib.parse.urljoin(self.base_url, cat))
+            url = urllib.parse.urljoin(base_url, str(cat).lstrip("/"))
+            if url not in urls:
+                urls.append(url)
         return urls
 
     async def search(
@@ -460,68 +474,124 @@ class BaseProvider:
     ) -> List[dict]:
         return []
 
-# --- HYBRID FAST-HTTP & PLAYWRIGHT SCRAPERS ---
-class ISportSurgeScraper(BaseProvider):
-    name = "iSportSurge"
-    base_url = os.getenv("AGGREGATOR_1_URL", "https://isportsurge.ws")
-    categories = [
-        "/cfb/livestreams2",
-        "/nfl/livestreams3",
-        "/mlb/livestreams2",
-        "/nba/livestreams3",
-        "/nhl/livestreams3",
-        "/soccer/livestreams"
-    ]
+PROVIDER_EVENT_CONCURRENCY = max(1, min(16, int(os.getenv("PROVIDER_EVENT_CONCURRENCY", "6"))))
+MAX_PROVIDER_EVENTS = max(1, min(200, int(os.getenv("MAX_PROVIDER_EVENTS", "60"))))
+
+
+class HtmlAggregatorScraper(BaseProvider):
+    """Configurable adapter for aggregators that expose linked event pages."""
+
+    def __init__(self, name: str, base_url: str, categories: Optional[List[str]] = None, event_path_hints: Optional[List[str]] = None):
+        self.name = name.strip() or "Aggregator"
+        self.base_url = (base_url or "").strip().rstrip("/")
+        self.categories = list(categories or [])
+        self.event_path_hints = tuple(hint.lower() for hint in (event_path_hints or []) if hint)
+
+    def _is_event_link(self, href: str, page_url: str) -> bool:
+        if not href or href.startswith(("#", "javascript:", "mailto:")):
+            return False
+        candidate = urllib.parse.urljoin(page_url, href)
+        if not _validate_upstream_url(candidate):
+            return False
+        base_host = urllib.parse.urlparse(self.base_url).netloc.lower()
+        if urllib.parse.urlparse(candidate).netloc.lower() != base_host:
+            return False
+        if candidate.rstrip("/") == page_url.rstrip("/"):
+            return False
+        if self.event_path_hints and not any(hint in candidate.lower() for hint in self.event_path_hints):
+            return False
+        return True
+
+    async def _find_matches(self, client: httpx.AsyncClient, search_terms: List[str]) -> List[tuple[str, int, str]]:
+        matches: List[tuple[str, int, str]] = []
+        seen_matches: Set[str] = set()
+        for page_url in self.get_scan_urls():
+            try:
+                response = await client.get(
+                    page_url,
+                    headers={"User-Agent": DEFAULT_USER_AGENT, "Referer": self.base_url},
+                    timeout=8.0,
+                )
+                if response.status_code != 200:
+                    continue
+                soup = BeautifulSoup(response.text, "html.parser")
+                for anchor in soup.find_all("a", href=True):
+                    href = str(anchor.get("href") or "")
+                    if not self._is_event_link(href, page_url):
+                        continue
+                    match_url = urllib.parse.urljoin(page_url, href)
+                    if match_url in seen_matches:
+                        continue
+                    title = str(anchor.get("title") or "")
+                    raw_text = anchor.get_text(" ", strip=True)
+                    candidate_text = raw_text or title or href
+                    matched, score, _ = match_team(
+                        search_terms,
+                        candidate_text,
+                        href=href,
+                        title=title,
+                    )
+                    if matched:
+                        seen_matches.add(match_url)
+                        matches.append((match_url, score, raw_text or title or match_url))
+                        if len(matches) >= MAX_PROVIDER_EVENTS:
+                            return matches
+            except Exception as exc:
+                _log_failure(f"scan provider={self.name} page", exc)
+        return matches
 
     async def search(
         self,
         query_or_terms,
         browser: Optional[Browser] = None,
-        http_client: Optional[httpx.AsyncClient] = None
+        http_client: Optional[httpx.AsyncClient] = None,
     ) -> List[dict]:
-        search_terms = get_team_search_terms(query_or_terms, query_or_terms) if isinstance(query_or_terms, str) else query_or_terms
-        streams = []
+        if not self.base_url or not _validate_upstream_url(self.base_url):
+            return []
+        search_terms = (
+            get_team_search_terms(query_or_terms, query_or_terms)
+            if isinstance(query_or_terms, str)
+            else list(query_or_terms or [])
+        )
+        owns_client = http_client is None
         client = http_client or httpx.AsyncClient(follow_redirects=True, timeout=12.0)
-        
-        scan_urls = self.get_scan_urls()
-        matched_events = []
-        seen_matches = set()
+        try:
+            matched_events = await self._find_matches(client, search_terms)
+            event_semaphore = asyncio.Semaphore(PROVIDER_EVENT_CONCURRENCY)
 
-        for page_url in scan_urls:
-            try:
-                headers = {"User-Agent": DEFAULT_USER_AGENT, "Referer": self.base_url}
-                resp = await client.get(page_url, headers=headers, timeout=8.0)
-                if resp.status_code != 200:
-                    continue
-                soup = BeautifulSoup(resp.text, 'html.parser')
-                for a_tag in soup.find_all('a', href=True):
-                    href = a_tag.get('href', '')
-                    if not any(k in href for k in ['/watch/', '/event/', '/title-game/']):
-                        continue
-                    raw_text = a_tag.get_text()
-                    clean_text = clean_sports_text(raw_text)
-                    if len(clean_text) < 3:
-                        continue
-                    m_url = urllib.parse.urljoin(self.base_url, href)
-                    if m_url in seen_matches:
-                        continue
+            async def inspect_event(event: tuple[str, int, str]) -> List[dict]:
+                match_url, score, match_title = event
+                async with event_semaphore:
+                    event_streams = await fetch_streams_from_page(
+                        client, match_url, self.name, score, match_title
+                    )
+                    if not event_streams and browser and browser.is_connected():
+                        event_streams = await playwright_intercept_streams(
+                            browser, match_url, self.name, score, match_title
+                        )
+                    return event_streams
 
-                    matched, score, _ = match_team(search_terms, clean_text, href=href, title=a_tag.get('title', ''))
-                    if matched:
-                        seen_matches.add(m_url)
-                        matched_events.append((m_url, score, raw_text.strip()))
-            except Exception as exc:
-                _log_failure(f"scan provider={self.name} page", exc)
+            results = await asyncio.gather(
+                *(inspect_event(event) for event in matched_events),
+                return_exceptions=True,
+            )
+            return [stream for result in results if isinstance(result, list) for stream in result]
+        finally:
+            if owns_client:
+                await client.aclose()
 
-        for m_url, score, match_title in matched_events:
-            event_streams = await fetch_streams_from_page(client, m_url, self.name, score, match_title)
-            if event_streams:
-                streams.extend(event_streams)
-            elif browser and browser.is_connected():
-                pw_streams = await playwright_intercept_streams(browser, m_url, self.name, score, match_title)
-                streams.extend(pw_streams)
 
-        return streams
+# --- Hybrid fast-HTTP and Playwright scrapers ---
+class ISportSurgeScraper(HtmlAggregatorScraper):
+    name = "iSportSurge"
+    base_url = os.getenv("AGGREGATOR_1_URL", "https://isportsurge.ws")
+    categories = [
+        "/cfb/livestreams2", "/nfl/livestreams3", "/mlb/livestreams2",
+        "/nba/livestreams3", "/nhl/livestreams3", "/soccer/livestreams",
+    ]
+
+    def __init__(self):
+        super().__init__(self.name, self.base_url, self.categories, ["/watch/", "/event/", "/title-game/"])
 
 class MyBuffStreamsScraper(BaseProvider):
     name = "MyBuffStreams"
@@ -1923,6 +1993,11 @@ async def remove_team(team_id: str, auth: bool = Depends(verify_dashboard_auth))
     return RedirectResponse(url="/?tab=channels", status_code=303)
 
 def _create_tray_image() -> Image.Image:
+    logo_path = _resource_path("assets/jellyball-icon.png")
+    try:
+        return Image.open(logo_path).convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
+    except (OSError, ValueError) as exc:
+        LOGGER.warning("Could not load JellyBall tray icon error=%s", type(exc).__name__)
     image = Image.new("RGBA", (64, 64), (15, 23, 42, 255))
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle((8, 8, 56, 56), radius=12, fill=(37, 99, 235, 255))

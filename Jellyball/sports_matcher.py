@@ -7,6 +7,8 @@ and precision token matching with state/short-word guardrails.
 import re
 from typing import List, Tuple, Set, Dict, Optional
 
+from sports_catalog import STATIC_TEAM_RECORDS, normalize_team_label
+
 try:
     from thefuzz import fuzz
 except ImportError:
@@ -179,6 +181,52 @@ _TEAM_ALIASES_DB: Dict[str, List[str]] = {
     "tampa bay lightning": ["tampa bay lightning", "lightning", "bolts", "tb"],
 }
 
+# Keep the legacy aliases above for backward compatibility, but merge the
+# shared catalog so the complete NFL/NBA fallback set and common NCAA teams
+# use the same identity data as logo and schedule resolution.
+for _catalog_record in STATIC_TEAM_RECORDS:
+    _TEAM_ALIASES_DB.setdefault(_catalog_record.canonical, [])
+    for _catalog_alias in (_catalog_record.canonical, *_catalog_record.aliases):
+        if _catalog_alias and _catalog_alias not in _TEAM_ALIASES_DB[_catalog_record.canonical]:
+            _TEAM_ALIASES_DB[_catalog_record.canonical].append(_catalog_alias)
+
+
+def _canonical_matches(value: str) -> Set[str]:
+    normalized = normalize_team_label(value)
+    if not normalized:
+        return set()
+
+    matches: Set[str] = set()
+    for canonical, aliases in _TEAM_ALIASES_DB.items():
+        known_names = {normalize_team_label(canonical), *(normalize_team_label(alias) for alias in aliases)}
+        if normalized in known_names:
+            matches.add(canonical)
+            continue
+        if len(normalized.split()) > 1 and any(
+            len(alias) >= 4 and re.search(rf"\b{re.escape(alias)}\b", normalized)
+            for alias in known_names
+            if alias
+        ):
+            matches.add(canonical)
+    return matches
+
+
+def _exact_canonical_matches(value: str) -> Set[str]:
+    normalized = normalize_team_label(value)
+    if not normalized:
+        return set()
+    matches: Set[str] = set()
+    for canonical, aliases in _TEAM_ALIASES_DB.items():
+        known_names = {normalize_team_label(canonical), *(normalize_team_label(alias) for alias in aliases)}
+        if normalized in known_names:
+            matches.add(canonical)
+    return matches
+
+
+def _is_ambiguous_term(term: str) -> bool:
+    """Return True for nicknames/codes shared by multiple team identities."""
+    return len(_exact_canonical_matches(term)) > 1
+
 # Compound nickname conflicts (e.g. Rutgers Scarlet Knights != UCF Knights)
 _COMPOUND_CONFLICTS: Dict[str, List[str]] = {
     "knights": ["scarlet knights", "black knights", "golden knights", "southern virginia knights"],
@@ -242,38 +290,33 @@ def get_team_search_terms(team_name: str, query: str = "", team_id: str = "") ->
     Combines the team display name, user query, team_id, and any known database aliases.
     """
     terms: Set[str] = set()
-    
-    # 1. Direct inputs
-    for raw in [team_name, query, team_id.replace("_", " ")]:
-        if not raw:
+    raw_values = [team_name, query, team_id.replace("_", " ")]
+
+    # Always retain the caller's exact terms, but only expand an alias when it
+    # identifies one canonical team. This prevents a query such as "Miami"
+    # from collecting Dolphins, Heat, Hurricanes, and Marlins aliases together.
+    for raw in raw_values:
+        cleaned = normalize_team_label(raw)
+        if not cleaned:
             continue
-        cleaned = re.sub(r'\s+', ' ', raw.strip().lower())
-        if cleaned:
-            terms.add(cleaned)
+        terms.add(cleaned)
 
-    # 2. Check alias database
-    search_keys = [team_name.lower().strip(), query.lower().strip(), team_id.lower().replace("_", " ").strip()]
-    for canonical_name, aliases in _TEAM_ALIASES_DB.items():
-        matched_db = False
-        for sk in search_keys:
-            if not sk: continue
-            if sk == canonical_name or sk in aliases:
-                matched_db = True
-                break
-            if any(
-                len(alias) > 2 and re.search(rf"\b{re.escape(alias.lower())}\b", sk)
-                for alias in aliases
-            ):
-                matched_db = True
-                break
-            if len(sk.split()) > 1 and fuzz.token_set_ratio(sk, canonical_name) >= 90:
-                matched_db = True
-                break
+        matches = _canonical_matches(cleaned)
+        explicit = {
+            canonical for canonical in matches
+            if re.search(rf"\b{re.escape(normalize_team_label(canonical))}\b", cleaned)
+        }
+        if len(explicit) == 1:
+            matches = explicit
+        if len(matches) != 1:
+            continue
 
-        if matched_db:
-            terms.add(canonical_name)
-            for a in aliases:
-                terms.add(a.lower().strip())
+        canonical_name = next(iter(matches))
+        terms.add(canonical_name)
+        for alias in _TEAM_ALIASES_DB.get(canonical_name, []):
+            alias = normalize_team_label(alias)
+            if alias and _exact_canonical_matches(alias) == {canonical_name}:
+                terms.add(alias)
 
     # Return ordered terms, prioritizing longer / more specific terms first
     result = sorted(list(terms), key=lambda x: (len(x.split()), len(x)), reverse=True)
@@ -282,26 +325,17 @@ def get_team_search_terms(team_name: str, query: str = "", team_id: str = "") ->
 
 def canonical_team_name(team_name: str) -> str:
     """Resolve an unambiguous full name or alias to the database canonical name."""
-    normalized = re.sub(r'[^a-z0-9]+', ' ', team_name.lower()).strip()
+    normalized = normalize_team_label(team_name)
     if not normalized:
         return ""
 
-    if normalized in _TEAM_ALIASES_DB:
-        return normalized
-
-    exact_matches = [
-        canonical for canonical, aliases in _TEAM_ALIASES_DB.items()
-        if normalized in {canonical, *(alias.lower() for alias in aliases)}
-    ]
+    exact_matches = sorted(_exact_canonical_matches(normalized))
     if len(exact_matches) == 1:
         return exact_matches[0]
 
     embedded_matches = [
         canonical for canonical, aliases in _TEAM_ALIASES_DB.items()
-        if any(
-            len(alias) > 2 and re.search(rf"\b{re.escape(alias.lower())}\b", normalized)
-            for alias in aliases
-        )
+        if re.search(rf"\b{re.escape(normalize_team_label(canonical))}\b", normalized)
     ]
     if len(set(embedded_matches)) == 1:
         return embedded_matches[0]
@@ -330,6 +364,21 @@ def is_state_school_conflict(query_term: str, candidate_text: str) -> bool:
 
     if "state" in q_low or " st" in q_low or q_low.endswith("st"):
         return False
+
+    state_schools = [
+        "florida", "michigan", "ohio", "penn", "washington", "oregon",
+        "arizona", "kansas", "iowa", "mississippi", "oklahoma", "georgia",
+        "arkansas", "colorado", "indiana", "illinois", "idaho", "montana",
+        "utah", "new mexico", "texas", "california", "louisiana", "boise",
+        "ball", "kent", "fresno", "san diego", "san jose"
+    ]
+
+    for school in state_schools:
+        if school in q_low and (school + " state" not in q_low and school + " st" not in q_low):
+            pattern = rf'\b{re.escape(school)}\s+(?:state|st)\b'
+            if re.search(pattern, c_low):
+                return True
+    return False
 
 
 _TEAM_IDENTITY_FAMILIES = (
@@ -369,21 +418,6 @@ def has_team_identity_conflict(search_terms: List[str], target: str) -> bool:
             for group in competing_groups
         ):
             return True
-    return False
-
-    state_schools = [
-        "florida", "michigan", "ohio", "penn", "washington", "oregon",
-        "arizona", "kansas", "iowa", "mississippi", "oklahoma", "georgia",
-        "arkansas", "colorado", "indiana", "illinois", "idaho", "montana",
-        "utah", "new mexico", "texas", "california", "louisiana", "boise",
-        "ball", "kent", "fresno", "san diego", "san jose"
-    ]
-
-    for school in state_schools:
-        if school in q_low and (school + " state" not in q_low and school + " st" not in q_low):
-            pattern = rf'\b{re.escape(school)}\s+(?:state|st)\b'
-            if re.search(pattern, c_low):
-                return True
     return False
 
 def has_compound_conflict(term: str, target: str, search_terms: List[str]) -> bool:
@@ -436,6 +470,8 @@ def match_team(
     for term in search_terms:
         term_low = term.strip().lower()
         if not term_low:
+            continue
+        if _is_ambiguous_term(term_low):
             continue
 
         term_is_short = len(term_low) <= 4
