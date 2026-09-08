@@ -2,7 +2,12 @@
 from PyInstaller.utils.hooks import collect_all
 import os
 
+icon_file = os.path.join(SPECPATH, 'assets', 'jellyball.ico')
 datas = []
+datas += [
+    (os.path.join(SPECPATH, 'assets', 'jellyball-icon.png'), 'assets'),
+    (os.path.join(SPECPATH, 'assets', 'jellyball-logo.png'), 'assets'),
+]
 binaries = []
 hiddenimports = [
     'sports_matcher',
@@ -48,6 +53,7 @@ exe = EXE(
     a.datas,
     [],
     name='jellyfin-sports-proxy',
+    icon=icon_file,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
