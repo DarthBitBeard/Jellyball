@@ -2,9 +2,9 @@
 Shared team identity and ESPN slug catalog.
 
 The catalog deliberately separates a team's display identity from its ESPN
-league. NFL and NBA records are complete static fallbacks. College records
-cover common teams offline and can be refreshed from ESPN's team directories
-for full NCAAF/NCAAM coverage at runtime.
+league. NFL, MLB, NHL, and NBA records are complete static fallbacks. College
+records cover common teams offline and can be refreshed from ESPN's team
+directories for full NCAAF/NCAAM coverage at runtime.
 """
 
 from __future__ import annotations
@@ -34,11 +34,28 @@ class TeamSlug:
             return self
         return replace(self, category=category)
 
+    @property
+    def display_name(self) -> str:
+        """Return a readable label for server-rendered catalog controls."""
+        return self.canonical.title()
+
+
+@dataclass(frozen=True)
+class SpecialChannel:
+    """A non-team channel that should remain eligible for continuous search."""
+
+    key: str
+    name: str
+    search_terms: Tuple[str, ...]
+    logo_url: str = ""
+    tvg_id: str = ""
+    group_title: str = "24/7 Sports"
+
 
 def normalize_team_label(value: str) -> str:
     """Normalize a team label without making short aliases more permissive."""
     normalized = str(value or "").casefold().replace("&", " and ")
-    normalized = normalized.replace("’", "'")
+    normalized = normalized.replace("â€™", "'")
     normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
     return re.sub(r"\s+", " ", normalized).strip()
 
@@ -58,6 +75,263 @@ def _record(
         aliases=tuple(normalize_team_label(alias) for alias in aliases if normalize_team_label(alias)),
         team_id=str(slug),
     )
+
+
+MLB_TEAMS: Tuple[TeamSlug, ...] = tuple(
+    _record(canonical, slug, aliases, "mlb")
+    for canonical, slug, aliases in (
+        ("arizona diamondbacks", "ari", ("arizona", "diamondbacks", "dbacks", "ari")),
+        ("atlanta braves", "atl", ("atlanta", "braves", "atl")),
+        ("baltimore orioles", "bal", ("baltimore", "orioles", "bal")),
+        ("boston red sox", "bos", ("boston", "red sox", "bos")),
+        ("chicago cubs", "chc", ("chicago cubs", "cubs", "chc")),
+        ("chicago white sox", "cws", ("chicago white sox", "white sox", "cws")),
+        ("cincinnati reds", "cin", ("cincinnati", "reds", "cin")),
+        ("cleveland guardians", "cle", ("cleveland", "guardians", "cle")),
+        ("colorado rockies", "col", ("colorado", "rockies", "col")),
+        ("detroit tigers", "det", ("detroit", "tigers", "det")),
+        ("houston astros", "hou", ("houston", "astros", "hou")),
+        ("kansas city royals", "kc", ("kansas city", "royals", "kc")),
+        ("los angeles angels", "laa", ("los angeles angels", "angels", "laa")),
+        ("los angeles dodgers", "lad", ("los angeles dodgers", "dodgers", "lad")),
+        ("miami marlins", "mia", ("miami", "marlins", "fish", "mia")),
+        ("milwaukee brewers", "mil", ("milwaukee", "brewers", "mil")),
+        ("minnesota twins", "min", ("minnesota", "twins", "min")),
+        ("new york mets", "nym", ("new york mets", "mets", "nym")),
+        ("new york yankees", "nyy", ("new york yankees", "yankees", "nyy")),
+        ("oakland athletics", "oak", ("oakland", "athletics", "as", "oak")),
+        ("philadelphia phillies", "phi", ("philadelphia", "phillies", "phi")),
+        ("pittsburgh pirates", "pit", ("pittsburgh", "pirates", "pit")),
+        ("san diego padres", "sd", ("san diego", "padres", "sd")),
+        ("san francisco giants", "sf", ("san francisco", "giants", "sf")),
+        ("seattle mariners", "sea", ("seattle", "mariners", "sea")),
+        ("st louis cardinals", "stl", ("st louis", "cardinals", "stl")),
+        ("tampa bay rays", "tb", ("tampa bay", "rays", "tb")),
+        ("texas rangers", "tex", ("texas", "rangers", "tex")),
+        ("toronto blue jays", "tor", ("toronto", "blue jays", "jays", "tor")),
+        ("washington nationals", "wsh", ("washington", "nationals", "nats", "wsh")),
+    )
+)
+
+
+NHL_TEAMS: Tuple[TeamSlug, ...] = tuple(
+    _record(canonical, slug, aliases, "nhl")
+    for canonical, slug, aliases in (
+        ("anaheim ducks", "ana", ("anaheim", "ducks", "ana")),
+        ("boston bruins", "bos", ("boston", "bruins", "bos")),
+        ("buffalo sabres", "buf", ("buffalo", "sabres", "buf")),
+        ("calgary flames", "cgy", ("calgary", "flames", "cgy")),
+        ("carolina hurricanes", "car", ("carolina", "hurricanes", "canes", "car")),
+        ("chicago blackhawks", "chi", ("chicago", "blackhawks", "hawks", "chi")),
+        ("colorado avalanche", "col", ("colorado", "avalanche", "avs", "col")),
+        ("columbus blue jackets", "cbj", ("columbus", "blue jackets", "cbj")),
+        ("dallas stars", "dal", ("dallas", "stars", "dal")),
+        ("detroit red wings", "det", ("detroit", "red wings", "wings", "det")),
+        ("edmonton oilers", "edm", ("edmonton", "oilers", "edm")),
+        ("florida panthers", "fla", ("florida", "panthers", "cats", "fla")),
+        ("los angeles kings", "lak", ("los angeles", "kings", "lak")),
+        ("minnesota wild", "min", ("minnesota", "wild", "min")),
+        ("montreal canadiens", "mtl", ("montreal", "canadiens", "habs", "mtl")),
+        ("nashville predators", "nsh", ("nashville", "predators", "preds", "nsh")),
+        ("new jersey devils", "nj", ("new jersey", "devils", "nj")),
+        ("new york islanders", "nyi", ("new york islanders", "islanders", "nyi")),
+        ("new york rangers", "nyr", ("new york rangers", "rangers", "nyr")),
+        ("ottawa senators", "ott", ("ottawa", "senators", "sens", "ott")),
+        ("philadelphia flyers", "phi", ("philadelphia", "flyers", "phi")),
+        ("pittsburgh penguins", "pit", ("pittsburgh", "penguins", "pens", "pit")),
+        ("san jose sharks", "sj", ("san jose", "sharks", "sj")),
+        ("seattle kraken", "sea", ("seattle", "kraken", "sea")),
+        ("st louis blues", "stl", ("st louis", "blues", "stl")),
+        ("tampa bay lightning", "tb", ("tampa bay", "lightning", "bolts", "tb")),
+        ("toronto maple leafs", "tor", ("toronto", "maple leafs", "leafs", "tor")),
+        ("utah mammoth", "uta", ("utah", "mammoth", "utah hockey club", "uta")),
+        ("vancouver canucks", "van", ("vancouver", "canucks", "van")),
+        ("vegas golden knights", "vgk", ("vegas", "golden knights", "knights", "vgk")),
+        ("washington capitals", "wsh", ("washington", "capitals", "caps", "wsh")),
+        ("winnipeg jets", "wpg", ("winnipeg", "jets", "wpg")),
+    )
+)
+
+
+_TV_LOGOS_BASE = "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/united-states/"
+
+SPECIAL_CHANNELS: Tuple[SpecialChannel, ...] = (
+    SpecialChannel(
+        "nfl_redzone",
+        "NFL RedZone",
+        ("nfl redzone", "nfl red zone", "redzone", "red zone"),
+        _TV_LOGOS_BASE + "nfl-red-zone-us.png",
+        "NFLRedZone.us",
+    ),
+    SpecialChannel(
+        "espn",
+        "ESPN",
+        ("espn",),
+        _TV_LOGOS_BASE + "espn-us.png",
+        "ESPN.us",
+    ),
+    SpecialChannel(
+        "espn2",
+        "ESPN2",
+        ("espn2", "espn 2"),
+        _TV_LOGOS_BASE + "espn-2-us.png",
+        "ESPN2.us",
+    ),
+    SpecialChannel(
+        "espnu",
+        "ESPNU",
+        ("espnu", "espn u"),
+        _TV_LOGOS_BASE + "espn-u-us.png",
+        "ESPNU.us",
+    ),
+    SpecialChannel(
+        "fs1",
+        "FOX Sports 1",
+        ("fs1", "fox sports 1"),
+        _TV_LOGOS_BASE + "fox-sports-1-us.png",
+        "FoxSports1.us",
+    ),
+    SpecialChannel(
+        "fs2",
+        "FOX Sports 2",
+        ("fs2", "fox sports 2"),
+        _TV_LOGOS_BASE + "fox-sports-2-us.png",
+        "FoxSports2.us",
+    ),
+    SpecialChannel(
+        "cbs_sports_network",
+        "CBS Sports Network",
+        ("cbs sports network", "cbssn"),
+        _TV_LOGOS_BASE + "cbs-sports-network-us.png",
+        "CBSSportsNetwork.us",
+    ),
+    SpecialChannel(
+        "tnt_sports",
+        "TNT Sports",
+        ("tnt sports", "tnt sports network", "tnt network", "tnt"),
+        _TV_LOGOS_BASE + "tnt-us.png",
+        "TNT.us",
+    ),
+    SpecialChannel(
+        "nbc_sports",
+        "NBC Sports",
+        ("nbc sports", "nbc sports network", "nbcsn", "nbc sn"),
+        _TV_LOGOS_BASE + "nbc-sports-us.png",
+        "NBCSports.us",
+    ),
+    SpecialChannel(
+        "big_ten_network",
+        "Big Ten Network",
+        ("big ten network", "btn"),
+        _TV_LOGOS_BASE + "big-ten-network-us.png",
+        "BigTenNetwork.us",
+    ),
+    SpecialChannel(
+        "acc_network",
+        "ACC Network",
+        ("acc network", "accn"),
+        _TV_LOGOS_BASE + "acc-network-us.png",
+        "ACCNetwork.us",
+    ),
+    SpecialChannel(
+        "sec_network",
+        "SEC Network",
+        ("sec network", "secn"),
+        _TV_LOGOS_BASE + "sec-network-us.png",
+        "SECNetwork.us",
+    ),
+    SpecialChannel(
+        "longhorn_network",
+        "Longhorn Network",
+        ("longhorn network", "longhorn"),
+        _TV_LOGOS_BASE + "longhorn-network-us.png",
+        "LonghornNetwork.us",
+    ),
+    SpecialChannel(
+        "mlb_network",
+        "MLB Network",
+        ("mlb network", "mlb tv"),
+        _TV_LOGOS_BASE + "mlb-network-us.png",
+        "MLBNetwork.us",
+    ),
+    SpecialChannel(
+        "nba_tv",
+        "NBA TV",
+        ("nba tv", "nbatv"),
+        _TV_LOGOS_BASE + "nba-tv-us.png",
+        "NBATV.us",
+    ),
+    SpecialChannel(
+        "nfl_network",
+        "NFL Network",
+        ("nfl network", "nfl net"),
+        _TV_LOGOS_BASE + "nfl-network-us.png",
+        "NFLNetwork.us",
+    ),
+    SpecialChannel(
+        "nhl_network",
+        "NHL Network",
+        ("nhl network", "nhl net"),
+        _TV_LOGOS_BASE + "nhl-network-us.png",
+        "NHLNetwork.us",
+    ),
+    SpecialChannel(
+        "abc",
+        "ABC",
+        ("abc", "abc network", "abc usa", "abc ny"),
+        _TV_LOGOS_BASE + "abc-us.png",
+        "ABC.us",
+    ),
+    SpecialChannel(
+        "fox",
+        "FOX",
+        ("fox", "fox network", "fox usa", "fox broadcast"),
+        _TV_LOGOS_BASE + "fox-us.png",
+        "FOX.us",
+    ),
+    SpecialChannel(
+        "cbs",
+        "CBS",
+        ("cbs", "cbs network", "cbs usa", "cbs broadcast"),
+        _TV_LOGOS_BASE + "cbs-logo-white-us.png",
+        "CBS.us",
+    ),
+    SpecialChannel(
+        "nbc",
+        "NBC",
+        ("nbc", "nbc network", "nbc usa", "nbc broadcast"),
+        _TV_LOGOS_BASE + "nbc-us.png",
+        "NBC.us",
+    ),
+    SpecialChannel(
+        "the_cw",
+        "The CW",
+        ("the cw", "cw", "cw network", "cw usa"),
+        _TV_LOGOS_BASE + "the-cw-us.png",
+        "CW.us",
+    ),
+    SpecialChannel(
+        "tbs",
+        "TBS",
+        ("tbs", "tbs network", "tbs usa"),
+        _TV_LOGOS_BASE + "tbs-us.png",
+        "TBS.us",
+    ),
+    SpecialChannel(
+        "usa_network",
+        "USA Network",
+        ("usa network", "usa net"),
+        _TV_LOGOS_BASE + "usa-us.png",
+        "USANetwork.us",
+    ),
+    SpecialChannel(
+        "trutv",
+        "TruTV",
+        ("trutv", "tru tv", "trutv usa"),
+        _TV_LOGOS_BASE + "tru-tv-us.png",
+        "TruTV.us",
+    ),
+)
 
 
 # ESPN's current pro abbreviations are stable and are safer logo fallbacks than
@@ -229,7 +503,7 @@ COLLEGE_TEAMS: Tuple[TeamSlug, ...] = tuple(
     )
 )
 
-STATIC_TEAM_RECORDS: Tuple[TeamSlug, ...] = NFL_TEAMS + NBA_TEAMS + COLLEGE_TEAMS
+STATIC_TEAM_RECORDS: Tuple[TeamSlug, ...] = NFL_TEAMS + MLB_TEAMS + NHL_TEAMS + NBA_TEAMS + COLLEGE_TEAMS
 
 
 def _identity_key(record: TeamSlug) -> Tuple[str, str, str]:
@@ -270,6 +544,10 @@ def category_hint(value: str) -> str:
         return "nfl"
     if re.search(r"\b(?:nba|pro basketball)\b", normalized):
         return "nba"
+    if re.search(r"\b(?:mlb|major league baseball|baseball)\b", normalized):
+        return "mlb"
+    if re.search(r"\b(?:nhl|pro hockey|hockey)\b", normalized):
+        return "nhl"
     if re.search(r"\b(?:ncaaf|cfb|college football)\b", normalized):
         return "ncaaf"
     if re.search(r"\b(?:ncaam|mens college basketball|men college basketball|college basketball)\b", normalized):
@@ -407,4 +685,23 @@ ESPN_DIRECTORY_ENDPOINTS: Dict[str, Tuple[str, str]] = {
     "ncaaf": ("football", "college-football"),
     "nba": ("basketball", "nba"),
     "ncaam": ("basketball", "mens-college-basketball"),
+    "mlb": ("baseball", "mlb"),
+    "nhl": ("hockey", "nhl"),
 }
+
+
+# (start_month, start_day, end_month, end_day) for each sport's active window,
+# covering preseason through the championship. A category with no entry here
+# (e.g. manually added "custom" teams) is treated as always in season.
+SEASON_WINDOWS: Dict[str, Tuple[int, int, int, int]] = {
+    "nfl": (8, 1, 2, 15),      # Hall of Fame Game/preseason through the Super Bowl
+    "ncaaf": (8, 1, 1, 22),    # fall camp/preseason through the CFP national championship
+    "nba": (10, 1, 6, 30),     # preseason through the NBA Finals
+    "ncaam": (11, 1, 4, 10),   # season tip-off through the men's national championship
+    "nhl": (9, 15, 6, 30),     # preseason through the Stanley Cup Final
+    "mlb": (2, 15, 11, 10),    # spring training through the World Series
+}
+
+
+
+

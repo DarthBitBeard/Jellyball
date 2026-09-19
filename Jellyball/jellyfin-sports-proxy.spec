@@ -1,35 +1,57 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
 import os
 
-icon_file = os.path.join(SPECPATH, 'assets', 'jellyball.ico')
-datas = []
-datas += [
-    (os.path.join(SPECPATH, 'assets', 'jellyball-icon.png'), 'assets'),
-    (os.path.join(SPECPATH, 'assets', 'jellyball-logo.png'), 'assets'),
+ROOT = Path(SPECPATH)
+ASSETS_DIR = ROOT / "assets"
+icon_file = str(ASSETS_DIR / "jellyball.ico")
+datas = [
+    (str(path), "assets")
+    for path in ASSETS_DIR.iterdir()
+    if path.is_file()
 ]
 binaries = []
 hiddenimports = [
-    'sports_matcher',
-    'stream_extractor',
-    'uvicorn.logging',
-    'uvicorn.loops',
-    'uvicorn.loops.auto',
-    'uvicorn.protocols',
-    'uvicorn.protocols.http',
-    'uvicorn.protocols.http.auto',
-    'uvicorn.lifespan',
-    'uvicorn.lifespan.on',
-    'pystray',
-    'PIL'
+    "sports_catalog",
+    "sports_matcher",
+    "stream_extractor",
+    "network_safety",
+    "uvicorn.logging",
+    "uvicorn.loops",
+    "uvicorn.loops.auto",
+    "uvicorn.protocols",
+    "uvicorn.protocols.http",
+    "uvicorn.protocols.http.auto",
+    "uvicorn.lifespan",
+    "uvicorn.lifespan.on",
+    "pystray",
+    "PIL",
 ]
 
-for pkg in ['tzdata', 'playwright', 'rapidfuzz', 'thefuzz', 'bs4', 'httpx', 'pystray', 'PIL']:
+for package_name in ["tzdata", "playwright", "rapidfuzz", "thefuzz", "bs4", "httpx", "pystray", "PIL"]:
     try:
-        tmp_ret = collect_all(pkg)
-        datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-    except Exception:
-        pass
+        package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
+    except ImportError as exc:
+        print(f"Optional package not collected: {package_name} ({exc})")
+        continue
+    datas += package_datas
+    binaries += package_binaries
+    hiddenimports += package_hiddenimports
+
+browser_root_value = os.getenv("PLAYWRIGHT_BROWSERS_PATH", "")
+if not browser_root_value or browser_root_value == "0":
+    browser_root_value = os.path.join(os.getenv("LOCALAPPDATA", str(Path.home())), "ms-playwright")
+browser_root = Path(browser_root_value).expanduser()
+if not browser_root.is_dir():
+    raise SystemExit(
+        "Playwright browser assets were not found at "
+        f"{browser_root}. Run 'python -m playwright install chromium' before building."
+    )
+
+for browser_dir in browser_root.iterdir():
+    if browser_dir.is_dir() and browser_dir.name != ".links":
+        datas.append((str(browser_dir), str(Path("playwright_browsers") / browser_dir.name)))
 
 a = Analysis(
     ['main.py'],
