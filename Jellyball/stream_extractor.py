@@ -359,7 +359,12 @@ async def verify_stream_live(
         if sample.startswith(b"#EXTM3U") or "mpegurl" in content_type.lower():
             if depth >= 2:
                 return False
+            # Master playlists: the first variant is as good as any. Media playlists:
+            # sample the *newest* segment - the oldest one in a live sliding window is
+            # the likeliest to have already been deleted from the CDN, which made a
+            # perfectly healthy stream fail its health check.
             media_uri = ""
+            is_master = "#EXT-X-STREAM-INF" in text
             for line in text.splitlines():
                 stripped = line.strip()
                 if stripped.startswith("#EXT-X-MAP:"):
@@ -369,7 +374,8 @@ async def verify_stream_live(
                         break
                 if stripped and not stripped.startswith("#"):
                     media_uri = stripped
-                    break
+                    if is_master:
+                        break
             if not media_uri:
                 return False
             next_url = validate_http_url(urllib.parse.urljoin(effective_url, media_uri))

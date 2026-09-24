@@ -120,6 +120,7 @@ import re
 import urllib.parse
 import sqlite3
 import json
+import hashlib
 import secrets
 import time
 import random
@@ -263,13 +264,34 @@ except ImportError:
             return int(SequenceMatcher(None, t1, t2).ratio() * 100)
     fuzz = FuzzFallback()
 
+# bcrypt is used directly: passlib 1.7.4 is unmaintained and its bcrypt backend
+# self-test fails against bcrypt>=4.1/5.x, which made hashed DASHBOARD_PASSWORD
+# values silently fall back to a plain-text comparison that could never match.
 try:
-    from passlib.context import CryptContext
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    import bcrypt as _bcrypt
 except ImportError:
-    pwd_context = None
-    if os.getenv("DASHBOARD_PASSWORD"):
-        LOGGER.error("passlib[bcrypt] is not installed; hashed dashboard passwords cannot be verified")
+    _bcrypt = None
+    if os.getenv("DASHBOARD_PASSWORD", "").startswith(("$2a$", "$2b$", "$2y$")):
+        LOGGER.error("bcrypt is not installed; hashed dashboard passwords cannot be verified")
+
+_BCRYPT_HASH_PREFIXES = ("$2a$", "$2b$", "$2y$")
+# bcrypt verification deliberately costs ~100-300ms, and the dashboard polls
+# several authenticated API routes; remember recent successful logins briefly.
+_VERIFIED_CREDENTIALS: "OrderedDict[str, float]" = OrderedDict()
+_VERIFIED_CREDENTIALS_TTL = 600.0
+_VERIFIED_CREDENTIALS_MAX = 32
+
+
+def _dashboard_password_matches(candidate: str, configured: str) -> bool:
+    if configured.startswith(_BCRYPT_HASH_PREFIXES):
+        if _bcrypt is None:
+            return False
+        try:
+            # bcrypt only uses the first 72 bytes; bcrypt>=5 raises instead of truncating.
+            return _bcrypt.checkpw(candidate.encode("utf-8")[:72], configured.encode("utf-8"))
+        except ValueError:
+            return False
+    return secrets.compare_digest(candidate.encode("utf-8"), configured.encode("utf-8"))
 
 def is_fuzzy_match(query: str, text: str, threshold: int = 65) -> tuple[bool, int]:
     """Compatibility wrapper that delegates to the robust sports_matcher engine."""
@@ -291,16 +313,22 @@ def verify_dashboard_auth(credentials: Optional[HTTPBasicCredentials] = Depends(
             headers={"WWW-Authenticate": "Basic"},
         )
 
-    is_user_ok = secrets.compare_digest(credentials.username, DASHBOARD_USERNAME)
-    is_pass_ok = False
-
-    if pwd_context:
-        try:
-            is_pass_ok = pwd_context.verify(credentials.password, DASHBOARD_PASSWORD)
-        except ValueError:
-            is_pass_ok = secrets.compare_digest(credentials.password, DASHBOARD_PASSWORD)
+    # compare_digest on str raises TypeError for non-ASCII input; compare bytes.
+    is_user_ok = secrets.compare_digest(credentials.username.encode("utf-8"), DASHBOARD_USERNAME.encode("utf-8"))
+    cache_key = hashlib.sha256(
+        f"{credentials.username}\0{credentials.password}\0{DASHBOARD_PASSWORD}".encode("utf-8")
+    ).hexdigest()
+    now = time.monotonic()
+    verified_at = _VERIFIED_CREDENTIALS.get(cache_key)
+    if verified_at is not None and now - verified_at < _VERIFIED_CREDENTIALS_TTL:
+        is_pass_ok = True
     else:
-        is_pass_ok = secrets.compare_digest(credentials.password, DASHBOARD_PASSWORD)
+        is_pass_ok = _dashboard_password_matches(credentials.password, DASHBOARD_PASSWORD)
+        if is_pass_ok and is_user_ok:
+            _VERIFIED_CREDENTIALS[cache_key] = now
+            _VERIFIED_CREDENTIALS.move_to_end(cache_key)
+            while len(_VERIFIED_CREDENTIALS) > _VERIFIED_CREDENTIALS_MAX:
+                _VERIFIED_CREDENTIALS.popitem(last=False)
 
     if not (is_user_ok and is_pass_ok):
         raise HTTPException(
@@ -574,6 +602,66 @@ async def trigger_jellyfin_refresh() -> bool:
             _log_failure("trigger Jellyfin guide refresh", exc)
             return False
 
+
+JELLYFIN_AUTO_REFRESH_MIN_INTERVAL = bounded_float(
+    os.getenv("JELLYFIN_AUTO_REFRESH_MIN_INTERVAL", "600"), 600.0, 60.0, 86400.0
+)
+_JELLYFIN_REFRESH_STATE = {"signature": None, "last_run": 0.0, "pending": None}
+
+
+def _guide_signature() -> str:
+    """Hash of everything Jellyfin's guide shows for our channels. Scrapes only
+    trigger a guide refresh when this changes - previously every successful
+    5-minute rescrape of every channel queued a full Jellyfin guide refresh."""
+    parts = []
+    for team_id, data in sorted(stream_state.items()):
+        parts.append("\0".join(str(value) for value in (
+            team_id,
+            data.get("name", ""),
+            data.get("logo_url", ""),
+            data.get("start_time", ""),
+            data.get("stop_time", ""),
+            data.get("schedule_status", ""),
+            data.get("tvg_id", ""),
+            data.get("group_title", ""),
+            bool(data.get("candidates")),
+        )))
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+async def _debounced_jellyfin_refresh(delay: float) -> None:
+    try:
+        await asyncio.sleep(delay)
+        signature = _guide_signature()
+        if signature == _JELLYFIN_REFRESH_STATE["signature"]:
+            return
+        _JELLYFIN_REFRESH_STATE["signature"] = signature
+        _JELLYFIN_REFRESH_STATE["last_run"] = time.monotonic()
+        await trigger_jellyfin_refresh()
+    finally:
+        _JELLYFIN_REFRESH_STATE["pending"] = None
+
+
+def request_jellyfin_guide_refresh_if_changed() -> None:
+    """Refresh Jellyfin's guide for automatic (scrape/schedule-driven) changes only
+    when the guide contents actually changed, at most once per
+    JELLYFIN_AUTO_REFRESH_MIN_INTERVAL. User-initiated changes still call
+    trigger_jellyfin_refresh() directly for an immediate refresh."""
+    if _JELLYFIN_REFRESH_STATE["pending"] is not None:
+        return
+    if _guide_signature() == _JELLYFIN_REFRESH_STATE["signature"]:
+        return
+    if _JELLYFIN_REFRESH_STATE["last_run"] == 0.0:
+        # First automatic refresh after startup: wait a minute so the initial
+        # burst of channel scrapes lands in one refresh instead of the first one.
+        delay = 60.0
+    else:
+        elapsed = time.monotonic() - _JELLYFIN_REFRESH_STATE["last_run"]
+        delay = max(0.0, JELLYFIN_AUTO_REFRESH_MIN_INTERVAL - elapsed)
+    _JELLYFIN_REFRESH_STATE["pending"] = _spawn_background_task(
+        _debounced_jellyfin_refresh(delay), "debounced Jellyfin guide refresh"
+    )
+
 def save_team(
     team_id: str,
     name: str,
@@ -738,8 +826,13 @@ class MetricBatchWriter:
             self.task = asyncio.create_task(self._run(), name="sqlite metric batch writer")
 
     async def enqueue(self, item: tuple) -> None:
+        # Never block a streaming hot path on metrics: if SQLite falls behind,
+        # drop the row instead of stalling the caller.
         self.start()
-        await self.queue.put(item)
+        try:
+            self.queue.put_nowait(item)
+        except asyncio.QueueFull:
+            LOGGER.debug("Metric queue full; dropping %s row", item[0])
 
     @staticmethod
     def _write_batch_sync(items: list[tuple]) -> None:
@@ -768,22 +861,33 @@ class MetricBatchWriter:
                         batch.append(await asyncio.wait_for(self.queue.get(), timeout))
                     except asyncio.TimeoutError:
                         break
-                await asyncio.to_thread(self._write_batch_sync, batch)
-                for _ in batch:
-                    self.queue.task_done()
+                await self._write_batch_safely(batch)
         except asyncio.CancelledError:
             remaining = []
             while not self.queue.empty():
                 remaining.append(self.queue.get_nowait())
             if remaining:
-                await asyncio.to_thread(self._write_batch_sync, remaining)
-                for _ in remaining:
-                    self.queue.task_done()
+                await self._write_batch_safely(remaining)
             raise
 
-    async def stop(self) -> None:
+    async def _write_batch_safely(self, batch: list[tuple]) -> None:
+        """A locked or full database must not kill the writer task: that would
+        silently drop every later metric and leave queue.join() in stop() hanging
+        shutdown forever. Drop the failed batch, log once, keep running."""
+        try:
+            await asyncio.to_thread(self._write_batch_sync, batch)
+        except Exception as exc:
+            _log_failure(f"write metric batch ({len(batch)} rows dropped)", exc)
+        finally:
+            for _ in batch:
+                self.queue.task_done()
+
+    async def stop(self, timeout: float = 5.0) -> None:
         if self.task:
-            await self.queue.join()
+            try:
+                await asyncio.wait_for(self.queue.join(), timeout)
+            except asyncio.TimeoutError:
+                LOGGER.warning("Metric writer did not drain within %.0fs; dropping queued rows", timeout)
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
             self.task = None
@@ -2528,6 +2632,66 @@ def _mark_scrape_finished(data: dict, result: str, error: str = "") -> None:
     data["scrape_error"] = error
 
 
+_CANDIDATE_HEALTH_FIELDS = ("last_health_check", "last_health_ok", "consecutive_failures", "session_compatible")
+
+
+def candidate_source_key(candidate: dict) -> Tuple[str, str, str]:
+    """Identity of a stream source ignoring its query string: aggregator URLs carry
+    rotating tokens, so the same CDN stream gets a new URL on every rescrape."""
+    parts = urllib.parse.urlsplit(str(candidate.get("url") or ""))
+    return (str(candidate.get("provider") or "").lower(), parts.netloc.lower(), parts.path)
+
+
+def _merge_stream_candidates(
+    previous: List[dict],
+    active_index: int,
+    fresh: List[dict],
+    keep_active: bool,
+) -> Tuple[List[dict], int]:
+    """Merge a rescrape's candidates into the current list without disturbing playback.
+
+    Previously every rescrape (every 5 minutes, forever, for 24/7 channels) replaced
+    the list and reset active_index to 0 - an unsignaled mid-playback source swap
+    even when the current stream was perfectly healthy. Now a healthy active
+    candidate stays first (and stays the object the channel session is playing;
+    if the rescrape found the same source with a fresh token, only its URL is
+    refreshed), fresh candidates become standbys, and known standbys keep their
+    health history. Returns (candidates, active_index).
+    """
+    previous_by_key = {candidate_source_key(c): c for c in previous if c.get("url")}
+    merged: List[dict] = []
+    seen: Set[Tuple[str, str, str]] = set()
+
+    if keep_active and 0 <= active_index < len(previous):
+        active = previous[active_index]
+        if active.get("url"):
+            active_key = candidate_source_key(active)
+            for candidate in fresh:
+                if candidate.get("url") and candidate_source_key(candidate) == active_key:
+                    for field in ("url", "referer", "origin"):
+                        if candidate.get(field):
+                            active[field] = candidate[field]
+                    break
+            merged.append(active)
+            seen.add(active_key)
+
+    for candidate in fresh:
+        if not candidate.get("url"):
+            continue
+        key = candidate_source_key(candidate)
+        if key in seen:
+            continue
+        old = previous_by_key.get(key)
+        if old is not None:
+            for field in _CANDIDATE_HEALTH_FIELDS:
+                if field in old and field not in candidate:
+                    candidate[field] = old[field]
+        merged.append(candidate)
+        seen.add(key)
+
+    return merged[:MAX_STREAM_CANDIDATES], 0
+
+
 async def trigger_scrape(team_id: str):
     if team_id in _SCRAPE_IN_FLIGHT:
         LOGGER.debug("Skipping duplicate scrape team=%s", team_id)
@@ -2638,8 +2802,14 @@ async def _trigger_scrape_unlocked(team_id: str):
         return
     was_healthy = current.get("is_healthy", False)
     if new_candidates:
-        current["candidates"] = new_candidates
-        current["active_index"] = 0
+        merged, merged_index = _merge_stream_candidates(
+            current.get("candidates", []),
+            current.get("active_index", 0),
+            new_candidates,
+            keep_active=bool(was_healthy),
+        )
+        current["candidates"] = merged
+        current["active_index"] = merged_index
         is_healthy = True
         current["is_healthy"] = True
     elif previous_candidates:
@@ -2668,7 +2838,7 @@ async def _trigger_scrape_unlocked(team_id: str):
         )
 
     if new_candidates:
-        _spawn_background_task(trigger_jellyfin_refresh(), "refresh Jellyfin guide")
+        request_jellyfin_guide_refresh_if_changed()
 
 
 async def _trigger_scrape(team_id: str):
@@ -2770,11 +2940,14 @@ async def _trigger_adaptive_bitrate_fallback(team_id: str, current_candidate_idx
     )
     return True
 
-async def check_stream_health(url: str, referer: str) -> bool:
+async def check_stream_health(url: str, referer: str, origin: str = "") -> bool:
     owns_client = SHARED_HTTP_CLIENT is None
     client = SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=5.0, follow_redirects=True, http2=True)
     try:
-        return await verify_stream_live(client, url, referer)
+        # Origin must be forwarded: streams captured with one (Playwright-intercepted
+        # providers) play through the proxy, which sends it, but failed every probe
+        # without it - causing endless false failovers.
+        return await verify_stream_live(client, url, referer, origin=origin)
     except Exception as exc:
         _log_failure("stream health check", exc)
         return False
@@ -2804,8 +2977,13 @@ async def failover_monitor():
             current = stream_state.get(team_id)
             if current is not None:
                 if candidates:
-                    current["candidates"] = candidates
-                    current["active_index"] = 0
+                    # All known candidates just failed, so nothing is worth keeping
+                    # active, but standbys found again keep their health history.
+                    merged, merged_index = _merge_stream_candidates(
+                        current.get("candidates", []), 0, candidates, keep_active=False
+                    )
+                    current["candidates"] = merged
+                    current["active_index"] = merged_index
                     current["is_healthy"] = True
                 else:
                     LOGGER.warning(
@@ -2832,7 +3010,7 @@ async def failover_monitor():
 
             async def probe_standby(team_id: str, candidate: dict) -> None:
                 async with standby_semaphore:
-                    is_alive = await check_stream_health(candidate["url"], candidate.get("referer", ""))
+                    is_alive = await check_stream_health(candidate["url"], candidate.get("referer", ""), candidate.get("origin", ""))
                 candidate["last_health_check"] = time.time()
                 candidate["last_health_ok"] = is_alive
 
@@ -2842,7 +3020,7 @@ async def failover_monitor():
                 async with active_semaphore:
                     try:
                         is_alive = await asyncio.wait_for(
-                            check_stream_health(active_stream["url"], active_stream.get("referer", "")),
+                            check_stream_health(active_stream["url"], active_stream.get("referer", ""), active_stream.get("origin", "")),
                             timeout=8.0,
                         )
                     except asyncio.TimeoutError:
@@ -4032,7 +4210,7 @@ def _multiview_member_validation(member_team_ids: List[str]) -> Optional[str]:
     return None
 
 
-_MULTIVIEW_SEGMENT_NAME_RE = re.compile(r"^seg_\d{5}\.ts$")
+_MULTIVIEW_SEGMENT_NAME_RE = re.compile(r"^seg_\d{5,}\.ts$")
 
 
 @app.get("/multiview/{channel_id}/index.m3u8")
@@ -4234,7 +4412,7 @@ async def _serve_placeholder_stream(request: Request):
     return RedirectResponse(url=f"http://{host}/placeholder/index.m3u8")
 
 
-_PLACEHOLDER_SEGMENT_NAME_RE = re.compile(r"^seg_\d{5}\.ts$")
+_PLACEHOLDER_SEGMENT_NAME_RE = re.compile(r"^seg_\d{5,}\.ts$")
 
 
 @app.get("/placeholder/index.m3u8")
@@ -5547,6 +5725,9 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
             </div>
         </div>
         <script>
+            function escapeHtml(value) {{
+                return String(value ?? '').replace(/[&<>"']/g, c => ({{'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}})[c]);
+            }}
             function showToast(message, duration = 3000, isError = false) {{
                 const toast = document.createElement('div');
                 toast.className = 'toast' + (isError ? ' error' : '');
@@ -5682,7 +5863,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                        if (statusEl) statusEl.textContent = ch.running ? '🟢 Running' : '⚪ Stopped';
                        if (failureEl) {{
                            if (!ch.running && ch.last_error) {{
-                               failureEl.innerHTML = `<p class="meta-text" style="color:var(--danger-text);">⚠️ ${{ch.last_error}} (failed ${{ch.failure_count}}x, retrying in ${{ch.retry_in_seconds}}s)</p>`;
+                               failureEl.innerHTML = `<p class="meta-text" style="color:var(--danger-text);">⚠️ ${{escapeHtml(ch.last_error)}} (failed ${{escapeHtml(ch.failure_count)}}x, retrying in ${{escapeHtml(ch.retry_in_seconds)}}s)</p>`;
                            }} else {{
                                failureEl.innerHTML = '';
                            }}
@@ -5737,7 +5918,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                 const form = document.createElement('form');
                 form.method = 'POST';
                 form.action = '/bulk-favorite';
-                form.innerHTML = `<input type="hidden" name="team_ids" value="${{ids}}">`;
+                form.innerHTML = `<input type="hidden" name="team_ids" value="${{escapeHtml(ids)}}">`;
                 document.body.appendChild(form);
                 form.submit();
             }}
@@ -5750,7 +5931,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                 const form = document.createElement('form');
                 form.method = 'POST';
                 form.action = '/bulk-unfavorite';
-                form.innerHTML = `<input type="hidden" name="team_ids" value="${{ids}}">`;
+                form.innerHTML = `<input type="hidden" name="team_ids" value="${{escapeHtml(ids)}}">`;
                 document.body.appendChild(form);
                 form.submit();
             }}
@@ -5764,7 +5945,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                 const form = document.createElement('form');
                 form.method = 'POST';
                 form.action = '/bulk-remove';
-                form.innerHTML = `<input type="hidden" name="team_ids" value="${{ids}}">`;
+                form.innerHTML = `<input type="hidden" name="team_ids" value="${{escapeHtml(ids)}}">`;
                 document.body.appendChild(form);
                 form.submit();
             }}
@@ -5895,12 +6076,12 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                                 }} else {{
                                     rateLimitEl.innerHTML = health.map(p => {{
                                         if (p.sustained_failure) {{
-                                            return `<div style="background: var(--surface-2); padding: 0.75rem; border-radius: 6px; border: 1px solid var(--danger);"><div style="font-weight:600;">${{p.provider}}</div><div style="color: var(--danger);">⛔ Likely dead — 0% over ${{p.samples_5d}} attempts/5d</div></div>`;
+                                            return `<div style="background: var(--surface-2); padding: 0.75rem; border-radius: 6px; border: 1px solid var(--danger);"><div style="font-weight:600;">${{escapeHtml(p.provider)}}</div><div style="color: var(--danger);">⛔ Likely dead — 0% over ${{p.samples_5d}} attempts/5d</div></div>`;
                                         }}
                                         const color = p.at_risk ? 'var(--danger)' : 'var(--success)';
                                         const icon = p.at_risk ? '⚠️' : '✅';
                                         const rateText = p.success_rate === null ? 'no data this hour' : `${{p.success_rate}}% (${{p.samples_hour}} samples/hr)`;
-                                        return `<div style="background: var(--surface-2); padding: 0.75rem; border-radius: 6px; border: 1px solid var(--border);"><div style="font-weight:600;">${{p.provider}}</div><div style="color:${{color}};">${{icon}} ${{rateText}}</div></div>`;
+                                        return `<div style="background: var(--surface-2); padding: 0.75rem; border-radius: 6px; border: 1px solid var(--border);"><div style="font-weight:600;">${{escapeHtml(p.provider)}}</div><div style="color:${{color}};">${{icon}} ${{escapeHtml(rateText)}}</div></div>`;
                                     }}).join('');
                                 }}
                             }}
@@ -5909,7 +6090,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                                 const playback = await fetch('/api/playback-stats').then(r => r.json());
                                 const topEl = document.getElementById('top-teams-list');
                                 if (topEl && playback.top_watched_teams) {{
-                                    topEl.innerHTML = playback.top_watched_teams.map(t => `<div style="padding: 0.5rem; background: var(--surface-2); border-radius: 6px; display: flex; justify-content: space-between;"><span>${{t.team_id}}</span><span style="color: var(--success);">${{t.plays}} plays</span></div>`).join('');
+                                    topEl.innerHTML = playback.top_watched_teams.map(t => `<div style="padding: 0.5rem; background: var(--surface-2); border-radius: 6px; display: flex; justify-content: space-between;"><span>${{escapeHtml(t.team_id)}}</span><span style="color: var(--success);">${{escapeHtml(t.plays)}} plays</span></div>`).join('');
                                 }}
                             }}
                         }} catch (e) {{
