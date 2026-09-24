@@ -108,7 +108,7 @@ to a system-installed `ffmpeg` (via PATH or `FFMPEG_PATH`) and shows a dashboard
 
 **Building a self-contained exe with FFmpeg included:**
 1. Download an FFmpeg build with NVENC (NVIDIA) or Quick Sync (Intel) support from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) (the "essentials" build is a static single-file `ffmpeg.exe` with no extra DLLs) or the [BtbN builds](https://github.com/BtbN/FFmpeg-Builds/releases).
-2. Extract it. By default the build looks for `ffmpeg.exe` at `%LOCALAPPDATA%\ffmpeg\bin\ffmpeg.exe`; place it there, or set the `FFMPEG_BUNDLE_PATH` environment variable to wherever you extracted it before running `build-self-contained.ps1`.
+2. Extract it. By default the build looks for `ffmpeg.exe` at `%LOCALAPPDATA%\ffmpeg\bin\ffmpeg.exe` (and bundles `ffprobe.exe` too if it sits alongside it); place it there, or set the `FFMPEG_BUNDLE_PATH` environment variable to wherever you extracted it before running `build-installer.ps1`.
 3. Run the build. The script prints whether it found and bundled an ffmpeg binary; if not found, the build still succeeds and just requires a separate install at runtime (see below).
 4. Verify hardware encoding is available in your extracted build: `ffmpeg -encoders | findstr "nvenc qsv"`.
 
@@ -152,33 +152,73 @@ If `DB_FILE` is relative, it is stored in that same user-data directory, so the
 application remains writable regardless of where the `.exe` is launched. An
 absolute `DB_FILE` path is honored.
 
-### Windows executable build
+### Windows executable build and installer
 
-Build from the project directory with a clean PyInstaller run:
-
-```powershell
-.\build-self-contained.ps1
-```
-
-The script runs the following equivalent commands:
+Jellyball ships as an installable Windows service, built in one step:
 
 ```powershell
-python -m pip install -r requirements.txt pyinstaller playwright
-python -m playwright install chromium
-python -m PyInstaller --clean --noconfirm jellyfin-sports-proxy.spec
+.\build-installer.ps1
 ```
 
-The resulting one-file executable is written to `dist\jellyfin-sports-proxy.exe`
-and includes the application dependencies, runtime assets, and the installed
-Playwright Chromium browser. The build requires Chromium to be installed locally
-before PyInstaller runs. The build script stops on dependency, browser, or
-PyInstaller failures and verifies that the executable was produced. At runtime,
-the one-file bootloader extracts its bundled payload to a temporary directory;
-this is normal and does not require files beside the executable. If the bundled
-browser cannot launch, the application still starts and uses HTTP extraction.
-You may place `.env` beside the executable for machine/package-level defaults;
-writable settings and the SQLite database remain under the per-user Jellyball
-data directory.
+The script:
+
+1. Creates (or reuses) a build-only virtual environment at `.venv-build`, so
+   the build never depends on or pollutes your regular Python environment.
+2. Installs `requirements-build.txt` (runtime dependencies, PyInstaller,
+   pywin32) into it.
+3. Installs the Playwright Chromium build into the default per-user cache
+   (`%LOCALAPPDATA%\ms-playwright`).
+4. Runs `python -m PyInstaller --clean --noconfirm jellyball.spec`, producing
+   a **ONEDIR** build at `dist\Jellyball\` with two executables sharing one
+   `_internal` payload:
+   - `Jellyball.exe` - windowed, used by the service (`--service`) and for a
+     desktop tray run (no arguments).
+   - `JellyballConsole.exe` - the same app with a visible console, for
+     troubleshooting (`JellyballConsole.exe --console` runs headless in the
+     foreground with logs printed live).
+5. Locates Inno Setup 6's `ISCC.exe` (on `PATH`, or its default install
+   locations) and compiles `installer\jellyball.iss` into
+   `installer\Output\JellyballSetup-<version>.exe`. If Inno Setup isn't
+   installed, the script prints `winget install JRSoftware.InnoSetup` and
+   exits non-zero — the PyInstaller build in `dist\Jellyball\` is still left
+   in place.
+
+The PyInstaller build fails fast (with a clear message) if the installed
+Playwright version's Chromium build isn't present in the browser cache; run
+`python -m playwright install chromium` first if that happens. FFmpeg
+bundling for Multi-View is optional and configured the same way described
+above (`FFMPEG_BUNDLE_PATH`).
+
+#### The installer
+
+Running `JellyballSetup-<version>.exe` (requires administrator privileges):
+
+- Installs the application to `%ProgramFiles%\Jellyball` by default.
+- Asks for the server port (default `8000`), a dashboard username/password,
+  and whether to allow other computers on the network to connect. These are
+  written once to `%ProgramData%\Jellyball\.env` and are **never overwritten**
+  by a later upgrade — the wizard skips that page entirely if a `.env`
+  already exists there.
+- Registers a Windows service named **Jellyball** (display name "Jellyball
+  Sports Proxy"), running `Jellyball.exe --service` as the virtual account
+  `NT SERVICE\Jellyball`, set to start automatically (delayed) and to restart
+  itself on crash. Application data, the SQLite database, and
+  `jellyball.log` live in `%ProgramData%\Jellyball`; permissions there are
+  restricted to the service account, Administrators, and SYSTEM.
+- Adds a firewall rule (local subnet only, on the configured port) only if
+  network access was allowed; otherwise the service only listens on
+  `127.0.0.1`.
+- Adds a "Jellyball Dashboard" Start Menu shortcut pointing at
+  `http://localhost:<port>/`, and shows the M3U/XMLTV URLs to paste into
+  Jellyfin on the final wizard page.
+- On uninstall, stops and removes the service and firewall rule; you're then
+  asked (default: No) whether to also delete `%ProgramData%\Jellyball`
+  (settings and database).
+
+Use `JellyballConsole.exe` directly (from an admin console, with
+`--console`) to run Jellyball in the foreground with visible logs when
+diagnosing an issue with the installed service — stop the `Jellyball` service
+first so the two don't fight over the same port and data directory.
 
 ### Jellyfin channel metadata (Method 1)
 
