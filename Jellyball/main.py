@@ -150,7 +150,6 @@ from collections import OrderedDict, deque
 from contextlib import asynccontextmanager, contextmanager
 from datetime import date, datetime, timedelta, timezone
 from xml.sax.saxutils import escape as xml_escape
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import FastAPI, Form, Request, Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -175,6 +174,9 @@ from stream_extractor import (
     fetch_streams_from_page,
     fetch_bounded_text,
     playwright_intercept_streams,
+    playwright_page,
+    playwright_pages_in_use,
+    make_soup,
     verify_stream_live,
     DEFAULT_USER_AGENT,
     rank_streams,
@@ -1113,6 +1115,78 @@ def _provider_search_semaphore() -> asyncio.Semaphore:
     return _PROVIDER_SEARCH_SEMAPHORE
 
 
+# --- Shared TTL cache + single-flight for aggregator index/category pages -----
+# Every team's scrape cycle calls the same handful of ACTIVE_PROVIDERS, each of
+# which re-fetches (and, on a Cloudflare block, re-renders via Playwright) the
+# exact same index/category URLs. With dozens of teams configured this repeats
+# the same network fetch (and possibly a full Chromium render) many times a
+# minute for content that changes at most once a minute. Caching the raw HTML
+# per URL, with single-flight de-duplication for concurrent callers, collapses
+# all of that down to one fetch per URL per TTL window.
+SCRAPE_INDEX_CACHE_SECONDS = bounded_float(os.getenv("SCRAPE_INDEX_CACHE_SECONDS", "60"), 60.0, 0.0, 3600.0)
+_SCRAPE_INDEX_CACHE_MAX_ENTRIES = 64
+# Failures (including "not found") are cached only briefly, so a transient
+# outage doesn't leave every team blind for a full cache window.
+_SCRAPE_INDEX_FAILURE_CACHE_SECONDS = min(5.0, SCRAPE_INDEX_CACHE_SECONDS) if SCRAPE_INDEX_CACHE_SECONDS > 0 else 0.0
+_SCRAPE_INDEX_CACHE: "OrderedDict[str, tuple[float, Optional[str]]]" = OrderedDict()
+_SCRAPE_INDEX_INFLIGHT: Dict[str, asyncio.Future] = {}
+_SCRAPE_INDEX_INFLIGHT_LOOP = None
+
+
+async def _get_cached_index_html(url: str, fetcher) -> Optional[str]:
+    """Return `url`'s index-page HTML from the shared TTL cache, or run
+    `fetcher()` (an async, argument-less callable that performs the actual
+    fetch, HTTP and/or Playwright fallback) once per TTL window/failure window,
+    sharing the in-flight call across any other team requesting the same URL
+    at the same time.
+    """
+    global _SCRAPE_INDEX_INFLIGHT_LOOP
+
+    now = time.monotonic()
+    cached = _SCRAPE_INDEX_CACHE.get(url)
+    if cached is not None:
+        expires_at, cached_html = cached
+        if now < expires_at:
+            _SCRAPE_INDEX_CACHE.move_to_end(url)
+            return cached_html
+        _SCRAPE_INDEX_CACHE.pop(url, None)
+
+    loop = asyncio.get_running_loop()
+    if _SCRAPE_INDEX_INFLIGHT_LOOP is not loop:
+        # A fresh loop (e.g. a new test run) can't share futures created on a
+        # prior, now-closed loop.
+        _SCRAPE_INDEX_INFLIGHT.clear()
+        _SCRAPE_INDEX_INFLIGHT_LOOP = loop
+
+    existing = _SCRAPE_INDEX_INFLIGHT.get(url)
+    if existing is not None:
+        return await asyncio.shield(existing)
+
+    future: asyncio.Future = loop.create_future()
+    _SCRAPE_INDEX_INFLIGHT[url] = future
+    html_text: Optional[str] = None
+    try:
+        try:
+            html_text = await fetcher()
+        except Exception as exc:
+            _log_failure(f"fetch index page {url}", exc)
+            html_text = None
+        ttl = SCRAPE_INDEX_CACHE_SECONDS if html_text is not None else _SCRAPE_INDEX_FAILURE_CACHE_SECONDS
+        if ttl > 0:
+            _SCRAPE_INDEX_CACHE[url] = (time.monotonic() + ttl, html_text)
+            _SCRAPE_INDEX_CACHE.move_to_end(url)
+            while len(_SCRAPE_INDEX_CACHE) > _SCRAPE_INDEX_CACHE_MAX_ENTRIES:
+                _SCRAPE_INDEX_CACHE.popitem(last=False)
+        return html_text
+    finally:
+        # Resolve the future even on cancellation so any other team waiting on
+        # this URL isn't left hanging until its own provider-level timeout.
+        if not future.done():
+            future.set_result(html_text)
+        if _SCRAPE_INDEX_INFLIGHT.get(url) is future:
+            _SCRAPE_INDEX_INFLIGHT.pop(url, None)
+
+
 class HtmlAggregatorScraper(BaseProvider):
     """Configurable adapter for aggregators that expose linked event pages."""
 
@@ -1149,69 +1223,91 @@ class HtmlAggregatorScraper(BaseProvider):
             return False
         return True
 
+    async def _fetch_index_page(self, client: httpx.AsyncClient, page_url: str, browser: Optional[Browser]) -> Optional[str]:
+        """Fetch one index/category page: fast HTTP first, falling back to a
+        Playwright-rendered page when the site is behind a Cloudflare check."""
+        page_html = await fetch_bounded_text(
+            client,
+            page_url,
+            headers={"User-Agent": DEFAULT_USER_AGENT, "Referer": self.base_url},
+            timeout=8.0,
+        )
+        if not page_html and browser and browser.is_connected():
+            try:
+                async with playwright_page(browser, user_agent=DEFAULT_USER_AGENT) as page:
+                    await page.goto(page_url, wait_until="domcontentloaded", timeout=35000)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass
+                    page_html = await page.content()
+            except Exception as exc:
+                _log_failure(f"{self.name} Cloudflare bypass for {page_url}", exc)
+        return page_html
+
+    def _parse_matches_from_html(
+        self,
+        page_html: str,
+        page_url: str,
+        search_terms: List[str],
+        matches: List[tuple[str, int, str]],
+        seen_matches: Set[str],
+    ) -> None:
+        """Pure CPU work (BeautifulSoup parse + per-anchor fuzzy matching),
+        split out so it can run in a worker thread via asyncio.to_thread instead
+        of blocking the shared event loop that also serves live video segments.
+        Mutates `matches`/`seen_matches` in place to preserve the original
+        cross-page, cumulative MAX_PROVIDER_EVENTS cutoff.
+        """
+        soup = make_soup(page_html)
+        for anchor in soup.find_all("a", href=True):
+            href = str(anchor.get("href") or "")
+            if not self._is_event_link(href, page_url):
+                continue
+            match_url = urllib.parse.urljoin(page_url, href)
+            if match_url in seen_matches:
+                continue
+            title = str(anchor.get("title") or "")
+            raw_text = anchor.get_text(" ", strip=True)
+            direct_text = " ".join(
+                part for part in (raw_text, title, str(anchor.get("aria-label") or ""), href) if part
+            )
+            matched, score, _ = match_team(
+                search_terms,
+                direct_text,
+                href=href,
+                title=title,
+            )
+            if not matched:
+                # Some providers put the team names in the card rather
+                # than the anchor. Only accept that fallback for a
+                # high-confidence full identity, not a generic nickname.
+                candidate_text = self._anchor_context(anchor) or href
+                context_matched, context_score, _ = match_team(search_terms, candidate_text, href=href, title=title)
+                if context_matched and context_score >= 110:
+                    matched, score = context_matched, context_score
+            if matched:
+                seen_matches.add(match_url)
+                matches.append((match_url, score, raw_text or title or match_url))
+                if len(matches) >= MAX_PROVIDER_EVENTS:
+                    return
+
     async def _find_matches(self, client: httpx.AsyncClient, search_terms: List[str], browser: Optional[Browser] = None) -> List[tuple[str, int, str]]:
         matches: List[tuple[str, int, str]] = []
         seen_matches: Set[str] = set()
         for page_url in self.get_scan_urls():
             try:
-                page_html = await fetch_bounded_text(
-                    client,
-                    page_url,
-                    headers={"User-Agent": DEFAULT_USER_AGENT, "Referer": self.base_url},
-                    timeout=8.0,
+                page_html = await _get_cached_index_html(
+                    page_url, lambda pu=page_url: self._fetch_index_page(client, pu, browser)
                 )
-                
-                # Cloudflare / Timeout Bypass via Playwright Context
-                if not page_html and browser and browser.is_connected():
-                    try:
-                        context = await browser.new_context(user_agent=DEFAULT_USER_AGENT)
-                        page = await context.new_page()
-                        await page.goto(page_url, wait_until="domcontentloaded", timeout=35000)
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=8000)
-                        except Exception:
-                            pass
-                        page_html = await page.content()
-                        await context.close()
-                    except Exception as exc:
-                        _log_failure(f"{self.name} Cloudflare bypass for {page_url}", exc)
-                        if 'context' in locals(): await context.close()
-
                 if not page_html:
                     continue
-                    
-                soup = BeautifulSoup(page_html, "html.parser")
-                for anchor in soup.find_all("a", href=True):
-                    href = str(anchor.get("href") or "")
-                    if not self._is_event_link(href, page_url):
-                        continue
-                    match_url = urllib.parse.urljoin(page_url, href)
-                    if match_url in seen_matches:
-                        continue
-                    title = str(anchor.get("title") or "")
-                    raw_text = anchor.get_text(" ", strip=True)
-                    direct_text = " ".join(
-                        part for part in (raw_text, title, str(anchor.get("aria-label") or ""), href) if part
-                    )
-                    matched, score, _ = match_team(
-                        search_terms,
-                        direct_text,
-                        href=href,
-                        title=title,
-                    )
-                    if not matched:
-                        # Some providers put the team names in the card rather
-                        # than the anchor. Only accept that fallback for a
-                        # high-confidence full identity, not a generic nickname.
-                        candidate_text = self._anchor_context(anchor) or href
-                        context_matched, context_score, _ = match_team(search_terms, candidate_text, href=href, title=title)
-                        if context_matched and context_score >= 110:
-                            matched, score = context_matched, context_score
-                    if matched:
-                        seen_matches.add(match_url)
-                        matches.append((match_url, score, raw_text or title or match_url))
-                        if len(matches) >= MAX_PROVIDER_EVENTS:
-                            return matches
+
+                await asyncio.to_thread(
+                    self._parse_matches_from_html, page_html, page_url, search_terms, matches, seen_matches
+                )
+                if len(matches) >= MAX_PROVIDER_EVENTS:
+                    return matches
             except Exception as exc:
                 _log_failure(f"scan provider={self.name} page", exc)
         return matches
@@ -1486,6 +1582,51 @@ class TheTVAppScraper(HtmlAggregatorScraper):
             ["/tv/", "/watch/", "/channel/", "/sports-channels/"]
         )
 
+    def _find_best_channel_match(
+        self, html_text: str, raw_terms_lower: List[str], search_terms: List[str]
+    ) -> tuple[Optional[str], int, str]:
+        """Pure CPU work (BeautifulSoup parse + per-anchor fuzzy matching over
+        every listed channel), split out so it can run via asyncio.to_thread
+        instead of blocking the shared event loop."""
+        soup = make_soup(html_text)
+        best_url, best_score, best_title = None, 0, ""
+
+        for anchor in soup.find_all("a", href=True):
+            href = str(anchor.get("href") or "")
+            text = self._anchor_context(anchor) or anchor.get_text(" ", strip=True)
+            text_lower = text.lower()
+
+            # Direct linear network match override (e.g., ESPN, RedZone, FS1)
+            matched = False
+            score = 0
+            for rt in raw_terms_lower:
+                if _channel_term_matches(text_lower, [rt]) or _channel_term_matches(href, [rt]):
+                    matched = True
+                    score = 120
+                    break
+
+            # Fallback to standard team matcher if direct string isn't found
+            if not matched:
+                matched, score, _ = match_team(search_terms, text, href=href)
+
+            if matched and not _is_non_english_channel(text):
+                # Prefer the most specific matching channel when a page
+                # contains both a base network and numbered variants.
+                specificity = max(
+                    (len(str(term).split()) * 10 + len(str(term)) for term in raw_terms_lower if _channel_term_matches(text, [term])),
+                    default=0,
+                )
+                ranked_score = score + specificity
+            else:
+                ranked_score = 0
+
+            if ranked_score > best_score:
+                best_url = urllib.parse.urljoin(self.base_url, href)
+                best_score = ranked_score
+                best_title = text
+
+        return best_url, best_score, best_title
+
     async def search(self, query_or_terms, browser: Optional[Browser] = None, http_client: Optional[httpx.AsyncClient] = None) -> List[dict]:
         if not browser or not browser.is_connected():
             return []
@@ -1495,96 +1636,56 @@ class TheTVAppScraper(HtmlAggregatorScraper):
         streams = []
 
         try:
-            context = await browser.new_context(user_agent=DEFAULT_USER_AGENT)
-            page = await context.new_page()
-
-            target_url = f"{self.base_url}/tv/"
-            try:
-                await page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
+            async with playwright_page(browser, user_agent=DEFAULT_USER_AGENT) as page:
+                target_url = f"{self.base_url}/tv/"
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=8000)
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-            html = await page.content()
-            if "just a moment" in html.lower() or "cf-browser-verification" in html.lower():
-                await context.close()
-                return []
-
-            soup = BeautifulSoup(html, "html.parser")
-
-            best_url, best_score, best_title = None, 0, ""
-
-            for anchor in soup.find_all("a", href=True):
-                href = str(anchor.get("href") or "")
-                text = self._anchor_context(anchor) or anchor.get_text(" ", strip=True)
-                text_lower = text.lower()
-
-                # Direct linear network match override (e.g., ESPN, RedZone, FS1)
-                matched = False
-                score = 0
-                for rt in raw_terms_lower:
-                    if _channel_term_matches(text_lower, [rt]) or _channel_term_matches(href, [rt]):
-                        matched = True
-                        score = 120
-                        break
-
-                # Fallback to standard team matcher if direct string isn't found
-                if not matched:
-                    matched, score, _ = match_team(search_terms, text, href=href)
-
-                if matched and not _is_non_english_channel(text):
-                    # Prefer the most specific matching channel when a page
-                    # contains both a base network and numbered variants.
-                    specificity = max(
-                        (len(str(term).split()) * 10 + len(str(term)) for term in raw_terms_lower if _channel_term_matches(text, [term])),
-                        default=0,
-                    )
-                    ranked_score = score + specificity
-                else:
-                    ranked_score = 0
-
-                if ranked_score > best_score:
-                    best_url = urllib.parse.urljoin(self.base_url, href)
-                    best_score = ranked_score
-                    best_title = text
-
-            if best_url:
-                def handle_request(request):
-                    req_url = request.url
-                    if _is_playlist_request_url(req_url) and validate_http_url(req_url):
-                        streams.append({
-                            "url": req_url,
-                            "referer": request.headers.get("referer", best_url),
-                            "origin": request.headers.get("origin", ""),
-                            "provider": self.name,
-                            "match_score": best_score,
-                            "match_title": best_title,
-                            "discovery_method": "playwright"
-                        })
-
-                page.on("request", handle_request)
-
-                try:
-                    await page.goto(best_url, wait_until="domcontentloaded", timeout=25000)
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
                     try:
                         await page.wait_for_load_state("networkidle", timeout=8000)
                     except Exception:
                         pass
-                    await page.mouse.click(400, 300)
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=5000)
-                    except Exception:
-                        pass
                 except Exception:
                     pass
 
-            await context.close()
+                html = await page.content()
+                if "just a moment" in html.lower() or "cf-browser-verification" in html.lower():
+                    return []
+
+                best_url, best_score, best_title = await asyncio.to_thread(
+                    self._find_best_channel_match, html, raw_terms_lower, search_terms
+                )
+
+                if best_url:
+                    def handle_request(request):
+                        req_url = request.url
+                        if _is_playlist_request_url(req_url) and validate_http_url(req_url):
+                            streams.append({
+                                "url": req_url,
+                                "referer": request.headers.get("referer", best_url),
+                                "origin": request.headers.get("origin", ""),
+                                "provider": self.name,
+                                "match_score": best_score,
+                                "match_title": best_title,
+                                "discovery_method": "playwright"
+                            })
+
+                    page.on("request", handle_request)
+
+                    try:
+                        await page.goto(best_url, wait_until="domcontentloaded", timeout=25000)
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=8000)
+                        except Exception:
+                            pass
+                        await page.mouse.click(400, 300)
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=5000)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
         except Exception as exc:
             _log_failure("TheTVApp custom extraction", exc)
-            if 'context' in locals(): await context.close()
 
         seen = set()
         deduped = [s for s in streams if s["url"] not in seen and not seen.add(s["url"])]
@@ -1656,56 +1757,75 @@ class DaddyLiveScraper(HtmlAggregatorScraper):
     def __init__(self):
         super().__init__("DaddyLive", os.getenv("AGGREGATOR_6_URL", "https://dlhd.pk"), ["/24-7-channels.php"], ["watch.php"])
 
+    async def _fetch_directory_page(self, client: httpx.AsyncClient, page_url: str, browser: Optional[Browser]) -> Optional[str]:
+        page_html = await fetch_bounded_text(
+            client,
+            page_url,
+            headers={"User-Agent": DEFAULT_USER_AGENT, "Referer": self.base_url},
+            timeout=8.0,
+        )
+        if not page_html and browser and browser.is_connected():
+            try:
+                async with playwright_page(browser, user_agent=DEFAULT_USER_AGENT) as page:
+                    await page.goto(page_url, wait_until="domcontentloaded", timeout=25000)
+                    await asyncio.sleep(2)
+                    page_html = await page.content()
+            except Exception as exc:
+                _log_failure("scan DaddyLive directory with browser", exc)
+        return page_html
+
+    def _parse_channel_matches_from_html(
+        self,
+        page_html: str,
+        page_url: str,
+        search_terms: List[str],
+        matches: List[tuple[str, int, str]],
+        seen_matches: Set[str],
+    ) -> None:
+        """Pure CPU work (BeautifulSoup parse + per-card channel-term matching),
+        split out so it can run via asyncio.to_thread instead of blocking the
+        shared event loop. Mutates `matches`/`seen_matches` in place to preserve
+        the original cross-page, cumulative MAX_PROVIDER_EVENTS cutoff."""
+        soup = make_soup(page_html)
+        for anchor in soup.find_all("a", href=True):
+            href = str(anchor.get("href") or "")
+            if not self._is_event_link(href, page_url):
+                continue
+            match_url = urllib.parse.urljoin(page_url, href)
+            if match_url in seen_matches:
+                continue
+            title = str(anchor.get("title") or anchor.get("data-title") or "")
+            raw_text = anchor.get_text(" ", strip=True)
+            card_text = " ".join(part for part in (raw_text, title, str(anchor.get("aria-label") or "")) if part)
+            if _is_non_english_channel(card_text):
+                continue
+            matched = _channel_term_matches(card_text, search_terms) or _channel_term_matches(href, search_terms)
+            score = max(
+                (len(str(term).split()) * 10 + len(str(term)) for term in search_terms if _channel_term_matches(card_text, [term])),
+                default=0,
+            )
+            if matched:
+                seen_matches.add(match_url)
+                matches.append((match_url, score, raw_text or title or match_url))
+                if len(matches) >= MAX_PROVIDER_EVENTS:
+                    return
+
     async def _find_matches(self, client: httpx.AsyncClient, search_terms: List[str], browser: Optional[Browser] = None) -> List[tuple[str, int, str]]:
         """Match individual directory cards without inheriting the grid's text."""
         matches: List[tuple[str, int, str]] = []
         seen_matches: Set[str] = set()
         for page_url in self.get_scan_urls():
-            page_html = await fetch_bounded_text(
-                client,
-                page_url,
-                headers={"User-Agent": DEFAULT_USER_AGENT, "Referer": self.base_url},
-                timeout=8.0,
+            page_html = await _get_cached_index_html(
+                page_url, lambda pu=page_url: self._fetch_directory_page(client, pu, browser)
             )
-            if not page_html and browser and browser.is_connected():
-                context = None
-                try:
-                    context = await browser.new_context(user_agent=DEFAULT_USER_AGENT)
-                    page = await context.new_page()
-                    await page.goto(page_url, wait_until="domcontentloaded", timeout=25000)
-                    await asyncio.sleep(2)
-                    page_html = await page.content()
-                except Exception as exc:
-                    _log_failure("scan DaddyLive directory with browser", exc)
-                finally:
-                    if context:
-                        await context.close()
             if not page_html:
                 continue
 
-            soup = BeautifulSoup(page_html, "html.parser")
-            for anchor in soup.find_all("a", href=True):
-                href = str(anchor.get("href") or "")
-                if not self._is_event_link(href, page_url):
-                    continue
-                match_url = urllib.parse.urljoin(page_url, href)
-                if match_url in seen_matches:
-                    continue
-                title = str(anchor.get("title") or anchor.get("data-title") or "")
-                raw_text = anchor.get_text(" ", strip=True)
-                card_text = " ".join(part for part in (raw_text, title, str(anchor.get("aria-label") or "")) if part)
-                if _is_non_english_channel(card_text):
-                    continue
-                matched = _channel_term_matches(card_text, search_terms) or _channel_term_matches(href, search_terms)
-                score = max(
-                    (len(str(term).split()) * 10 + len(str(term)) for term in search_terms if _channel_term_matches(card_text, [term])),
-                    default=0,
-                )
-                if matched:
-                    seen_matches.add(match_url)
-                    matches.append((match_url, score, raw_text or title or match_url))
-                    if len(matches) >= MAX_PROVIDER_EVENTS:
-                        return matches
+            await asyncio.to_thread(
+                self._parse_channel_matches_from_html, page_html, page_url, search_terms, matches, seen_matches
+            )
+            if len(matches) >= MAX_PROVIDER_EVENTS:
+                return matches
         return matches
 
     async def _extract_player_streams(self, browser: Browser, watch_url: str, score: int, match_title: str) -> List[dict]:
@@ -1720,58 +1840,49 @@ class DaddyLiveScraper(HtmlAggregatorScraper):
         if not browser or not browser.is_connected():
             return streams
 
-        context = None
         try:
-            context = await browser.new_context(user_agent=DEFAULT_USER_AGENT)
-            page = await context.new_page()
+            async with playwright_page(browser, user_agent=DEFAULT_USER_AGENT) as page:
+                def on_request(request) -> None:
+                    if not _is_playlist_request_url(request.url):
+                        return
+                    url = request.url
+                    if any(s["url"] == url for s in streams):
+                        return
+                    try:
+                        frame_url = request.frame.url if request.frame else ""
+                    except Exception:
+                        frame_url = ""
+                    referer = request.headers.get("referer") or frame_url or watch_url
+                    streams.append({
+                        "url": url,
+                        "provider": self.name,
+                        "match_score": score,
+                        "match_title": match_title,
+                        "referer": referer,
+                        "origin": request.headers.get("origin", ""),
+                        "discovery_method": "playwright",
+                    })
 
-            def on_request(request) -> None:
-                if not _is_playlist_request_url(request.url):
-                    return
-                url = request.url
-                if any(s["url"] == url for s in streams):
-                    return
+                page.on("request", on_request)
                 try:
-                    frame_url = request.frame.url if request.frame else ""
-                except Exception:
-                    frame_url = ""
-                referer = request.headers.get("referer") or frame_url or watch_url
-                streams.append({
-                    "url": url,
-                    "provider": self.name,
-                    "match_score": score,
-                    "match_title": match_title,
-                    "referer": referer,
-                    "origin": request.headers.get("origin", ""),
-                    "discovery_method": "playwright",
-                })
+                    await page.goto(watch_url, wait_until="domcontentloaded", timeout=30000)
+                except Exception as exc:
+                    _log_failure("DaddyLive watch page load", exc)
 
-            page.on("request", on_request)
-            try:
-                await page.goto(watch_url, wait_until="domcontentloaded", timeout=30000)
-            except Exception as exc:
-                _log_failure("DaddyLive watch page load", exc)
-
-            # Let nested iframes attach, then nudge the player to start.
-            await asyncio.sleep(5)
-            for frame in list(page.frames):
+                # Let nested iframes attach, then nudge the player to start.
+                await asyncio.sleep(5)
+                for frame in list(page.frames):
+                    try:
+                        await frame.mouse.click(400, 300)
+                    except Exception:
+                        pass
                 try:
-                    await frame.mouse.click(400, 300)
+                    await page.mouse.click(400, 300)
                 except Exception:
                     pass
-            try:
-                await page.mouse.click(400, 300)
-            except Exception:
-                pass
-            await asyncio.sleep(5)
+                await asyncio.sleep(5)
         except Exception as exc:
             _log_failure("DaddyLive player extraction", exc)
-        finally:
-            if context:
-                try:
-                    await context.close()
-                except Exception:
-                    pass
 
         seen = set()
         return [s for s in streams if s["url"] not in seen and not seen.add(s["url"])]
@@ -1850,6 +1961,14 @@ MEDIA_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 PLAYWRIGHT_CLIENT: Optional[Playwright] = None
 SHARED_BROWSER: Optional[Browser] = None
 _PLAYWRIGHT_LOCK = asyncio.Lock()
+# Periodically recycle the shared Chromium instance so a slow memory/handle leak
+# inside the browser itself can't accumulate for the life of the process. 0
+# disables recycling. Tracked as (id(SHARED_BROWSER), monotonic launch time) so
+# a browser launched by lifespan() (outside get_healthy_browser) still gets a
+# correct clock the first time it's observed here, and so the clock resets
+# whenever the browser object actually changes instead of trusting stale state.
+PLAYWRIGHT_RECYCLE_HOURS = bounded_float(os.getenv("PLAYWRIGHT_RECYCLE_HOURS", "6"), 6.0, 0.0, 168.0)
+_BROWSER_LAUNCH_INFO: Optional[Tuple[int, float]] = None
 _BACKGROUND_TASKS: Set[asyncio.Task] = set()
 _TEAM_SCRAPE_TASKS: Dict[str, asyncio.Task] = {}
 _TEAM_SCRAPE_WAKE_EVENTS: Dict[str, asyncio.Event] = {}
@@ -2103,14 +2222,32 @@ async def get_catalog_entries() -> List[dict]:
 
 
 async def get_healthy_browser() -> Optional[Browser]:
-    """Retrieve the shared browser, or relaunch it if it crashed or disconnected."""
-    global SHARED_BROWSER, PLAYWRIGHT_CLIENT
+    """Retrieve the shared browser, relaunching it if it crashed, disconnected,
+    or is due for a periodic recycle (PLAYWRIGHT_RECYCLE_HOURS). The recycle
+    check runs opportunistically every time a caller acquires the browser, and
+    is skipped whenever a page/context is still open against it, so an
+    in-flight scrape is never torn down mid-navigation.
+    """
+    global SHARED_BROWSER, PLAYWRIGHT_CLIENT, _BROWSER_LAUNCH_INFO
 
     async with _PLAYWRIGHT_LOCK:
         if SHARED_BROWSER and SHARED_BROWSER.is_connected():
-            return SHARED_BROWSER
+            if _BROWSER_LAUNCH_INFO is None or _BROWSER_LAUNCH_INFO[0] != id(SHARED_BROWSER):
+                _BROWSER_LAUNCH_INFO = (id(SHARED_BROWSER), time.monotonic())
+            launched_at = _BROWSER_LAUNCH_INFO[1]
+            recycle_due = (
+                PLAYWRIGHT_RECYCLE_HOURS > 0
+                and time.monotonic() - launched_at >= PLAYWRIGHT_RECYCLE_HOURS * 3600
+            )
+            if not recycle_due or playwright_pages_in_use() > 0:
+                return SHARED_BROWSER
+            LOGGER.info(
+                "Recycling Playwright browser after %.1f hour(s) in service",
+                PLAYWRIGHT_RECYCLE_HOURS,
+            )
+        else:
+            LOGGER.warning("Playwright browser disconnected or missing. Relaunching...")
 
-        LOGGER.warning("Playwright browser disconnected or missing. Relaunching...")
         try:
             if SHARED_BROWSER:
                 await SHARED_BROWSER.close()
@@ -2125,6 +2262,7 @@ async def get_healthy_browser() -> Optional[Browser]:
                 await browser.close()
                 return None
             SHARED_BROWSER = browser
+            _BROWSER_LAUNCH_INFO = (id(browser), time.monotonic())
             return browser
         except Exception as exc:
             _log_failure("relaunch Playwright browser", exc, logging.ERROR)
@@ -2523,14 +2661,18 @@ def _providers_for_search(always_live: bool = False):
     return LINEAR_PROVIDERS if always_live else ACTIVE_PROVIDERS
 
 
-def _get_active_provider_priority() -> Dict[str, int]:
+async def _get_active_provider_priority() -> Dict[str, int]:
     """Return the provider tie-break priority used by rank_streams().
 
     When provider rotation mode is enabled, the preferred provider rotates
     hourly so no single aggregator is hammered with every search, spreading
     load across sources instead of always preferring the same one.
+
+    Uses get_setting_async() (a thread-offloaded SQLite read) instead of the
+    synchronous get_setting(), since this runs on the same event loop that
+    also serves live video segments for every other channel.
     """
-    if get_setting("provider_rotation_mode", "0") != "1":
+    if await get_setting_async("provider_rotation_mode", "0") != "1":
         return _provider_priority
     names = [provider.name for provider in ACTIVE_PROVIDERS]
     if not names:
@@ -2625,14 +2767,18 @@ async def master_scrape(
 
     seen_urls = set()
     deduped = []
-    all_streams = rank_streams(all_streams, _get_active_provider_priority())
+    all_streams = rank_streams(all_streams, await _get_active_provider_priority())
     for s in all_streams:
         u = s.get("url")
         if u and u not in seen_urls:
             seen_urls.add(u)
             deduped.append(s)
 
-    return deduped
+    # Cap the returned candidate list: downstream merge steps already cap
+    # stream_state[...]['candidates'] to MAX_STREAM_CANDIDATES, but capping
+    # here too bounds how many streams every caller of master_scrape (and any
+    # future one) has to carry around and log.
+    return deduped[:MAX_STREAM_CANDIDATES]
 
 def _scrape_lifecycle_defaults() -> dict:
     return {
