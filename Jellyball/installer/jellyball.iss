@@ -311,8 +311,7 @@ begin
     'JELLYBALL_HOST="' + EscapeEnvValue(Host) + '"' + #13#10 +
     'DASHBOARD_USERNAME="' + EscapeEnvValue(Trim(ConfigPage.Values[1])) + '"' + #13#10 +
     'DASHBOARD_PASSWORD="' + EscapeEnvValue(ConfigPage.Values[2]) + '"' + #13#10 +
-    'MULTIVIEW_HWACCEL=nvenc' + #13#10 +
-    #13#10 +
+    'MULTIVIEW_HWACCEL=nvenc' + #13#10 + #13#10 +
     '# Optional settings (uncomment and edit as needed):' + #13#10 +
     '#JELLYFIN_URL=http://127.0.0.1:8096' + #13#10 +
     '#JELLYFIN_API_KEY=' + #13#10 +
