@@ -19,6 +19,7 @@ data/
 .env
 .env.local
 .venv/
+.venv-build/
 venv/
 *.log
 
