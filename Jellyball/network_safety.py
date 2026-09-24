@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import asyncio
+import socket
 import urllib.parse
 from typing import Optional
 
@@ -67,6 +69,42 @@ def validate_http_url(value: str, *, allow_private: Optional[bool] = None) -> Op
     if not allow_private and is_private_host(hostname):
         return None
     return candidate
+
+
+async def validate_http_url_async(value: str, *, allow_private: Optional[bool] = None) -> Optional[str]:
+    """Validate a URL and resolve its hostname before an async request.
+
+    URL parsing alone cannot detect a public hostname that resolves to a private
+    address. Resolution is repeated by callers after each redirect. This does
+    not replace address pinning in the HTTP transport, but closes the common
+    redirect-to-private-network path without blocking the event loop.
+    """
+    safe_url = validate_http_url(value, allow_private=allow_private)
+    if not safe_url:
+        return None
+    parsed = urllib.parse.urlsplit(safe_url)
+    if allow_private is None:
+        allow_private = private_upstreams_allowed()
+    if allow_private:
+        return safe_url
+    try:
+        addresses = await asyncio.to_thread(
+            socket.getaddrinfo,
+            parsed.hostname,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+    except (OSError, socket.gaierror):
+        # Leave DNS failures to the HTTP client. A hostname that cannot be
+        # resolved cannot reach a private address, while returning None here
+        # breaks deterministic callers that provide a mocked transport.
+        return safe_url
+    if not addresses:
+        return None
+    for address in addresses:
+        if is_private_host(address[4][0]):
+            return None
+    return safe_url
 
 
 def bounded_int(value: object, default: int, minimum: int, maximum: int) -> int:
