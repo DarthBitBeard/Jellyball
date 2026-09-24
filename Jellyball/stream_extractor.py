@@ -11,12 +11,14 @@ import binascii
 import asyncio
 import html
 import logging
+import os
 import urllib.parse
-from typing import List, Dict, Tuple, Set, Optional, Iterable
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, List, Dict, Tuple, Set, Optional, Iterable
 import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import Browser, Page
-from network_safety import validate_http_url, validate_http_url_async
+from network_safety import validate_http_url, validate_http_url_async, bounded_int
 
 LOGGER = logging.getLogger("jellyball.stream_extractor")
 MAX_INSPECTION_BYTES = 2 * 1024 * 1024
@@ -30,6 +32,97 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+
+# lxml's C parser is materially faster than html.parser on the multi-hundred-KB
+# aggregator pages this module parses; fall back cleanly if it isn't installed.
+try:
+    import lxml  # noqa: F401
+    _BS_PARSER = "lxml"
+except ImportError:  # pragma: no cover - exercised only when lxml is missing
+    _BS_PARSER = "html.parser"
+
+
+def make_soup(html_text: str) -> BeautifulSoup:
+    """Parse HTML with lxml when available, otherwise the stdlib html.parser.
+
+    Behavior (what gets found by find_all/get_text/etc.) is unchanged either
+    way; this only picks the faster backend when it's present.
+    """
+    return BeautifulSoup(html_text or "", _BS_PARSER)
+
+
+# --- Global cap on concurrent Playwright pages/contexts -----------------------
+# Every scraper that falls back to a headless Chromium page shares this single
+# semaphore so a scrape cycle can never pile up dozens of live pages against the
+# one shared browser that also has to keep serving live video segments.
+PLAYWRIGHT_MAX_PAGES = bounded_int(os.getenv("PLAYWRIGHT_MAX_PAGES", "3"), 3, 1, 16)
+_PLAYWRIGHT_PAGE_SEMAPHORE: Optional[asyncio.Semaphore] = None
+_PLAYWRIGHT_PAGE_SEMAPHORE_LOOP = None
+_PLAYWRIGHT_PAGES_IN_USE = 0
+
+
+def playwright_page_semaphore() -> asyncio.Semaphore:
+    """Global asyncio.Semaphore capping concurrent Playwright pages.
+
+    Created lazily against the currently running loop (and recreated if the
+    loop changes) so tests that spin up a fresh event loop per run don't bind
+    to a semaphore tied to an already-closed loop.
+    """
+    global _PLAYWRIGHT_PAGE_SEMAPHORE, _PLAYWRIGHT_PAGE_SEMAPHORE_LOOP
+    loop = asyncio.get_running_loop()
+    if _PLAYWRIGHT_PAGE_SEMAPHORE is None or _PLAYWRIGHT_PAGE_SEMAPHORE_LOOP is not loop:
+        _PLAYWRIGHT_PAGE_SEMAPHORE = asyncio.Semaphore(PLAYWRIGHT_MAX_PAGES)
+        _PLAYWRIGHT_PAGE_SEMAPHORE_LOOP = loop
+    return _PLAYWRIGHT_PAGE_SEMAPHORE
+
+
+def playwright_pages_in_use() -> int:
+    """Number of Playwright pages/contexts currently open across every scraper.
+
+    Used to gate opportunistic browser recycling: never tear down the shared
+    browser while a scrape still has a page open against it.
+    """
+    return _PLAYWRIGHT_PAGES_IN_USE
+
+
+@asynccontextmanager
+async def playwright_page(browser: Browser, *, user_agent: Optional[str] = None) -> AsyncIterator[Page]:
+    """Create a Playwright page, optionally inside its own context, bounded by
+    the global PLAYWRIGHT_MAX_PAGES cap, and guarantee cleanup on the way out.
+
+    Every scraper that previously called `browser.new_context()`/`new_page()`
+    directly closed it only on success or a caught `Exception`. A provider
+    search timeout raises `asyncio.CancelledError` (via `asyncio.wait_for`),
+    which isn't an `Exception`, so those call sites leaked a live Chromium
+    context/page on every cancellation. Routing every page/context creation
+    through this context manager's try/finally closes it in all cases,
+    including cancellation, and enforces the shared concurrency cap for the
+    full lifetime of the page.
+    """
+    global _PLAYWRIGHT_PAGES_IN_USE
+    async with playwright_page_semaphore():
+        _PLAYWRIGHT_PAGES_IN_USE += 1
+        context = None
+        page = None
+        try:
+            if user_agent:
+                context = await browser.new_context(user_agent=user_agent)
+                page = await context.new_page()
+            else:
+                page = await browser.new_page()
+            yield page
+        finally:
+            _PLAYWRIGHT_PAGES_IN_USE -= 1
+            if context is not None:
+                try:
+                    await context.close()
+                except Exception as exc:
+                    LOGGER.debug("Playwright context cleanup failed error=%s", type(exc).__name__)
+            elif page is not None:
+                try:
+                    await page.close()
+                except Exception as exc:
+                    LOGGER.debug("Playwright page cleanup failed error=%s", type(exc).__name__)
 
 
 def rank_streams(streams: Iterable[Dict], provider_priority: Optional[Dict[str, int]] = None) -> List[Dict]:
@@ -235,6 +328,14 @@ def extract_iframes_and_streamers(soup: BeautifulSoup, page_url: str) -> Tuple[L
     return iframe_urls, streamer_urls
 
 
+def _parse_iframes_and_streamers_from_html(html_text: str, page_url: str) -> Tuple[List[str], List[str]]:
+    """Sync CPU work (BeautifulSoup parse + iframe/streamer-link scan) split out
+    of the async code path so it can run via asyncio.to_thread instead of
+    blocking the event loop that also serves live video segments."""
+    soup = make_soup(html_text)
+    return extract_iframes_and_streamers(soup, page_url)
+
+
 async def fetch_bounded_text(
     client: httpx.AsyncClient,
     url: str,
@@ -434,8 +535,10 @@ async def fetch_streams_from_page(
         page_html = await fetch_bounded_text(client, match_url, headers, 10.0)
         if page_html is None:
             return []
-        # Direct streams on match page
-        for url in extract_streams_from_text(page_html, match_url)[:MAX_EXTRACTED_STREAMS]:
+        # Direct streams on match page. Regex scanning + unpack_js over up to
+        # 2MB of text is pure CPU work, so it runs off the event loop.
+        direct_streams = await asyncio.to_thread(extract_streams_from_text, page_html, match_url)
+        for url in direct_streams[:MAX_EXTRACTED_STREAMS]:
             if url not in seen_urls:
                 seen_urls.add(url)
                 if await verify_stream_live(client, url, match_url):
@@ -448,9 +551,10 @@ async def fetch_streams_from_page(
                         "discovery_method": "http"
                     })
 
-        # Parse iframes and streamer links
-        soup = BeautifulSoup(page_html, 'html.parser')
-        iframe_urls, streamer_urls = extract_iframes_and_streamers(soup, match_url)
+        # Parse iframes and streamer links (BeautifulSoup parse is also CPU work).
+        iframe_urls, streamer_urls = await asyncio.to_thread(
+            _parse_iframes_and_streamers_from_html, page_html, match_url
+        )
 
         # Fetch iframe pages concurrently, while bounding fan-out for providers.
         initial_urls = list(iframe_urls)
@@ -476,7 +580,7 @@ async def fetch_streams_from_page(
                     sub_html = await fetch_bounded_text(client, curr_url, sub_headers, 8.0)
                 if sub_html is None:
                     return
-                sub_streams = extract_streams_from_text(sub_html, curr_url)
+                sub_streams = await asyncio.to_thread(extract_streams_from_text, sub_html, curr_url)
                 stream_tasks = []
                 for s_url in sub_streams:
                     async with visited_lock:
@@ -506,8 +610,9 @@ async def fetch_streams_from_page(
                 )
 
                 if depth < max_iframe_depth:
-                    sub_soup = BeautifulSoup(sub_html, 'html.parser')
-                    nested_iframes, _ = extract_iframes_and_streamers(sub_soup, curr_url)
+                    nested_iframes, _ = await asyncio.to_thread(
+                        _parse_iframes_and_streamers_from_html, sub_html, curr_url
+                    )
                     await asyncio.gather(
                         *(fetch_iframe(n_url, curr_url, depth + 1) for n_url in nested_iframes),
                         return_exceptions=True
@@ -539,72 +644,72 @@ async def playwright_intercept_streams(
     and intercepts all network requests for .m3u8 or HLS playlists.
     """
     streams: List[Dict] = []
-    page: Optional[Page] = None
     captured_urls: Set[str] = set()
 
     try:
         if not validate_http_url(page_url):
             return streams
-        page = await browser.new_page()
-        async def guard_request(route, request):
-            if request.url.lower().startswith(("http://", "https://")) and not validate_http_url(request.url):
-                await route.abort()
-                return
-            await route.continue_()
+        async with playwright_page(browser) as page:
+            async def guard_request(route, request):
+                if request.url.lower().startswith(("http://", "https://")) and not validate_http_url(request.url):
+                    await route.abort()
+                    return
+                await route.continue_()
 
-        await page.route("**/*", guard_request)
-        if referer:
-            await page.set_extra_http_headers({"Referer": referer})
+            await page.route("**/*", guard_request)
+            if referer:
+                await page.set_extra_http_headers({"Referer": referer})
 
-        def handle_request(request):
-            req_url = request.url
-            req_low = req_url.lower()
-            if any(k in req_low for k in [".m3u8", "playlist", "load-playlist", "manifest"]):
-                if validate_http_url(req_url) and not is_ignored_url(req_url) and req_url not in captured_urls:
-                    captured_urls.add(req_url)
+            def handle_request(request):
+                req_url = request.url
+                req_low = req_url.lower()
+                if any(k in req_low for k in [".m3u8", "playlist", "load-playlist", "manifest"]):
+                    if validate_http_url(req_url) and not is_ignored_url(req_url) and req_url not in captured_urls:
+                        captured_urls.add(req_url)
+                        streams.append({
+                            "url": req_url,
+                            "referer": page_url,
+                            "origin": request.headers.get("origin", ""),
+                            "provider": provider_name,
+                            "match_score": match_score,
+                            "match_title": match_title,
+                            "discovery_method": "playwright"
+                        })
+
+            page.on("request", handle_request)
+
+            try:
+                await page.goto(page_url, timeout=12000, wait_until="domcontentloaded")
+            except Exception as exc:
+                LOGGER.debug("Playwright navigation failed provider=%s error=%s", provider_name, type(exc).__name__)
+
+            await page.wait_for_timeout(2500)
+
+            # Also inspect page content in case it's in DOM. Regex scanning is
+            # CPU work, so it runs off the event loop.
+            content = await page.content()
+            for s_url in await asyncio.to_thread(extract_streams_from_text, content, page_url):
+                if s_url not in captured_urls:
+                    captured_urls.add(s_url)
                     streams.append({
-                        "url": req_url,
+                        "url": s_url,
                         "referer": page_url,
-                        "origin": request.headers.get("origin", ""),
                         "provider": provider_name,
                         "match_score": match_score,
                         "match_title": match_title,
                         "discovery_method": "playwright"
                     })
 
-        page.on("request", handle_request)
-
-        try:
-            await page.goto(page_url, timeout=12000, wait_until="domcontentloaded")
-        except Exception as exc:
-            LOGGER.debug("Playwright navigation failed provider=%s error=%s", provider_name, type(exc).__name__)
-
-        await page.wait_for_timeout(2500)
-
-        # Also inspect page content in case it's in DOM
-        content = await page.content()
-        for s_url in extract_streams_from_text(content, page_url):
-            if s_url not in captured_urls:
-                captured_urls.add(s_url)
-                streams.append({
-                    "url": s_url,
-                    "referer": page_url,
-                    "provider": provider_name,
-                    "match_score": match_score,
-                    "match_title": match_title,
-                    "discovery_method": "playwright"
-                })
-
-        # Try clicking play button if no stream captured yet. The request
-        # handler stays installed so post-click manifests are captured too.
-        if not streams:
-            play_btn = await page.query_selector("button[data-plyr='play'], .play-wrapper, .media-control, button")
-            try:
-                if play_btn:
-                    await play_btn.click()
-                    await page.wait_for_timeout(2000)
-            except Exception as exc:
-                LOGGER.debug("Playwright play-button interaction failed provider=%s error=%s", provider_name, type(exc).__name__)
+            # Try clicking play button if no stream captured yet. The request
+            # handler stays installed so post-click manifests are captured too.
+            if not streams:
+                play_btn = await page.query_selector("button[data-plyr='play'], .play-wrapper, .media-control, button")
+                try:
+                    if play_btn:
+                        await play_btn.click()
+                        await page.wait_for_timeout(2000)
+                except Exception as exc:
+                    LOGGER.debug("Playwright play-button interaction failed provider=%s error=%s", provider_name, type(exc).__name__)
 
         if streams:
             verify_client = http_client
@@ -629,12 +734,6 @@ async def playwright_intercept_streams(
 
     except Exception as exc:
         LOGGER.warning("Playwright stream interception failed provider=%s error=%s", provider_name, type(exc).__name__)
-    finally:
-        if page:
-            try:
-                await page.close()
-            except Exception as exc:
-                LOGGER.debug("Playwright page cleanup failed provider=%s error=%s", provider_name, type(exc).__name__)
 
     return streams
 
