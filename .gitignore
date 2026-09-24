@@ -8,14 +8,19 @@ build/
 dist/
 *.spec.bak
 *.exe
+Jellyball/installer/Output/
 
 # SQLite database & local state
 *.db
 *.sqlite3
+data/
 
 # Environment variables
 .env
 .env.local
+.venv/
+venv/
+*.log
 
 # Visual Studio & VS Code
 .vs/

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import socket
 import sys
 import time
 import unittest
@@ -9,10 +10,17 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
-from network_safety import validate_http_url, validate_http_url_async
+import network_safety
+from network_safety import clear_dns_cache, validate_http_url, validate_http_url_async
 
 
 class ReliabilityHardeningTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        clear_dns_cache()
+
+    async def asyncTearDown(self):
+        clear_dns_cache()
+
     async def test_cache_expiry_is_removed_during_put(self):
         cache = main.LRUChunkCache(capacity=4, max_bytes=1024)
         await cache.put("expired", b"old", 0.001)
@@ -30,6 +38,82 @@ class ReliabilityHardeningTests(unittest.IsolatedAsyncioTestCase):
             await validate_http_url_async("http://127.0.0.1:8000/stream", allow_private=True),
             "http://127.0.0.1:8000/stream",
         )
+
+    async def test_dns_cache_hit_avoids_second_lookup(self):
+        hostname = "allowed.example.test"
+        calls = []
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            calls.append(host)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+
+        with patch.object(socket, "getaddrinfo", side_effect=fake_getaddrinfo):
+            first = await validate_http_url_async(f"http://{hostname}/a")
+            second = await validate_http_url_async(f"http://{hostname}/b")
+        self.assertEqual(first, f"http://{hostname}/a")
+        self.assertEqual(second, f"http://{hostname}/b")
+        self.assertEqual(len(calls), 1)
+
+    async def test_dns_blocked_verdict_is_cached_with_short_ttl(self):
+        hostname = "blocked.example.test"
+        calls = []
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            calls.append(host)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.1.2.3", port))]
+
+        with patch.object(socket, "getaddrinfo", side_effect=fake_getaddrinfo):
+            first = await validate_http_url_async(f"http://{hostname}/a")
+            second = await validate_http_url_async(f"http://{hostname}/b")
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(len(calls), 1)
+        decision, expiry = network_safety._dns_cache[(hostname, 80, False)]
+        self.assertFalse(decision)
+        remaining = expiry - time.monotonic()
+        self.assertGreater(remaining, 0)
+        self.assertLessEqual(remaining, network_safety._DNS_CACHE_BLOCKED_TTL)
+
+    async def test_dns_resolution_timeout_returns_none(self):
+        hostname = "slow.example.test"
+
+        def slow_getaddrinfo(*args, **kwargs):
+            time.sleep(0.2)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))]
+
+        with patch.object(socket, "getaddrinfo", side_effect=slow_getaddrinfo), patch.object(
+            network_safety, "DNS_RESOLVE_TIMEOUT", 0.01
+        ):
+            result = await validate_http_url_async(f"http://{hostname}/stream")
+        self.assertIsNone(result)
+
+    async def test_dns_single_flight_shares_one_resolution(self):
+        hostname = "shared.example.test"
+        call_count = 0
+        gate = asyncio.Event()
+
+        async def fake_lookup(host, port, timeout):
+            nonlocal call_count
+            call_count += 1
+            await gate.wait()
+            return True, network_safety._DNS_CACHE_ALLOWED_TTL
+
+        with patch.object(network_safety, "_lookup_dns_verdict", side_effect=fake_lookup):
+            task1 = asyncio.create_task(validate_http_url_async(f"http://{hostname}/a"))
+            task2 = asyncio.create_task(validate_http_url_async(f"http://{hostname}/b"))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            gate.set()
+            result1, result2 = await asyncio.gather(task1, task2)
+        self.assertEqual(call_count, 1)
+        self.assertEqual(result1, f"http://{hostname}/a")
+        self.assertEqual(result2, f"http://{hostname}/b")
+
+    async def test_literal_ip_bypasses_dns_resolution(self):
+        with patch.object(socket, "getaddrinfo") as mock_getaddrinfo:
+            result = await validate_http_url_async("http://93.184.216.34:8080/stream")
+        self.assertEqual(result, "http://93.184.216.34:8080/stream")
+        mock_getaddrinfo.assert_not_called()
 
     async def test_provider_breaker_opens_and_recovers_after_cooldown(self):
         provider = "test-provider"

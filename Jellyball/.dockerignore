@@ -13,3 +13,10 @@ dist/
 *.pyproj
 *.sln
 .vs/
+test_*.py
+*.spec
+build-*.ps1
+installer/
+.venv/
+venv/
+data/
