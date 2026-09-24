@@ -4078,19 +4078,16 @@ def _build_xstack_filter(layout: str, member_count: int) -> str:
 
 
 def _build_multiview_audio_filter(audio_presence: List[bool]) -> str:
-    """One audio chain per member -> [a0]..[aN]. aresample=async smooths the
-    timestamp gaps a member's failover leaves behind; a member without audio
-    gets a silent track so every per-audio output always has one."""
-    parts = []
-    for idx, has_audio in enumerate(audio_presence):
-        if has_audio:
-            parts.append(
-                f"[{idx}:a]aresample=async=1000:first_pts=0,"
-                f"aformat=sample_rates=48000:channel_layouts=stereo[a{idx}]"
-            )
-        else:
-            parts.append(f"anullsrc=r=48000:cl=stereo[a{idx}]")
-    return ";".join(parts)
+    """Silent stand-in tracks [aN] for members without audio (so every
+    per-audio output always has a track). Members that do have audio are
+    stream-copied, not filtered: decoding + re-encoding the members' live audio
+    made ffmpeg's scheduler throttle every input (measured ~0.27x real time
+    with two live inputs, vs 1.2x when the audio is copied)."""
+    return ";".join(
+        f"anullsrc=r=48000:cl=stereo[a{idx}]"
+        for idx, has_audio in enumerate(audio_presence)
+        if not has_audio
+    )
 
 
 def _multiview_tee_outputs(member_count: int) -> str:
@@ -4152,7 +4149,10 @@ def _build_multiview_ffmpeg_args(
     encoder = (encoder or MULTIVIEW_HWACCEL).lower()
     audio_presence = list(audio_presence) if audio_presence else [True] * len(member_team_ids)
 
-    args: List[str] = ["-y", "-hide_banner", "-nostats", "-loglevel", "warning"]
+    loglevel = os.getenv("MULTIVIEW_FFMPEG_LOGLEVEL", "warning").strip() or "warning"
+    args: List[str] = ["-y", "-hide_banner", "-loglevel", loglevel]
+    # Progress lines only when debugging with a verbose level.
+    args += ["-stats", "-stats_period", "5"] if loglevel in ("info", "verbose", "debug") else ["-nostats"]
     for team_id in member_team_ids:
         if encoder == "nvenc":
             # Decode on the GPU as well (frames are downloaded for the CPU
@@ -4169,16 +4169,20 @@ def _build_multiview_ffmpeg_args(
             "-i", _multiview_input_url(team_id),
         ]
 
-    filter_graph = ";".join([
+    filter_graph = ";".join(part for part in (
         _build_xstack_filter(layout, len(member_team_ids)),
         _build_multiview_audio_filter(audio_presence),
-    ])
+    ) if part)
     args += ["-filter_complex", filter_graph]
     args += ["-map", "[vout]"]
-    for idx in range(len(member_team_ids)):
-        args += ["-map", f"[a{idx}]"]
+    for idx, has_audio in enumerate(audio_presence):
+        args += ["-map", f"{idx}:a:0" if has_audio else f"[a{idx}]"]
     args += _multiview_video_encoder_args(encoder)
-    args += ["-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000"]
+    # Copy member audio as-is; only the generated silent tracks are encoded.
+    args += ["-c:a", "copy"]
+    for idx, has_audio in enumerate(audio_presence):
+        if not has_audio:
+            args += [f"-c:a:{idx}", "aac", f"-b:a:{idx}", "96k"]
     # Don't let one briefly starved audio member hold every output for the
     # default 10s interleave window.
     args += ["-max_interleave_delta", "2000000"]

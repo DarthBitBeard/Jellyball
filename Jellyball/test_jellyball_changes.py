@@ -768,10 +768,14 @@ class JellyballChangesTests(unittest.TestCase):
         # Every member's audio is encoded; the active one is chosen per viewer
         # session, not baked into the command.
         map_values = [args[i + 1] for i, a in enumerate(args) if a == "-map"]
-        self.assertEqual(map_values, ["[vout]", "[a0]", "[a1]", "[a2]", "[a3]"])
+        # Member audio is stream-copied (re-encoding live audio throttled
+        # ffmpeg); only the member without audio gets a generated silent track.
+        self.assertEqual(map_values, ["[vout]", "0:a:0", "1:a:0", "[a2]", "3:a:0"])
         graph = args[args.index("-filter_complex") + 1]
-        self.assertIn("anullsrc=r=48000:cl=stereo[a2]", graph)  # member without audio
-        self.assertIn("[1:a]aresample=async=1000", graph)
+        self.assertIn("anullsrc=r=48000:cl=stereo[a2]", graph)
+        self.assertNotIn("aresample", graph)
+        self.assertEqual(args[args.index("-c:a") + 1], "copy")
+        self.assertEqual(args[args.index("-c:a:2") + 1], "aac")
         tee = args[args.index("tee") + 1]
         self.assertEqual(tee.count("|"), 3)
         self.assertIn(r"select=\'v:0,a:3\'", tee)
