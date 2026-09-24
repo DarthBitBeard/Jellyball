@@ -3435,11 +3435,32 @@ async def failover_monitor():
         await asyncio.gather(standby_task, return_exceptions=True)
 
 
+def _install_loop_exception_filter() -> None:
+    """Windows' Proactor event loop reports every client that drops its TCP
+    connection abruptly (Jellyfin stopping a stream, ffmpeg reconnecting) as an
+    unhandled ConnectionResetError traceback from _call_connection_lost. On a
+    24/7 server that is pure log noise; keep every other loop error."""
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+
+    def handler(event_loop, context):
+        exc = context.get("exception")
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        if previous is not None:
+            previous(event_loop, context)
+        else:
+            event_loop.default_exception_handler(context)
+
+    loop.set_exception_handler(handler)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global SHARED_HTTP_CLIENT, MEDIA_HTTP_CLIENT, PLAYWRIGHT_CLIENT, SHARED_BROWSER, _PREFETCH_SEMAPHORE
     global STREAM_STARTUP_BUFFER_SECONDS, PREFETCH_CHUNK_COUNT, STREAM_CHUNK_CACHE_TTL
 
+    _install_loop_exception_filter()
     init_db()
     _METRIC_WRITER.start()
     shutil.rmtree(MULTIVIEW_OUTPUT_ROOT, ignore_errors=True)
