@@ -1,13 +1,15 @@
 import os
 import sys
 import logging
-from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
+import queue
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 import subprocess
 import webbrowser
 import socket
 import shutil
 from pathlib import Path
 from html import escape as html_escape
+from typing import Optional
 
 # Resolve configuration and writable data independently of the current directory.
 # This is important when the application is launched from a Jellyfin service or a shortcut.
@@ -16,6 +18,13 @@ BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
 
 
 def _get_writable_data_dir() -> Path:
+    # Explicit override first: the Windows service uses %ProgramData%\Jellyball,
+    # Docker uses the mounted volume, tests use a temp dir.
+    override = os.getenv("JELLYBALL_DATA_DIR", "").strip()
+    if override:
+        candidate = Path(override).expanduser()
+        candidate.mkdir(parents=True, exist_ok=True)
+        return candidate
     if os.name == "nt":
         roots = [os.getenv("LOCALAPPDATA"), os.getenv("APPDATA"), str(Path.home())]
     else:
@@ -42,30 +51,41 @@ LOG_FILE = DATA_DIR / "jellyball.log"
 LOGGER = logging.getLogger("jellyball")
 SQLITE_BUSY_TIMEOUT_MS = 5000
 
-# Configure root/jellyball logger with 3-day timed rotation
-_log_handler = TimedRotatingFileHandler(
+# Size-capped rotation (5 x 10 MB) so a noisy day can't fill the disk of a box
+# that runs for months. Records go through a queue so the event loop never
+# blocks on file I/O; a background thread does the writing.
+_log_handler = RotatingFileHandler(
     filename=str(LOG_FILE),
-    when="midnight",
-    interval=1,
-    backupCount=3,
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5,
     encoding="utf-8",
+    delay=True,
 )
 _log_handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s"))
-_console_handler = logging.StreamHandler(sys.stdout)
-_console_handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s"))
+_sink_handlers: list = [_log_handler]
+# The windowed exe and the Windows service have no stdout (sys.stdout is None);
+# a StreamHandler there fails on every record.
+if sys.stdout is not None:
+    _console_handler = logging.StreamHandler(sys.stdout)
+    _console_handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s"))
+    _sink_handlers.append(_console_handler)
 
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
+_LOG_LISTENER: Optional["QueueListener"] = None
 if not root_logger.handlers:
-    root_logger.addHandler(_log_handler)
-    root_logger.addHandler(_console_handler)
+    _log_queue: "queue.SimpleQueue" = queue.SimpleQueue()
+    root_logger.addHandler(QueueHandler(_log_queue))
+    _LOG_LISTENER = QueueListener(_log_queue, *_sink_handlers, respect_handler_level=True)
+    _LOG_LISTENER.start()
 LOGGER.setLevel(logging.INFO)
 
 # httpx/httpcore log one INFO line per HTTP request by default — with many active
 # channels that's every provider probe and every HLS segment fetch, drowning real
-# diagnostics in a 3-file rotating log. Keep them quiet unless something fails.
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
+# diagnostics. uvicorn.access would log every segment request (with the full
+# tokenized upstream URL in the query string for legacy /chunk requests).
+for _noisy_logger in ("httpx", "httpcore", "uvicorn.access", "hpack", "h2"):
+    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
 
 
 def _log_failure(operation: str, exc: BaseException, level: int = logging.WARNING) -> None:
@@ -102,7 +122,8 @@ def _bootstrap_runtime_files() -> None:
 
 _bootstrap_runtime_files()
 
-if not os.getenv("PLAYWRIGHT_BROWSERS_PATH"):
+_PLAYWRIGHT_PATH_SET_BY_APP = not os.getenv("PLAYWRIGHT_BROWSERS_PATH")
+if _PLAYWRIGHT_PATH_SET_BY_APP:
     if getattr(sys, "frozen", False):
         bundled_browser_dir = BUNDLE_DIR / "playwright_browsers"
         browser_dir = bundled_browser_dir if bundled_browser_dir.exists() else DATA_DIR / "playwright_browsers"
@@ -136,8 +157,10 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import PlainTextResponse, Response, HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse, FileResponse
 from typing import Dict, List, Optional, Tuple, Set
 from playwright.async_api import async_playwright, Browser, Playwright, Page
-import pystray
-from PIL import Image, ImageDraw
+# pystray/PIL are imported lazily in tray mode only: on a headless Linux host
+# `import pystray` tries to open an X display at import time and crashes.
+
+from version import __version__
 
 from sports_matcher import get_team_search_terms, match_team, clean_sports_text, canonical_team_name
 from sports_catalog import (
@@ -160,9 +183,13 @@ from stream_extractor import (
 from network_safety import bounded_float, bounded_int, validate_http_url, validate_http_url_async
 from hls_session import FetchResult, SessionConfig, SessionHooks, SessionRegistry, SourceSpec
 
-# User settings are defaults; a .env beside the executable can override them.
+# Precedence: real environment variables > the data directory's .env (per-user
+# for the tray app, %ProgramData%\Jellyball\.env for the service, written by the
+# installer) > a .env beside the executable (package-wide defaults). Previously
+# the file beside the exe overrode everything, including the environment a
+# service manager or Docker passed in.
 load_dotenv(dotenv_path=USER_ENV_FILE)
-load_dotenv(dotenv_path=APP_DIR / ".env", override=True)
+load_dotenv(dotenv_path=APP_DIR / ".env")
 PORT = bounded_int(os.getenv("PORT", "8000"), 8000, 1, 65535)
 _configured_db = Path(os.getenv("DB_FILE", "sports_proxy.db"))
 DB_FILE = str(_configured_db if _configured_db.is_absolute() else DATA_DIR / _configured_db)
@@ -3462,41 +3489,60 @@ async def lifespan(app: FastAPI):
     _PREFETCH_SEMAPHORE = None
     stream_state.clear()
 
-app = FastAPI(title="Jellyfin Sports Proxy - Titan Engine", lifespan=lifespan)
+class RequestDiagnosticsMiddleware:
+    """Pure ASGI middleware: logs 5xx and slow responses, turns unhandled errors
+    into a 500. Replaces @app.middleware("http") (BaseHTTPMiddleware), which
+    pushed every streamed body chunk through an extra memory stream and task
+    hop - measurable overhead on the segment relay path."""
+
+    def __init__(self, asgi_app) -> None:
+        self.app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = time.perf_counter()
+        status_holder = {"status": None}
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                status_holder["status"] = message["status"]
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                if message["status"] >= 500:
+                    LOGGER.warning(
+                        "HTTP failure method=%s path=%s status=%d duration_ms=%.0f",
+                        scope.get("method"), scope.get("path"), message["status"], elapsed_ms,
+                    )
+                elif elapsed_ms >= 5000:
+                    LOGGER.warning(
+                        "Slow request method=%s path=%s status=%d duration_ms=%.0f",
+                        scope.get("method"), scope.get("path"), message["status"], elapsed_ms,
+                    )
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except Exception as exc:
+            if status_holder["status"] is not None:
+                # Response already started (e.g. an upstream segment died
+                # mid-body): re-raise so the server aborts the connection and
+                # the client retries, instead of seeing a clean truncated body.
+                raise
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            _log_failure(f"HTTP {scope.get('method')} {scope.get('path')} ({elapsed_ms:.0f}ms)", exc, logging.ERROR)
+            response = JSONResponse(status_code=500, content={"detail": "Internal server error"})
+            await response(scope, receive, send)
 
 
-@app.middleware("http")
-async def request_diagnostics(request: Request, call_next):
-    started = time.perf_counter()
-    try:
-        response = await call_next(request)
-    except Exception as exc:
-        elapsed_ms = (time.perf_counter() - started) * 1000
-        _log_failure(
-            f"HTTP {request.method} {request.url.path} ({elapsed_ms:.0f}ms)",
-            exc,
-            logging.ERROR,
-        )
-        return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+app = FastAPI(title="Jellyfin Sports Proxy - Titan Engine", version=__version__, lifespan=lifespan)
+app.add_middleware(RequestDiagnosticsMiddleware)
 
-    elapsed_ms = (time.perf_counter() - started) * 1000
-    if response.status_code >= 500:
-        LOGGER.warning(
-            "HTTP failure method=%s path=%s status=%d duration_ms=%.0f",
-            request.method,
-            request.url.path,
-            response.status_code,
-            elapsed_ms,
-        )
-    elif elapsed_ms >= 5000:
-        LOGGER.warning(
-            "Slow request method=%s path=%s status=%d duration_ms=%.0f",
-            request.method,
-            request.url.path,
-            response.status_code,
-            elapsed_ms,
-        )
-    return response
+
+@app.get("/healthz")
+async def healthz():
+    """Unauthenticated liveness probe (Docker healthcheck, installer, tray)."""
+    return {"status": "ok", "app": "jellyball", "version": __version__}
 
 
 _UPSTREAM_REJECTION_LOGGED: "OrderedDict[Tuple[str, int], float]" = OrderedDict()
@@ -3947,6 +3993,7 @@ async def _check_ffmpeg_available() -> None:
             FFMPEG_PATH, "-version",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            creationflags=_child_process_creationflags(),
         )
         stdout, _ = await asyncio.wait_for(process.communicate(), timeout=5.0)
         FFMPEG_AVAILABLE = process.returncode == 0
@@ -4305,6 +4352,7 @@ async def _stop_multiview_process(channel_id: str, *, term_timeout: float = 5.0,
             kill_proc = await asyncio.create_subprocess_exec(
                 "taskkill", "/F", "/T", "/PID", str(process.pid),
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                creationflags=_child_process_creationflags(),
             )
             await kill_proc.wait()
         except OSError as exc:
@@ -4803,16 +4851,8 @@ def _build_placeholder_ffmpeg_args(out_dir: Path) -> List[str]:
 
 
 async def _drain_placeholder_log(process: "asyncio.subprocess.Process", log_lines: "deque[str]") -> None:
-    try:
-        while True:
-            line = await process.stdout.readline()
-            if not line:
-                break
-            log_lines.append(line.decode(errors="replace").rstrip())
-    except (asyncio.CancelledError, ValueError):
-        raise
-    except Exception as exc:
-        _log_failure("drain placeholder ffmpeg log", exc)
+    # Same chunked reader as Multi-View (readline() can die on CR-only progress output).
+    await _drain_multiview_log("placeholder", process, log_lines)
 
 
 async def _watch_placeholder_process(process: "asyncio.subprocess.Process") -> None:
@@ -4834,6 +4874,7 @@ async def _stop_placeholder_process() -> None:
             kill_proc = await asyncio.create_subprocess_exec(
                 "taskkill", "/F", "/T", "/PID", str(process.pid),
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                creationflags=_child_process_creationflags(),
             )
             await kill_proc.wait()
         except OSError as exc:
@@ -4880,6 +4921,7 @@ async def _ensure_placeholder_running() -> bool:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                creationflags=_child_process_creationflags(),
             )
         except (FileNotFoundError, OSError) as exc:
             _log_failure("spawn placeholder ffmpeg", exc, logging.ERROR)
@@ -5804,12 +5846,25 @@ async def api_status(auth: bool = Depends(verify_dashboard_auth)):
 async def api_logs(limit: int = 200, auth: bool = Depends(verify_dashboard_auth)):
     """Return recent application log lines for the local dashboard."""
     limit = max(1, min(limit, 1000))
+    lines = await asyncio.to_thread(_tail_log_file, limit)
+    return {"logs": lines, "count": len(lines)}
+
+
+def _tail_log_file(limit: int) -> List[str]:
+    """Read only the end of the log (off the event loop) instead of the whole file."""
     try:
-        with LOG_FILE.open("r", encoding="utf-8", errors="replace") as log_file:
-            lines = list(deque(log_file, maxlen=limit))
-        return {"logs": [line.rstrip("\r\n") for line in lines], "count": len(lines)}
+        with LOG_FILE.open("rb") as log_file:
+            log_file.seek(0, os.SEEK_END)
+            size = log_file.tell()
+            chunk = min(size, max(64 * 1024, limit * 400))
+            log_file.seek(size - chunk)
+            data = log_file.read(chunk)
     except OSError:
-        return {"logs": [], "count": 0}
+        return []
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if chunk < size and lines:
+        lines = lines[1:]  # first line is probably partial
+    return lines[-limit:]
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -7449,7 +7504,9 @@ async def schedule_team_disable(team_id: str, disable_date: str = Form(""), auth
         _log_failure(f"schedule disable {team_id}", exc)
     return RedirectResponse(url="/?tab=channels", status_code=303)
 
-def _create_tray_image() -> Image.Image:
+def _create_tray_image():
+    from PIL import Image, ImageDraw
+
     logo_path = _resource_path("assets/jellyball-icon.png")
     try:
         return Image.open(logo_path).convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
@@ -7462,8 +7519,103 @@ def _create_tray_image() -> Image.Image:
     return image
 
 
+PORT_BIND_WAIT_SECONDS = bounded_float(os.getenv("PORT_BIND_WAIT_SECONDS", "30"), 30.0, 0.0, 600.0)
+
+
+def _port_is_free(host: str, port: int) -> bool:
+    bind_host = "0.0.0.0" if host in ("", "0.0.0.0") else host
+    family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as probe:
+            probe.bind((bind_host, port))
+        return True
+    except OSError:
+        return False
+
+
+def _wait_for_port(host: str, port: int, timeout: float) -> bool:
+    """A restart can race the previous instance releasing the port; wait for it
+    instead of silently moving to another port (which broke Jellyfin's saved
+    tuner and guide URLs)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if _port_is_free(host, port):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
+
+
+def _existing_jellyball_instance(port: int) -> bool:
+    """True if a Jellyball (e.g. the installed Windows service) already answers
+    on this port."""
+    try:
+        response = httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=2.0)
+        return response.status_code == 200 and response.json().get("app") == "jellyball"
+    except Exception:
+        return False
+
+
+def build_server(host: str, port: int):
+    import uvicorn
+
+    try:
+        import httptools  # noqa: F401
+        http_impl = "httptools"
+    except ImportError:
+        http_impl = "auto"
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        reload=False,
+        log_config=None,
+        access_log=False,
+        http=http_impl,
+        lifespan="on",
+        # Jellyfin's ffmpeg re-polls playlists every 2-6s; keep its connection
+        # open between polls instead of reconnecting each time.
+        timeout_keep_alive=30,
+        # Streaming responses would otherwise hold shutdown open indefinitely.
+        timeout_graceful_shutdown=10,
+    )
+    return uvicorn.Server(config)
+
+
+def _headless_host() -> str:
+    return os.getenv("JELLYBALL_HOST", "0.0.0.0" if sys.platform != "win32" else "127.0.0.1").strip() or "127.0.0.1"
+
+
+def run_headless(stop_event: Optional[threading.Event] = None) -> int:
+    """Run the server in the foreground (console mode, Docker, Windows service).
+    Returns a process exit code; non-zero lets a service manager restart us."""
+    if os.getenv("WEB_CONCURRENCY", "1") not in {"", "1"}:
+        LOGGER.error("Jellyball must run with a single worker (WEB_CONCURRENCY=1)")
+        return 2
+    host = _headless_host()
+    if not _wait_for_port(host, PORT, PORT_BIND_WAIT_SECONDS):
+        LOGGER.error("Port %s on %s is in use; refusing to start on a different port", PORT, host)
+        return 3
+    server = build_server(host, PORT)
+    if stop_event is not None:
+        def _watch_stop() -> None:
+            stop_event.wait()
+            server.should_exit = True
+
+        threading.Thread(target=_watch_stop, name="jellyball-stop-watch", daemon=True).start()
+    LOGGER.info("Jellyball %s running headless at http://%s:%s", __version__, host, PORT)
+    try:
+        server.run()
+    finally:
+        if _LOG_LISTENER is not None:
+            _LOG_LISTENER.stop()
+    return 0 if server.started else 1
+
+
 class TrayApplication:
     def __init__(self):
+        import pystray
+
         self.server = None
         self.server_thread = None
         self.icon = pystray.Icon(
@@ -7491,70 +7643,65 @@ class TrayApplication:
 
         def relaunch():
             if self.server_thread:
-                self.server_thread.join(timeout=10)
+                self.server_thread.join(timeout=15)
             if getattr(sys, "frozen", False):
                 command = [sys.executable, *sys.argv[1:]]
             else:
                 command = [sys.executable, str(Path(sys.argv[0]).resolve()), *sys.argv[1:]]
-            subprocess.Popen(command, close_fds=True)
+            env = dict(os.environ)
+            # PyInstaller 6 treats a child launched with the parent's environment
+            # as a worker sharing the parent's (about to be deleted) extraction
+            # directory; reset it. Also drop the browser path we derived from it.
+            env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+            if _PLAYWRIGHT_PATH_SET_BY_APP:
+                env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+            subprocess.Popen(command, close_fds=True, env=env, creationflags=_child_process_creationflags())
             self.icon.stop()
 
         threading.Thread(target=relaunch, name="jellyball-restart", daemon=True).start()
 
     def run(self):
-        import uvicorn
-
         global PORT
-        selected_port = _find_available_port(PORT)
-        if selected_port != PORT:
-            LOGGER.warning("Configured port %s is unavailable; using local port %s", PORT, selected_port)
-            PORT = selected_port
+        host = os.getenv("JELLYBALL_HOST", "127.0.0.1").strip() or "127.0.0.1"
+        if not _port_is_free(host, PORT):
+            if _existing_jellyball_instance(PORT):
+                # The Windows service (or another tray instance) already runs
+                # Jellyball here: just open its dashboard.
+                LOGGER.info("Jellyball already running on port %s; opening its dashboard", PORT)
+                webbrowser.open(f"http://127.0.0.1:{PORT}/")
+                return
+            if not _wait_for_port(host, PORT, 10.0):
+                selected_port = _find_available_port(PORT)
+                LOGGER.warning(
+                    "Configured port %s is in use by another program; using %s for this desktop session "
+                    "(Jellyfin tuner URLs pointing at %s will not work until it is free)",
+                    PORT, selected_port, PORT,
+                )
+                PORT = selected_port
 
-        config = uvicorn.Config(
-            app,
-            host="127.0.0.1",
-            port=PORT,
-            reload=False,
-            log_config=None,
-        )
-        self.server = uvicorn.Server(config)
+        self.server = build_server(host, PORT)
         self.server_thread = threading.Thread(
             target=self.server.run,
             name="jellyball-server",
             daemon=True,
         )
         self.server_thread.start()
-        LOGGER.info("Jellyball web GUI available at http://127.0.0.1:%s", PORT)
+        LOGGER.info("Jellyball %s web GUI available at http://127.0.0.1:%s", __version__, PORT)
         threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}/")).start()
         try:
             self.icon.run()
         finally:
             self.server.should_exit = True
-            self.server_thread.join(timeout=10)
+            self.server_thread.join(timeout=15)
+            if _LOG_LISTENER is not None:
+                _LOG_LISTENER.stop()
 
 
-def _run_headless() -> None:
-    """No system tray on Linux/Docker (pystray needs a display we don't have there),
-    and 127.0.0.1 isn't reachable from outside a container. Used automatically on
-    non-Windows platforms, or anywhere via JELLYBALL_HEADLESS=1."""
-    import uvicorn
-
-    global PORT
-    if os.getenv("WEB_CONCURRENCY", "1") not in {"", "1"}:
-        raise RuntimeError("Jellyball must run with one worker")
-    selected_port = _find_available_port(PORT)
-    if selected_port != PORT:
-        LOGGER.warning("Configured port %s is unavailable; using local port %s", PORT, selected_port)
-        PORT = selected_port
-    host = os.getenv("JELLYBALL_HOST", "0.0.0.0" if sys.platform != "win32" else "127.0.0.1")
-    LOGGER.info("Jellyball running headless at http://%s:%s", host, PORT)
-    uvicorn.run(app, host=host, port=PORT, log_config=None)
+def _wants_headless() -> bool:
+    return sys.platform != "win32" or os.getenv("JELLYBALL_HEADLESS", "").strip().lower() in {"1", "true", "yes"}
 
 
 if __name__ == "__main__":
-    _wants_headless = sys.platform != "win32" or os.getenv("JELLYBALL_HEADLESS", "").strip().lower() in {"1", "true", "yes"}
-    if _wants_headless:
-        _run_headless()
-    else:
-        TrayApplication().run()
-
+    if _wants_headless() or "--console" in sys.argv[1:]:
+        sys.exit(run_headless())
+    TrayApplication().run()

@@ -4,7 +4,11 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000 \
     DB_FILE=/app/data/sports_proxy.db \
-    JELLYBALL_HEADLESS=1
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PYSTRAY_BACKEND=dummy \
+    JELLYBALL_DATA_DIR=/app/data \
+    JELLYBALL_HEADLESS=1 \
+    JELLYBALL_HOST=0.0.0.0
 
 WORKDIR /app
 
@@ -19,7 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    python -m playwright install --with-deps chromium && \
+    chmod -R a+rX /ms-playwright
 
 # Copy application source code (see .dockerignore for what's excluded — notably the
 # local .env, the PyInstaller build/dist output and the packaged .exe, and any local

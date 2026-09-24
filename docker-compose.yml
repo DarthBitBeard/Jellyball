@@ -1,7 +1,7 @@
 services:
   jellyball:
     build:
-      context: .
+      context: ./Jellyball
       dockerfile: Dockerfile
     container_name: jellyball
     restart: unless-stopped
@@ -9,20 +9,22 @@ services:
       - "${PORT:-8000}:8000"
     volumes:
       - ./data:/app/data
+    env_file:
+      - path: .env
+        required: false
     environment:
       - PORT=8000
       - DB_FILE=/app/data/sports_proxy.db
+      - JELLYBALL_DATA_DIR=/app/data
+      - JELLYBALL_HEADLESS=1
+      - JELLYBALL_HOST=0.0.0.0
+      - MULTIVIEW_HWACCEL=${MULTIVIEW_HWACCEL:-none}
       - DASHBOARD_USERNAME=${DASHBOARD_USERNAME:-admin}
       - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
-      - AGGREGATOR_1_URL=${AGGREGATOR_1_URL:-https://isportsurge.ws}
-      - AGGREGATOR_2_URL=${AGGREGATOR_2_URL:-https://mybuffstreams.plus}
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/epg.xml"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-
+      - JELLYFIN_URL=${JELLYFIN_URL:-}
+      - JELLYFIN_API_KEY=${JELLYFIN_API_KEY:-}
+      - STREAM_PROVIDER_PRIORITY=${STREAM_PROVIDER_PRIORITY:-}
+      - STREAM_MAX_BANDWIDTH=${STREAM_MAX_BANDWIDTH:-}
