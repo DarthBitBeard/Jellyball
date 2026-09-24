@@ -27,9 +27,12 @@ hiddenimports = [
     "uvicorn.lifespan.on",
     "pystray",
     "PIL",
+    "passlib",
+    "passlib.handlers.bcrypt",
+    "bcrypt",
 ]
 
-for package_name in ["tzdata", "playwright", "rapidfuzz", "thefuzz", "bs4", "httpx", "pystray", "PIL"]:
+for package_name in ["tzdata", "playwright", "rapidfuzz", "thefuzz", "bs4", "httpx", "pystray", "PIL", "passlib", "bcrypt"]:
     try:
         package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
     except ImportError as exc:
@@ -52,6 +55,26 @@ if not browser_root.is_dir():
 for browser_dir in browser_root.iterdir():
     if browser_dir.is_dir() and browser_dir.name != ".links":
         datas.append((str(browser_dir), str(Path("playwright_browsers") / browser_dir.name)))
+
+# Bundle a portable ffmpeg.exe so Multi-View channels work without a separate
+# install, mirroring the Playwright browser bundling above. Unlike Chromium,
+# this is optional: the app already falls back to a system-PATH "ffmpeg" (or
+# a user-configured FFMPEG_PATH) at runtime and disables Multi-View with a
+# dashboard warning if none is found, so a missing binary here does not fail
+# the build - it just produces an exe that needs ffmpeg installed separately.
+ffmpeg_bundle_value = os.getenv("FFMPEG_BUNDLE_PATH", "")
+if not ffmpeg_bundle_value:
+    ffmpeg_bundle_value = os.path.join(os.getenv("LOCALAPPDATA", str(Path.home())), "ffmpeg", "bin", "ffmpeg.exe")
+ffmpeg_bundle_path = Path(ffmpeg_bundle_value).expanduser()
+if ffmpeg_bundle_path.is_file():
+    datas.append((str(ffmpeg_bundle_path), "ffmpeg_bin"))
+    print(f"Bundling ffmpeg from {ffmpeg_bundle_path}")
+else:
+    print(
+        f"ffmpeg binary not found at {ffmpeg_bundle_path}; building without it. "
+        "Multi-View will require a separate ffmpeg install (see README), or set "
+        "FFMPEG_BUNDLE_PATH to an ffmpeg.exe before building to include one."
+    )
 
 a = Analysis(
     ['main.py'],

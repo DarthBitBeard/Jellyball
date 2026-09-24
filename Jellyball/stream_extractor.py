@@ -16,12 +16,13 @@ from typing import List, Dict, Tuple, Set, Optional, Iterable
 import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import Browser, Page
-from network_safety import validate_http_url
+from network_safety import validate_http_url, validate_http_url_async
 
 LOGGER = logging.getLogger("jellyball.stream_extractor")
 MAX_INSPECTION_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 3
 MAX_STREAMER_LINKS = 8
+MAX_EXTRACTED_STREAMS = 32
 _STREAM_HINTS = (".m3u8", "playlist", "manifest", "load-playlist", "stream", "hls", "live")
 
 DEFAULT_USER_AGENT = (
@@ -185,7 +186,7 @@ def extract_streams_from_text(text: str, referer: str = "") -> List[str]:
         except (binascii.Error, UnicodeError, ValueError):
             pass
 
-    return list(candidates)
+    return list(candidates)[:MAX_EXTRACTED_STREAMS]
 
 def extract_iframes_and_streamers(soup: BeautifulSoup, page_url: str) -> Tuple[List[str], List[str]]:
     """
@@ -243,7 +244,7 @@ async def fetch_bounded_text(
 ) -> Optional[str]:
     current_url = url
     for _ in range(MAX_REDIRECTS + 1):
-        safe_url = validate_http_url(current_url)
+        safe_url = await validate_http_url_async(current_url)
         if not safe_url:
             return None
         try:
@@ -287,7 +288,7 @@ async def verify_stream_live(
     origin: str = "",
 ) -> bool:
     """Verify a stream URL and, for HLS, one actual media segment."""
-    if not validate_http_url(url) or (referer and not validate_http_url(referer)):
+    if not await validate_http_url_async(url) or (referer and not await validate_http_url_async(referer)):
         return False
 
     headers = {
@@ -428,7 +429,7 @@ async def fetch_streams_from_page(
         if page_html is None:
             return []
         # Direct streams on match page
-        for url in extract_streams_from_text(page_html, match_url):
+        for url in extract_streams_from_text(page_html, match_url)[:MAX_EXTRACTED_STREAMS]:
             if url not in seen_urls:
                 seen_urls.add(url)
                 if await verify_stream_live(client, url, match_url):

@@ -88,6 +88,38 @@ reached. Existing manually configured trackers continue to work.
 | `PREFETCH_CHUNK_COUNT` | `5` | Maximum upcoming numeric chunks to read ahead |
 | `PREFETCH_CONCURRENCY` | `2` | Maximum concurrent read-ahead downloads |
 | `CATALOG_REFRESH_SECONDS` | `3600` | Minimum time between ESPN college team-directory refreshes |
+| `FFMPEG_PATH` | `ffmpeg` | Path to the ffmpeg executable used for Multi-View compositing (resolved via PATH if not absolute) |
+| `MULTIVIEW_HWACCEL` | `nvenc` | Multi-View encoder backend: `nvenc` (NVIDIA), `qsv` (Intel Quick Sync), or `none` (software libx264 fallback) |
+| `MULTIVIEW_BITRATE` | `6M` | Target video bitrate for a composited Multi-View output |
+| `MULTIVIEW_SEGMENT_SECONDS` | `4` | HLS segment duration for Multi-View output |
+| `MULTIVIEW_IDLE_TIMEOUT_SECONDS` | `180` | Idle seconds before an unused Multi-View ffmpeg process is stopped |
+| `MULTIVIEW_IDLE_CHECK_INTERVAL` | `30` | How often the idle monitor scans running Multi-View processes |
+| `MULTIVIEW_STARTUP_TIMEOUT_SECONDS` | `30` | Max seconds to wait for the first HLS segment before failing a Multi-View request |
+
+### Multi-View channels (server-side FFmpeg compositing)
+
+A Multi-View channel composites 2 or 4 existing channels into one grid feed (side-by-side or 2x2) using
+server-side FFmpeg transcoding, created from the dashboard's **Channels** tab.
+
+The Windows executable can bundle a portable `ffmpeg.exe` at build time (the same way it bundles the
+Playwright Chromium browser), so a built exe works on another machine without a separate FFmpeg install.
+If a build didn't have one available to bundle, or you're running from source/Docker, Jellyball falls back
+to a system-installed `ffmpeg` (via PATH or `FFMPEG_PATH`) and shows a dashboard warning if none is found.
+
+**Building a self-contained exe with FFmpeg included:**
+1. Download an FFmpeg build with NVENC (NVIDIA) or Quick Sync (Intel) support from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) (the "essentials" build is a static single-file `ffmpeg.exe` with no extra DLLs) or the [BtbN builds](https://github.com/BtbN/FFmpeg-Builds/releases).
+2. Extract it. By default the build looks for `ffmpeg.exe` at `%LOCALAPPDATA%\ffmpeg\bin\ffmpeg.exe`; place it there, or set the `FFMPEG_BUNDLE_PATH` environment variable to wherever you extracted it before running `build-self-contained.ps1`.
+3. Run the build. The script prints whether it found and bundled an ffmpeg binary; if not found, the build still succeeds and just requires a separate install at runtime (see below).
+4. Verify hardware encoding is available in your extracted build: `ffmpeg -encoders | findstr "nvenc qsv"`.
+
+**Installing FFmpeg separately instead** (source/Docker runs, or an exe built without one bundled):
+1. Download and extract an FFmpeg build as above.
+2. Either add its `bin` folder to your `PATH`, or set `FFMPEG_PATH` in `.env` to the full path of `ffmpeg.exe`.
+3. Restart Jellyball. The dashboard's Multi-View section shows a warning if ffmpeg still isn't found.
+
+Without hardware acceleration, set `MULTIVIEW_HWACCEL=none` to fall back to CPU (libx264) encoding — expect
+significantly higher CPU usage per composited channel. Docker deployments get the same software-only
+fallback unless a CUDA-enabled base image and NVIDIA container runtime are configured separately.
 
 ### Provider roles and diagnostics
 
