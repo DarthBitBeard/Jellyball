@@ -731,11 +731,11 @@ class JellyballChangesTests(unittest.TestCase):
 
     def test_multiview_xstack_filters_match_expected_layout_syntax(self):
         side_by_side = _build_xstack_filter("side_by_side_2", 2)
-        self.assertIn("xstack=inputs=2:layout=0_0|w0_0[vout]", side_by_side)
+        self.assertIn("xstack=inputs=2:layout=0_0|w0_0,fps=30[vout]", side_by_side)
         self.assertEqual(side_by_side.count("scale=960:1080"), 2)
 
         grid = _build_xstack_filter("grid_2x2", 4)
-        self.assertIn("xstack=inputs=4:layout=0_0|w0_0|0_h0|w0_h0[vout]", grid)
+        self.assertIn("xstack=inputs=4:layout=0_0|w0_0|0_h0|w0_h0,fps=30[vout]", grid)
         self.assertEqual(grid.count("scale=960:540"), 4)
 
     def test_multiview_bufsize_preserves_unit_suffix(self):
@@ -751,18 +751,33 @@ class JellyballChangesTests(unittest.TestCase):
             "layout": "grid_2x2",
             "active_audio_team_id": "bucs",
         }
-        with patch.object(main, "PORT", 8000):
-            args = _build_multiview_ffmpeg_args("mv_test", data, Path("/fake/out"))
+        members = {team: {"name": team.title()} for team in ("lions", "dolphins", "bucs")}
+        with patch.object(main, "PORT", 8000), patch.dict(main.stream_state, members, clear=True),                 patch.dict(os.environ, {"JELLYBALL_HOST": ""}):
+            args = _build_multiview_ffmpeg_args("mv_test", data, Path("/fake/out"), [True, True, False, True], "nvenc")
 
         self.assertEqual(args.count("-reconnect"), 4)
-        self.assertIn("http://127.0.0.1:8000/stream/bucs", args)
-        map_indices = [args[i + 1] for i, a in enumerate(args) if a == "-map"]
-        self.assertEqual(map_indices, ["[vout]", "2:a:0"])
-        self.assertIn("seg_%05d.ts", args)
-        self.assertIn("index.m3u8", args)
-        # Segment paths must be relative (ffmpeg is spawned with cwd=out_dir) so the
-        # playlist references line up with what /multiview/{id}/{segment} serves.
-        self.assertNotIn(str(Path("/fake/out") / "seg_%05d.ts"), args)
+        self.assertEqual(args.count("-hwaccel"), 4)
+        inputs = [args[i + 1] for i, a in enumerate(args) if a == "-i"]
+        self.assertEqual(inputs, [
+            "http://127.0.0.1:8000/stream/lions.m3u8",
+            "http://127.0.0.1:8000/stream/dolphins.m3u8",
+            "http://127.0.0.1:8000/stream/bucs.m3u8",
+            # "jets" isn't a channel any more: its pane shows the placeholder.
+            "http://127.0.0.1:8000/stream/__placeholder__.m3u8",
+        ])
+        # Every member's audio is encoded; the active one is chosen per viewer
+        # session, not baked into the command.
+        map_values = [args[i + 1] for i, a in enumerate(args) if a == "-map"]
+        self.assertEqual(map_values, ["[vout]", "[a0]", "[a1]", "[a2]", "[a3]"])
+        graph = args[args.index("-filter_complex") + 1]
+        self.assertIn("anullsrc=r=48000:cl=stereo[a2]", graph)  # member without audio
+        self.assertIn("[1:a]aresample=async=1000", graph)
+        tee = args[args.index("tee") + 1]
+        self.assertEqual(tee.count("|"), 3)
+        self.assertIn(r"select=\'v:0,a:3\'", tee)
+        self.assertIn("hls_segment_filename=a0/seg_%06d.ts]a0/index.m3u8", tee)
+        # Relative output paths only (ffmpeg is spawned with cwd=out_dir).
+        self.assertNotIn("fake", tee)
 
     def test_multiview_member_validation_rejects_bad_selections(self):
         import main
@@ -891,8 +906,9 @@ class JellyballChangesTests(unittest.TestCase):
             main.stream_state.update(original_state)
 
         self.assertIn("NFL Sunday Quad-Box", playlist)
-        self.assertIn("🟢", playlist)  # health dot from the synthetic non-empty candidates sentinel
-        self.assertIn("http://127.0.0.1:8000/stream/mv_sunday", playlist)
+        # Names stay stable (no health emoji) and URLs carry the .m3u8 extension.
+        self.assertNotIn("🟢", playlist)
+        self.assertIn("http://127.0.0.1:8000/stream/mv_sunday.m3u8", playlist)
         self.assertIn("NFL Sunday Quad-Box", guide)
 
     def test_off_season_channel_excluded_from_m3u_and_xmltv(self):

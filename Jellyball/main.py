@@ -158,6 +158,7 @@ from stream_extractor import (
     is_ignored_url,
 )
 from network_safety import bounded_float, bounded_int, validate_http_url, validate_http_url_async
+from hls_session import FetchResult, SessionConfig, SessionHooks, SessionRegistry, SourceSpec
 
 # User settings are defaults; a .env beside the executable can override them.
 load_dotenv(dotenv_path=USER_ENV_FILE)
@@ -469,10 +470,7 @@ async def enforce_scheduled_disables_once() -> None:
         return
     for team_id, name in expired:
         try:
-            if team_id in stream_state:
-                await _stop_team_scrape_loop(team_id)
-                del stream_state[team_id]
-            await delete_team_async(team_id)
+            await _remove_channel(team_id)
             LOGGER.info("Auto-disabled scheduled team=%s name=%s", team_id, name)
         except Exception as exc:
             _log_failure(f"auto-disable team={team_id}", exc)
@@ -1821,6 +1819,7 @@ _CATALOG_LOCK = asyncio.Lock()
 CATALOG_FAILURE_RETRY_SECONDS = bounded_float(os.getenv("CATALOG_FAILURE_RETRY_SECONDS", "120"), 120.0, 30.0, 1800.0)
 
 SHARED_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
+MEDIA_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 PLAYWRIGHT_CLIENT: Optional[Playwright] = None
 SHARED_BROWSER: Optional[Browser] = None
 _PLAYWRIGHT_LOCK = asyncio.Lock()
@@ -2133,13 +2132,13 @@ async def _cancel_background_tasks() -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def _start_team_scrape_loop(team_id: str) -> asyncio.Task:
+def _start_team_scrape_loop(team_id: str, initial_delay: float = 0.0) -> asyncio.Task:
     existing = _TEAM_SCRAPE_TASKS.get(team_id)
     if existing and not existing.done():
         return existing
 
     _TEAM_SCRAPE_WAKE_EVENTS.setdefault(team_id, asyncio.Event())
-    task = asyncio.create_task(team_scrape_loop(team_id), name=f"scrape team={team_id}")
+    task = asyncio.create_task(team_scrape_loop(team_id, initial_delay), name=f"scrape team={team_id}")
     _TEAM_SCRAPE_TASKS[team_id] = task
 
     def _scrape_finished(done: asyncio.Task) -> None:
@@ -2692,7 +2691,7 @@ def _merge_stream_candidates(
     return merged[:MAX_STREAM_CANDIDATES], 0
 
 
-async def trigger_scrape(team_id: str):
+async def trigger_scrape(team_id: str, force: bool = False):
     if team_id in _SCRAPE_IN_FLIGHT:
         LOGGER.debug("Skipping duplicate scrape team=%s", team_id)
         return
@@ -2702,7 +2701,7 @@ async def trigger_scrape(team_id: str):
     _SCRAPE_IN_FLIGHT.add(team_id)
     _mark_scrape_started(data)
     try:
-        await _trigger_scrape(team_id)
+        await _trigger_scrape(team_id, force=force)
     except asyncio.CancelledError:
         _mark_scrape_finished(data, "cancelled")
         raise
@@ -2741,7 +2740,7 @@ def _resolve_schedule_status(
     return previous_start, previous_stop, ("always_live" if always_live else "lookup_failed")
 
 
-async def _trigger_scrape_unlocked(team_id: str):
+async def _trigger_scrape_unlocked(team_id: str, force: bool = False):
     if team_id not in stream_state:
         return
     query = stream_state[team_id]["query"]
@@ -2783,10 +2782,23 @@ async def _trigger_scrape_unlocked(team_id: str):
     if current is None:
         return
 
-    if not is_stream_window_active(current):
+    if _stream_window_should_close(team_id, current):
         current["candidates"] = []
         current["active_index"] = 0
         current["is_healthy"] = False
+        current["exhausted"] = False
+        return
+
+    if (
+        not force
+        and current.get("candidates")
+        and current.get("is_healthy")
+        and not current.get("exhausted")
+        and time.time() - current.get("last_candidate_refresh", 0.0) < HEALTHY_RESCRAPE_SECONDS
+    ):
+        # A healthy channel doesn't need its providers re-searched every 5 minutes
+        # (that was constant Playwright load for every 24/7 channel); refresh the
+        # standby list at HEALTHY_RESCRAPE_SECONDS, or sooner once it degrades.
         return
 
     previous_candidates = current.get("candidates", [])
@@ -2810,8 +2822,11 @@ async def _trigger_scrape_unlocked(team_id: str):
         )
         current["candidates"] = merged
         current["active_index"] = merged_index
+        current["exhausted"] = False
+        current["last_candidate_refresh"] = time.time()
         is_healthy = True
         current["is_healthy"] = True
+        SESSIONS.poke(team_id)
     elif previous_candidates:
         LOGGER.warning(
             "Keeping existing stream candidates after empty refresh team=%s count=%d",
@@ -2841,13 +2856,17 @@ async def _trigger_scrape_unlocked(team_id: str):
         request_jellyfin_guide_refresh_if_changed()
 
 
-async def _trigger_scrape(team_id: str):
+async def _trigger_scrape(team_id: str, force: bool = False):
     """Serialize all scrape-driven updates for one channel."""
     async with _team_state_lock(team_id):
-        await _trigger_scrape_unlocked(team_id)
+        await _trigger_scrape_unlocked(team_id, force=force)
 
 
-async def team_scrape_loop(team_id: str):
+async def team_scrape_loop(team_id: str, initial_delay: float = 0.0):
+    if initial_delay > 0:
+        # Spread startup scrapes out instead of launching every channel's provider
+        # searches (and Playwright pages) in the same instant.
+        await asyncio.sleep(initial_delay)
     while team_id in stream_state:
         scrape_failed = False
         try:
@@ -2875,6 +2894,9 @@ async def team_scrape_loop(team_id: str):
                 delay = min(SCRAPE_REFRESH_SECONDS, 900)
         if scrape_failed:
             delay = min(delay, 60)
+        # +/-10% jitter keeps channels that started together from re-scraping in
+        # lockstep (a pool/CPU/Chromium spike every SCRAPE_REFRESH_SECONDS).
+        delay = max(15.0, delay * random.uniform(0.9, 1.1))
         wake_event = _TEAM_SCRAPE_WAKE_EVENTS.get(team_id)
         if wake_event is None:
             return
@@ -2923,22 +2945,160 @@ async def _track_provider_response_time(provider: str, response_time_ms: int, su
     except Exception as exc:
         _log_failure("track provider response time", exc)
 
-async def _trigger_adaptive_bitrate_fallback(team_id: str, current_candidate_idx: int) -> bool:
-    """Attempt to switch to next candidate if current stream quality is degrading."""
+IDLE_HEALTH_INTERVAL = _positive_env_number("IDLE_HEALTH_INTERVAL", 30.0)
+HEALTH_FAILURE_THRESHOLD = bounded_int(os.getenv("HEALTH_FAILURE_THRESHOLD", "2"), 2, 1, 10)
+HEALTH_PROBE_TIMEOUT = _positive_env_number("HEALTH_PROBE_TIMEOUT", 12.0)
+STANDBY_PROBES_PER_CHANNEL = bounded_int(os.getenv("STANDBY_PROBES_PER_CHANNEL", "5"), 5, 1, 50)
+UNWATCHED_STANDBY_INTERVAL = _positive_env_number("UNWATCHED_STANDBY_INTERVAL", 300.0)
+HEALTHY_RESCRAPE_SECONDS = _positive_env_number("HEALTHY_RESCRAPE_SECONDS", 1800.0)
+STARTUP_SCRAPE_SPREAD_SECONDS = bounded_float(os.getenv("STARTUP_SCRAPE_SPREAD_SECONDS", "45"), 45.0, 0.0, 600.0)
+_ACTIVE_PROBE_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+
+def _pick_next_candidate(
+    candidates: List[dict],
+    current_index: int,
+    prefer_signature: Optional[tuple] = None,
+) -> Optional[int]:
+    """Choose the failover target: the freshest known-good standby first, then
+    never-checked ones, then ones that failed a while ago - wrapping around the
+    list instead of giving up at the end (the old code only ever tried
+    active_index + 1). Candidates the channel session found unplayable
+    (fMP4 / separate audio) are skipped, and a same-codec source is preferred
+    so Jellyfin's decoder doesn't have to switch codecs mid-stream."""
+    count = len(candidates)
+    if count < 2:
+        return None
+    now = time.time()
+    order = [(current_index + step) % count for step in range(1, count)]
+
+    def rank(index: int) -> Tuple[int, int, int]:
+        candidate = candidates[index]
+        ok = candidate.get("last_health_ok")
+        checked = float(candidate.get("last_health_check") or 0.0)
+        if ok is True and now - checked < 180:
+            tier = 0
+        elif ok is None or ok is True:
+            tier = 1
+        elif now - checked > 60:
+            tier = 2
+        else:
+            tier = 3  # failed moments ago; not worth switching to
+        signature = candidate.get("codec_signature")
+        codec_penalty = 0 if prefer_signature is None or signature in (None, prefer_signature) else 1
+        return tier, codec_penalty, order.index(index)
+
+    eligible = [
+        index for index in order
+        if candidates[index].get("session_compatible", True) is not False and rank(index)[0] < 3
+    ]
+    return min(eligible, key=rank) if eligible else None
+
+
+async def request_failover(team_id: str, source_key: tuple, reason: str, incompatible: bool = False) -> bool:
+    """Single failover entry point for channel sessions (real playback) and
+    health probes (unwatched channels). A no-op if the active candidate already
+    changed, so concurrent reporters can't double-advance."""
     data = stream_state.get(team_id)
-    if not data or current_candidate_idx >= len(data.get("candidates", [])) - 1:
+    if not data or data.get("type") == "multiview" or tuple(source_key) == PLACEHOLDER_SOURCE_KEY:
+        return False
+    candidates = data.get("candidates") or []
+    if not candidates:
+        return False
+    active_index = data.get("active_index", 0)
+    if active_index >= len(candidates) or candidate_source_key(candidates[active_index]) != tuple(source_key):
         return False
 
-    next_idx = current_candidate_idx + 1
-    data["active_index"] = next_idx
-    new_provider = data["candidates"][next_idx].get("provider", "Unknown")
-    LOGGER.info("Adaptive fallback team=%s new_index=%d reason=quality_degradation", team_id, next_idx)
-    await log_metric_event_async(team_id, new_provider, "failover", "Adaptive bitrate fallback due to quality degradation")
+    active = candidates[active_index]
+    active["last_health_ok"] = False
+    active["last_health_check"] = time.time()
+    if incompatible:
+        active["session_compatible"] = False
+    team_name = data.get("name", team_id)
+    next_index = _pick_next_candidate(candidates, active_index, active.get("codec_signature"))
+    if next_index is None:
+        data["is_healthy"] = False
+        data["exhausted"] = True
+        SESSIONS.poke(team_id)
+        _handle_candidates_exhausted(team_id, data, team_name)
+        return False
+
+    data["active_index"] = next_index
+    data["exhausted"] = False
+    new_provider = candidates[next_index].get("provider", "Unknown")
+    SESSIONS.poke(team_id)
+    LOGGER.info(
+        "Failover team=%s from=%s to=%s reason=%s",
+        team_id, active.get("provider", "Unknown"), new_provider, reason,
+    )
+    await log_metric_event_async(team_id, new_provider, "failover", reason)
     _spawn_background_task(
-        send_alert("⚠️ Stream Failover", f"Failed over to {new_provider} for **{data.get('name', team_id)}**.", "warning"),
+        send_alert("⚠️ Stream Failover", f"Failed over to {new_provider} for **{team_name}**.", "warning"),
         f"send failover alert team={team_id}",
     )
     return True
+
+
+def _handle_candidates_exhausted(team_id: str, data: dict, team_name: str) -> None:
+    current_time = time.monotonic()
+    if current_time - data.get("last_exhausted_alert", 0.0) >= EMERGENCY_SCRAPE_COOLDOWN:
+        data["last_exhausted_alert"] = current_time
+        _spawn_background_task(
+            send_alert("🚨 All Stream Candidates Exhausted", f"All candidates for **{team_name}** failed.", "danger"),
+            f"send exhausted-stream alert team={team_id}",
+        )
+    if current_time - data.get("last_emergency_scrape", 0.0) >= EMERGENCY_SCRAPE_COOLDOWN:
+        data["last_emergency_scrape"] = current_time
+        _spawn_background_task(emergency_rescrape(team_id), f"emergency rescrape team={team_id}")
+
+
+async def emergency_rescrape(team_id: str) -> None:
+    data = stream_state.get(team_id)
+    if data is None:
+        return
+    if team_id in _SCRAPE_IN_FLIGHT:
+        LOGGER.debug("Skipping emergency scrape already in progress team=%s", team_id)
+        return
+    _SCRAPE_IN_FLIGHT.add(team_id)
+    _mark_scrape_started(data)
+    try:
+        candidates = await master_scrape(
+            data["query"],
+            team_name=data.get("name", team_id),
+            team_id=team_id,
+            search_terms=data.get("search_terms") or None,
+            always_live=bool(data.get("always_live")),
+        )
+        current = stream_state.get(team_id)
+        if current is not None:
+            if candidates:
+                # Every known candidate just failed, so nothing is kept active, but
+                # standbys found again keep their health history.
+                merged, merged_index = _merge_stream_candidates(
+                    current.get("candidates", []), 0, candidates, keep_active=False
+                )
+                current["candidates"] = merged
+                current["active_index"] = merged_index
+                current["is_healthy"] = True
+                current["exhausted"] = False
+                current["last_candidate_refresh"] = time.time()
+                SESSIONS.poke(team_id)
+            else:
+                LOGGER.warning(
+                    "Keeping existing stream candidates after empty emergency refresh team=%s count=%d",
+                    team_id,
+                    len(current.get("candidates", [])),
+                )
+        _mark_scrape_finished(data, "healthy" if candidates else "empty")
+    except asyncio.CancelledError:
+        _mark_scrape_finished(data, "cancelled")
+        raise
+    except Exception as exc:
+        _mark_scrape_finished(data, "failed", type(exc).__name__)
+        _log_failure(f"emergency rescrape team={team_id}", exc, logging.ERROR)
+    finally:
+        _SCRAPE_IN_FLIGHT.discard(team_id)
+
 
 async def check_stream_health(url: str, referer: str, origin: str = "") -> bool:
     owns_client = SHARED_HTTP_CLIENT is None
@@ -2955,153 +3115,156 @@ async def check_stream_health(url: str, referer: str, origin: str = "") -> bool:
         if owns_client:
             await client.aclose()
 
-async def failover_monitor():
-    last_standby_check = 0.0
 
-    async def emergency_rescrape(team_id: str, data: dict, team_name: str) -> None:
-        if team_id not in stream_state:
+def _session_flowing(team_id: str) -> bool:
+    session = SESSIONS.peek(team_id)
+    return session is not None and session.is_watched() and session.is_flowing()
+
+
+def _stream_window_should_close(team_id: str, data: dict) -> bool:
+    """Outside the scheduled window, but keep a game that runs long (overtime,
+    rain delay) while people are watching it and it is still flowing."""
+    if is_stream_window_active(data):
+        return False
+    return not _session_flowing(team_id)
+
+
+async def _probe_active_candidate(team_id: str, data: dict) -> None:
+    global _ACTIVE_PROBE_SEMAPHORE
+    if _ACTIVE_PROBE_SEMAPHORE is None:
+        _ACTIVE_PROBE_SEMAPHORE = asyncio.Semaphore(ACTIVE_HEALTH_CONCURRENCY)
+    candidates = data.get("candidates") or []
+    active_index = data.get("active_index", 0)
+    if active_index >= len(candidates):
+        return
+    candidate = candidates[active_index]
+    try:
+        async with _ACTIVE_PROBE_SEMAPHORE:
+            try:
+                is_alive = await asyncio.wait_for(
+                    check_stream_health(candidate["url"], candidate.get("referer", ""), candidate.get("origin", "")),
+                    timeout=HEALTH_PROBE_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                is_alive = False
+        # The channel may have failed over (or started being watched) meanwhile.
+        if data.get("candidates") is not candidates or data.get("active_index", 0) != active_index:
             return
-        if team_id in _SCRAPE_IN_FLIGHT:
-            LOGGER.debug("Skipping emergency scrape already in progress team=%s", team_id)
+        candidate["last_health_check"] = time.time()
+        if is_alive:
+            candidate["last_health_ok"] = True
+            candidate["consecutive_failures"] = 0
+            data["is_healthy"] = True
             return
-        _SCRAPE_IN_FLIGHT.add(team_id)
-        _mark_scrape_started(data)
+        candidate["consecutive_failures"] = candidate.get("consecutive_failures", 0) + 1
+        if candidate["consecutive_failures"] < HEALTH_FAILURE_THRESHOLD:
+            # One failed probe is often a transient blip; re-check soon before acting.
+            data["next_active_probe"] = time.monotonic() + max(ACTIVE_HEALTH_INTERVAL * 2, 5.0)
+            return
+        candidate["last_health_ok"] = False
+        data["is_healthy"] = False
+        await request_failover(team_id, candidate_source_key(candidate), "health probe failed")
+    finally:
+        data["probe_in_flight"] = False
+
+
+async def _probe_standby_candidate(candidate: dict, semaphore: asyncio.Semaphore) -> None:
+    async with semaphore:
         try:
-            candidates = await master_scrape(
-                data["query"],
-                team_name=team_name,
-                team_id=team_id,
-                search_terms=data.get("search_terms") or None,
-                always_live=bool(data.get("always_live")),
+            is_alive = await asyncio.wait_for(
+                check_stream_health(candidate["url"], candidate.get("referer", ""), candidate.get("origin", "")),
+                timeout=HEALTH_PROBE_TIMEOUT,
             )
-            current = stream_state.get(team_id)
-            if current is not None:
-                if candidates:
-                    # All known candidates just failed, so nothing is worth keeping
-                    # active, but standbys found again keep their health history.
-                    merged, merged_index = _merge_stream_candidates(
-                        current.get("candidates", []), 0, candidates, keep_active=False
-                    )
-                    current["candidates"] = merged
-                    current["active_index"] = merged_index
-                    current["is_healthy"] = True
-                else:
-                    LOGGER.warning(
-                        "Keeping existing stream candidates after empty emergency refresh team=%s count=%d",
-                        team_id,
-                        len(current.get("candidates", [])),
-                    )
-            _mark_scrape_finished(data, "healthy" if candidates else "empty")
-        except asyncio.CancelledError:
-            _mark_scrape_finished(data, "cancelled")
-            raise
-        except Exception as exc:
-            _mark_scrape_finished(data, "failed", type(exc).__name__)
-            _log_failure(f"emergency rescrape team={team_id}", exc, logging.ERROR)
-        finally:
-            _SCRAPE_IN_FLIGHT.discard(team_id)
+        except asyncio.TimeoutError:
+            is_alive = False
+    candidate["last_health_check"] = time.time()
+    candidate["last_health_ok"] = is_alive
 
+
+async def standby_health_loop() -> None:
+    """Keep standby health fresh so failover picks a working source first. Runs
+    on its own so a slow sweep never delays active-stream failure detection.
+    Watched channels' standbys are probed every STANDBY_HEALTH_INTERVAL, others
+    every UNWATCHED_STANDBY_INTERVAL, at most STANDBY_PROBES_PER_CHANNEL each."""
+    last_unwatched_sweep = 0.0
     while True:
+        await asyncio.sleep(STANDBY_HEALTH_INTERVAL)
         try:
             now = time.monotonic()
-            check_standby = now - last_standby_check >= STANDBY_HEALTH_INTERVAL
-            standby_tasks = []
-            standby_semaphore = asyncio.Semaphore(STANDBY_HEALTH_CONCURRENCY)
-
-            async def probe_standby(team_id: str, candidate: dict) -> None:
-                async with standby_semaphore:
-                    is_alive = await check_stream_health(candidate["url"], candidate.get("referer", ""), candidate.get("origin", ""))
-                candidate["last_health_check"] = time.time()
-                candidate["last_health_ok"] = is_alive
-
-            active_semaphore = asyncio.Semaphore(ACTIVE_HEALTH_CONCURRENCY)
-
-            async def probe_active(team_id: str, active_stream: dict) -> Tuple[str, bool]:
-                async with active_semaphore:
-                    try:
-                        is_alive = await asyncio.wait_for(
-                            check_stream_health(active_stream["url"], active_stream.get("referer", ""), active_stream.get("origin", "")),
-                            timeout=8.0,
-                        )
-                    except asyncio.TimeoutError:
-                        is_alive = False
-                        LOGGER.warning("Active stream health check timed out team=%s", team_id)
-                return team_id, is_alive
-
-            # Collect the eligible teams first (cheap, synchronous), then run every
-            # team's active-stream health check concurrently instead of one at a time —
-            # with many channels, a slow/timing-out check used to stall every other
-            # team's failover detection behind it.
-            eligible = []
-            active_checks = []
+            include_unwatched = now - last_unwatched_sweep >= UNWATCHED_STANDBY_INTERVAL
+            if include_unwatched:
+                last_unwatched_sweep = now
+            semaphore = asyncio.Semaphore(STANDBY_HEALTH_CONCURRENCY)
+            probes = []
             for team_id, data in list(stream_state.items()):
-                if data.get("type") == "multiview":
+                if data.get("type") == "multiview" or not data.get("candidates"):
                     continue
-                if not is_stream_window_active(data):
-                    data["candidates"] = []
-                    data["active_index"] = 0
-                    data["is_healthy"] = False
+                if not include_unwatched and not SESSIONS.is_watched(team_id):
                     continue
-                if not data.get("candidates"):
-                    continue
-                active_idx = data.get("active_index", 0)
-                if active_idx >= len(data["candidates"]):
-                    active_idx = 0
-                    stream_state[team_id]["active_index"] = 0
-
-                active_stream = data["candidates"][active_idx]
-                eligible.append((team_id, data, active_idx, active_stream))
-                active_checks.append(probe_active(team_id, active_stream))
-
-            active_results = dict(await asyncio.gather(*active_checks)) if active_checks else {}
-
-            for team_id, data, active_idx, active_stream in eligible:
-                is_alive = active_results.get(team_id, False)
-                if is_alive:
-                    stream_state[team_id]["is_healthy"] = True
-                    active_stream["last_health_check"] = time.time()
-                    active_stream["last_health_ok"] = True
-                else:
-                    stream_state[team_id]["is_healthy"] = False
-                    active_stream["last_health_check"] = time.time()
-                    active_stream["last_health_ok"] = False
-                    team_name = data.get("name", team_id)
-                    next_idx = active_idx + 1
-
-                    if next_idx >= len(data["candidates"]):
-                        current_time = time.monotonic()
-                        last_emergency = data.get("last_emergency_scrape", 0.0)
-                        if current_time - data.get("last_exhausted_alert", 0.0) >= EMERGENCY_SCRAPE_COOLDOWN:
-                            data["last_exhausted_alert"] = current_time
-                            _spawn_background_task(
-                                send_alert("🚨 All Stream Candidates Exhausted", f"All candidates for **{team_name}** failed.", "danger"),
-                                f"send exhausted-stream alert team={team_id}",
-                            )
-                        if current_time - last_emergency >= EMERGENCY_SCRAPE_COOLDOWN:
-                            data["last_emergency_scrape"] = current_time
-                            _spawn_background_task(
-                                emergency_rescrape(team_id, data, team_name),
-                                f"emergency rescrape team={team_id}",
-                            )
-                    else:
-                        await _trigger_adaptive_bitrate_fallback(team_id, active_idx)
-
-                if check_standby and len(data["candidates"]) > 1:
-                    for idx, candidate in enumerate(data["candidates"]):
-                        if idx != stream_state[team_id].get("active_index", 0):
-                            standby_tasks.append(probe_standby(team_id, candidate))
-
-            if standby_tasks:
-                await asyncio.gather(*standby_tasks, return_exceptions=True)
-            if check_standby:
-                last_standby_check = now
+                active_index = data.get("active_index", 0)
+                standbys = [c for i, c in enumerate(data["candidates"]) if i != active_index]
+                for candidate in standbys[:STANDBY_PROBES_PER_CHANNEL]:
+                    probes.append(_probe_standby_candidate(candidate, semaphore))
+            if probes:
+                await asyncio.gather(*probes, return_exceptions=True)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            _log_failure("failover monitor iteration", exc, logging.ERROR)
-        await asyncio.sleep(ACTIVE_HEALTH_INTERVAL)
+            _log_failure("standby health sweep", exc, logging.ERROR)
+
+
+def _failover_monitor_tick() -> None:
+    now = time.monotonic()
+    for team_id, data in list(stream_state.items()):
+        if data.get("type") == "multiview":
+            entry = _MULTIVIEW_PROCESSES.get(team_id)
+            data["is_healthy"] = bool(entry and entry.get("ready") and not entry.get("exited"))
+            continue
+        if _stream_window_should_close(team_id, data):
+            if data.get("candidates"):
+                data["candidates"] = []
+                data["active_index"] = 0
+                data["is_healthy"] = False
+                data["exhausted"] = False
+            continue
+        candidates = data.get("candidates")
+        if not candidates:
+            continue
+        if data.get("active_index", 0) >= len(candidates):
+            data["active_index"] = 0
+
+        session = SESSIONS.peek(team_id)
+        if session is not None and session.is_watched():
+            # Real playback is the health signal for watched channels: the
+            # session reports stale playlists / failing segments itself, so no
+            # synthetic probes (which used to fail over on a single blip).
+            data["is_healthy"] = session.is_flowing()
+            continue
+
+        if data.get("probe_in_flight") or now < data.get("next_active_probe", 0.0):
+            continue
+        data["probe_in_flight"] = True
+        data["next_active_probe"] = now + IDLE_HEALTH_INTERVAL
+        _spawn_background_task(_probe_active_candidate(team_id, data), f"health probe team={team_id}")
+
+
+async def failover_monitor():
+    standby_task = asyncio.create_task(standby_health_loop(), name="standby health")
+    try:
+        while True:
+            try:
+                _failover_monitor_tick()
+            except Exception as exc:
+                _log_failure("failover monitor iteration", exc, logging.ERROR)
+            await asyncio.sleep(ACTIVE_HEALTH_INTERVAL)
+    finally:
+        standby_task.cancel()
+        await asyncio.gather(standby_task, return_exceptions=True)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global SHARED_HTTP_CLIENT, PLAYWRIGHT_CLIENT, SHARED_BROWSER, _PREFETCH_SEMAPHORE
+    global SHARED_HTTP_CLIENT, MEDIA_HTTP_CLIENT, PLAYWRIGHT_CLIENT, SHARED_BROWSER, _PREFETCH_SEMAPHORE
     global STREAM_STARTUP_BUFFER_SECONDS, PREFETCH_CHUNK_COUNT, STREAM_CHUNK_CACHE_TTL
 
     init_db()
@@ -3146,9 +3309,19 @@ async def lifespan(app: FastAPI):
         follow_redirects=True,
         http2=True
     )
+    # Separate pool for playback (playlists + segments): scrape bursts used to
+    # exhaust the shared pool and make segment fetches hit PoolTimeout. Long
+    # keepalive because segment polls are 2-6s apart (the 5s default expired
+    # between polls, paying a new TCP+TLS handshake on most requests). Redirects
+    # are followed manually so every hop is SSRF-validated.
+    MEDIA_HTTP_CLIENT = httpx.AsyncClient(
+        limits=httpx.Limits(max_keepalive_connections=64, max_connections=200, keepalive_expiry=60.0),
+        timeout=httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=3.0),
+        follow_redirects=False,
+        http2=True,
+    )
+    SESSIONS.sessions.clear()
     await _check_ffmpeg_available()
-    if FFMPEG_AVAILABLE:
-        _spawn_background_task(_ensure_placeholder_running(), "start shared placeholder stream")
     for (
         team_id,
         name,
@@ -3191,7 +3364,7 @@ async def lifespan(app: FastAPI):
             "auto_disable_after": auto_disable_after or "",
             **_scrape_lifecycle_defaults(),
         }
-        _start_team_scrape_loop(team_id)
+        _start_team_scrape_loop(team_id, initial_delay=random.uniform(0.0, STARTUP_SCRAPE_SPREAD_SECONDS))
 
     for (
         channel_id,
@@ -3207,10 +3380,14 @@ async def lifespan(app: FastAPI):
             member_team_ids = json.loads(encoded_member_ids or "[]")
         except (TypeError, ValueError, json.JSONDecodeError):
             member_team_ids = []
-        member_team_ids = [t for t in member_team_ids if t in stream_state]
+        member_team_ids = [str(t) for t in member_team_ids if str(t).strip()]
         if len(member_team_ids) not in (2, 4):
             LOGGER.warning("Skipping multiview channel with invalid member count: %s", channel_id)
             continue
+        missing = [t for t in member_team_ids if t not in stream_state]
+        if missing:
+            # Keep the Multi-View: removed members render as a "No Signal" pane.
+            LOGGER.warning("Multi-View %s references removed channels %s; showing No Signal for them", channel_id, missing)
         stream_state[channel_id] = {
             "name": mv_name, "query": "", "type": "multiview",
             "candidates": [{"synthetic": True}],  # non-empty sentinel only to satisfy generic health-dot/404 checks; not a real stream candidate
@@ -3228,20 +3405,26 @@ async def lifespan(app: FastAPI):
     prune_task = asyncio.create_task(prune_database_logs(), name="database log pruning")
     schedule_task = asyncio.create_task(enforce_scheduled_disables(), name="scheduled disable enforcement")
     multiview_idle_task = asyncio.create_task(multiview_idle_monitor(), name="multiview idle monitor")
+    multiview_watchdog_task = asyncio.create_task(multiview_watchdog(), name="multiview watchdog")
     yield
 
     monitor_task.cancel()
     prune_task.cancel()
     schedule_task.cancel()
     multiview_idle_task.cancel()
+    multiview_watchdog_task.cancel()
     scrape_tasks = list(_TEAM_SCRAPE_TASKS.values())
     for t in scrape_tasks:
         t.cancel()
     # Wait for tasks to safely wind down before closing shared clients.
-    await asyncio.gather(monitor_task, prune_task, schedule_task, multiview_idle_task, *scrape_tasks, return_exceptions=True)
+    await asyncio.gather(
+        monitor_task, prune_task, schedule_task, multiview_idle_task, multiview_watchdog_task, *scrape_tasks,
+        return_exceptions=True,
+    )
     _TEAM_SCRAPE_TASKS.clear()
     _TEAM_SCRAPE_WAKE_EVENTS.clear()
     _TEAM_STATE_LOCKS.clear()
+    await SESSIONS.close_all()
     for channel_id in list(_MULTIVIEW_PROCESSES):
         await _stop_multiview_process(channel_id)
     await _stop_placeholder_process()
@@ -3268,6 +3451,12 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             _log_failure("close shared HTTP client", exc)
         SHARED_HTTP_CLIENT = None
+    if MEDIA_HTTP_CLIENT:
+        try:
+            await MEDIA_HTTP_CLIENT.aclose()
+        except Exception as exc:
+            _log_failure("close media HTTP client", exc)
+        MEDIA_HTTP_CLIENT = None
     SHARED_BROWSER = None
     PLAYWRIGHT_CLIENT = None
     _PREFETCH_SEMAPHORE = None
@@ -3310,12 +3499,35 @@ async def request_diagnostics(request: Request, call_next):
     return response
 
 
+_UPSTREAM_REJECTION_LOGGED: "OrderedDict[Tuple[str, int], float]" = OrderedDict()
+
+
+def _log_upstream_rejection(url: str, status_code: int) -> None:
+    """Rate-limited: a dead source is polled every few seconds by its channel
+    session and would otherwise write a warning line per poll."""
+    host = urllib.parse.urlsplit(url).netloc
+    key = (host, status_code)
+    now = time.monotonic()
+    if now - _UPSTREAM_REJECTION_LOGGED.get(key, 0.0) < 60.0:
+        return
+    _UPSTREAM_REJECTION_LOGGED[key] = now
+    _UPSTREAM_REJECTION_LOGGED.move_to_end(key)
+    while len(_UPSTREAM_REJECTION_LOGGED) > 256:
+        _UPSTREAM_REJECTION_LOGGED.popitem(last=False)
+    LOGGER.warning(
+        "Upstream proxy resource rejected status=%s host=%s path=%s",
+        status_code, host, urllib.parse.urlsplit(url).path,
+    )
+
+
 async def _fetch_upstream_body(
     client: httpx.AsyncClient,
     url: str,
     headers: Dict[str, str],
     max_bytes: int,
+    timeout: Optional[httpx.Timeout] = None,
 ) -> Optional[tuple[int, str, str, bytes, Dict[str, str]]]:
+    """GET a bounded upstream body, validating every redirect hop (SSRF guard)."""
     current_url = url
     for _ in range(MAX_UPSTREAM_REDIRECTS + 1):
         safe_url = await validate_http_url_async(current_url)
@@ -3326,7 +3538,7 @@ async def _fetch_upstream_body(
                 "GET",
                 safe_url,
                 headers=headers,
-                timeout=STREAM_REQUEST_TIMEOUT,
+                timeout=timeout or STREAM_REQUEST_TIMEOUT,
                 follow_redirects=False,
             ) as response:
                 if 300 <= response.status_code < 400:
@@ -3336,12 +3548,7 @@ async def _fetch_upstream_body(
                     current_url = urllib.parse.urljoin(str(response.url), location)
                     continue
                 if response.status_code >= 400:
-                    LOGGER.warning(
-                        "Upstream proxy resource rejected status=%s host=%s path=%s",
-                        response.status_code,
-                        urllib.parse.urlsplit(str(response.url)).netloc,
-                        urllib.parse.urlsplit(str(response.url)).path,
-                    )
+                    _log_upstream_rejection(str(response.url), response.status_code)
                 content_length = response.headers.get("content-length")
                 try:
                     if content_length and int(content_length) > max_bytes:
@@ -3763,11 +3970,16 @@ def _multiview_bufsize(bitrate: str) -> str:
     return f"{doubled_str}{unit}"
 
 
-def _multiview_video_encoder_args() -> List[str]:
+def _multiview_video_encoder_args(encoder: Optional[str] = None) -> List[str]:
     """Encoder + rate-control flags. Kept per-backend because several of these
     (e.g. -forced-idr, -sc_threshold) are private AVOptions that only exist on
     some encoders and make ffmpeg fail outright with "Unrecognized option" on
-    others (notably h264_qsv), so they must not be shared unconditionally."""
+    others (notably h264_qsv), so they must not be shared unconditionally.
+
+    Keyframes are forced on the segment grid (fps is pinned to MULTIVIEW_FPS in
+    the filter graph), so every HLS output of the tee cuts at the same instants
+    and segments line up across the per-audio outputs."""
+    encoder = (encoder or MULTIVIEW_HWACCEL).lower()
     gop = MULTIVIEW_FPS * MULTIVIEW_SEGMENT_SECONDS
     common_rate_args = [
         "-b:v", MULTIVIEW_BITRATE,
@@ -3777,15 +3989,15 @@ def _multiview_video_encoder_args() -> List[str]:
         "-keyint_min", str(gop),
         "-bf", "0",
         "-pix_fmt", "yuv420p",
+        "-force_key_frames", f"expr:gte(t,n_forced*{MULTIVIEW_SEGMENT_SECONDS})",
     ]
-    if MULTIVIEW_HWACCEL == "nvenc":
+    if encoder == "nvenc":
         return [
             "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr",
             *common_rate_args,
-            "-sc_threshold", "0",
             "-forced-idr", "1",
         ]
-    if MULTIVIEW_HWACCEL == "qsv":
+    if encoder == "qsv":
         return [
             "-c:v", "h264_qsv", "-preset", "veryfast", "-look_ahead", "0",
             *common_rate_args,
@@ -3798,7 +4010,10 @@ def _multiview_video_encoder_args() -> List[str]:
 
 
 def _build_xstack_filter(layout: str, member_count: int) -> str:
-    """Return the -filter_complex string that scales/pads each input and stacks it into one grid."""
+    """Return the video part of -filter_complex: scale/pad each input and stack
+    them into one grid, pinned to MULTIVIEW_FPS (xstack otherwise emits a frame
+    whenever *any* input has one, so mixed 30/60fps members made the output rate
+    irregular and broke the GOP-to-segment alignment)."""
     spec = MULTIVIEW_LAYOUTS[layout]
     pane_w, pane_h = spec["pane_w"], spec["pane_h"]
     parts = []
@@ -3811,69 +4026,161 @@ def _build_xstack_filter(layout: str, member_count: int) -> str:
             f"pad={pane_w}:{pane_h}:(ow-iw)/2:(oh-ih)/2,setsar=1[{label}]"
         )
     stack_inputs = "".join(f"[{label}]" for label in labels)
-    parts.append(f"{stack_inputs}xstack=inputs={member_count}:layout={spec['xstack']}[vout]")
+    parts.append(f"{stack_inputs}xstack=inputs={member_count}:layout={spec['xstack']},fps={MULTIVIEW_FPS}[vout]")
     return ";".join(parts)
 
 
-def _build_multiview_ffmpeg_args(channel_id: str, data: dict, out_dir: Path) -> List[str]:
-    """Pure command-builder (no I/O) so it can be unit tested without spawning ffmpeg."""
+def _build_multiview_audio_filter(audio_presence: List[bool]) -> str:
+    """One audio chain per member -> [a0]..[aN]. aresample=async smooths the
+    timestamp gaps a member's failover leaves behind; a member without audio
+    gets a silent track so every per-audio output always has one."""
+    parts = []
+    for idx, has_audio in enumerate(audio_presence):
+        if has_audio:
+            parts.append(
+                f"[{idx}:a]aresample=async=1000:first_pts=0,"
+                f"aformat=sample_rates=48000:channel_layouts=stereo[a{idx}]"
+            )
+        else:
+            parts.append(f"anullsrc=r=48000:cl=stereo[a{idx}]")
+    return ";".join(parts)
+
+
+def _multiview_tee_outputs(member_count: int) -> str:
+    """One muxed HLS output per member audio, all fed by the same encoded video.
+
+    Escaping is exact on purpose: inside the tee spec, the select value must be
+    written as select=\\'v:0,a:N\\' (a literal backslash before each quote in the
+    argv element) or ffmpeg rejects it. onfail=ignore keeps one broken output
+    from killing the others (the watchdog restarts the run if one stalls). No
+    temp_file flag: on Windows its rename-over fails whenever we have the
+    playlist open for reading, which would drop that output."""
+    slaves = []
+    for idx in range(member_count):
+        options = ":".join([
+            "f=hls",
+            f"select=\\'v:0,a:{idx}\\'",
+            "onfail=ignore",
+            f"hls_time={MULTIVIEW_SEGMENT_SECONDS}",
+            "hls_list_size=8",
+            "hls_flags=delete_segments+independent_segments",
+            "hls_segment_type=mpegts",
+            f"hls_segment_filename=a{idx}/seg_%06d.ts",
+        ])
+        slaves.append(f"[{options}]a{idx}/index.m3u8")
+    return "|".join(slaves)
+
+
+def _internal_base_url() -> str:
+    """Base URL ffmpeg uses to read our own member sessions."""
+    host = (os.getenv("JELLYBALL_HOST") or "127.0.0.1").strip()
+    if host in ("", "0.0.0.0", "::", "[::]", "localhost"):
+        host = "127.0.0.1"
+    return f"http://{host}:{PORT}"
+
+
+def _multiview_input_url(team_id: str) -> str:
+    if team_id not in stream_state:
+        # A member that was deleted shows the "No Signal" pane instead of
+        # breaking the whole Multi-View.
+        team_id = PLACEHOLDER_SESSION_ID
+    return f"{_internal_base_url()}/stream/{team_id}.m3u8"
+
+
+def _build_multiview_ffmpeg_args(
+    channel_id: str,
+    data: dict,
+    out_dir: Path,
+    audio_presence: Optional[List[bool]] = None,
+    encoder: Optional[str] = None,
+) -> List[str]:
+    """Pure command-builder (no I/O) so it can be unit tested without spawning ffmpeg.
+
+    Inputs are the members' channel sessions, which never 502, follow failover,
+    and are normalized (fixed PIDs, continuous timestamps), so one member's
+    provider switching no longer freezes its pane or the whole grid. The run
+    writes one HLS output per member audio under a{N}/ (relative to cwd=out_dir)."""
     member_team_ids: List[str] = data["member_team_ids"]
     layout = data.get("layout", "grid_2x2")
-    active_audio_team_id = data.get("active_audio_team_id") or member_team_ids[0]
-    audio_index = member_team_ids.index(active_audio_team_id) if active_audio_team_id in member_team_ids else 0
+    encoder = (encoder or MULTIVIEW_HWACCEL).lower()
+    audio_presence = list(audio_presence) if audio_presence else [True] * len(member_team_ids)
 
-    args: List[str] = ["-y"]
+    args: List[str] = ["-y", "-hide_banner", "-nostats", "-loglevel", "warning"]
     for team_id in member_team_ids:
+        if encoder == "nvenc":
+            # Decode on the GPU as well (frames are downloaded for the CPU
+            # scale/pad/xstack filters); ffmpeg falls back to software decoding
+            # per stream if NVDEC can't handle one.
+            args += ["-hwaccel", "cuda"]
         args += [
             "-reconnect", "1",
             "-reconnect_streamed", "1",
             "-reconnect_on_network_error", "1",
             "-reconnect_delay_max", "5",
             "-rw_timeout", "15000000",
-            "-i", f"http://127.0.0.1:{PORT}/stream/{team_id}",
+            "-thread_queue_size", "1024",
+            "-i", _multiview_input_url(team_id),
         ]
 
-    args += ["-filter_complex", _build_xstack_filter(layout, len(member_team_ids))]
-    args += ["-map", "[vout]", "-map", f"{audio_index}:a:0"]
-    args += _multiview_video_encoder_args()
-    args += ["-c:a", "aac", "-b:a", "160k", "-ac", "2"]
-    args += [
-        "-f", "hls",
-        "-hls_time", str(MULTIVIEW_SEGMENT_SECONDS),
-        "-hls_list_size", "6",
-        "-hls_flags", "delete_segments+independent_segments",
-        "-hls_segment_type", "mpegts",
-        # Relative filenames only: ffmpeg writes these verbatim into the .m3u8
-        # segment list, and the process is spawned with cwd=out_dir so both the
-        # written files and the playlist references line up.
-        "-hls_segment_filename", "seg_%05d.ts",
-        "index.m3u8",
-    ]
+    filter_graph = ";".join([
+        _build_xstack_filter(layout, len(member_team_ids)),
+        _build_multiview_audio_filter(audio_presence),
+    ])
+    args += ["-filter_complex", filter_graph]
+    args += ["-map", "[vout]"]
+    for idx in range(len(member_team_ids)):
+        args += ["-map", f"[a{idx}]"]
+    args += _multiview_video_encoder_args(encoder)
+    args += ["-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000"]
+    # Don't let one briefly starved audio member hold every output for the
+    # default 10s interleave window.
+    args += ["-max_interleave_delta", "2000000"]
+    args += ["-f", "tee", _multiview_tee_outputs(len(member_team_ids))]
     return args
 
 
+def _child_process_creationflags() -> int:
+    """No console window per ffmpeg/taskkill child in the windowed tray exe."""
+    if sys.platform == "win32":
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    return 0
+
+
 def _multiview_popen_kwargs(out_dir: Path) -> dict:
-    return {
+    kwargs = {
         "cwd": str(out_dir),
         "stdin": asyncio.subprocess.DEVNULL,
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.STDOUT,
     }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = _child_process_creationflags()
+    return kwargs
 
 
 async def _drain_multiview_log(channel_id: str, process: "asyncio.subprocess.Process", log_lines: "deque[str]") -> None:
-    """Continuously read ffmpeg's combined stdout/stderr pipe and discard it into a
-    rolling buffer. This is not optional: ffmpeg writes a steady stream of progress
-    output, and an unread PIPE fills its OS buffer (~64KB) and blocks the writing
-    process indefinitely — an unread ffmpeg hangs forever without ever producing
-    a single output segment."""
+    """Continuously read ffmpeg's combined stdout/stderr pipe into a rolling
+    buffer. This is not optional: an unread PIPE fills its OS buffer (~64KB) and
+    blocks ffmpeg forever. Read in chunks rather than readline(): ffmpeg's
+    progress output ends in '\\r', and readline() raises once 64KB arrive with no
+    '\\n', which used to kill this task and then hang ffmpeg."""
+    pending = b""
     try:
         while True:
-            line = await process.stdout.readline()
-            if not line:
+            chunk = await process.stdout.read(8192)
+            if not chunk:
                 break
-            log_lines.append(line.decode(errors="replace").rstrip())
-    except (asyncio.CancelledError, ValueError):
+            pending += chunk
+            *lines, pending = re.split(rb"[\r\n]+", pending)
+            for line in lines:
+                if line.strip():
+                    log_lines.append(line.decode(errors="replace").rstrip())
+            if len(pending) > 16384:
+                log_lines.append(pending[-1024:].decode(errors="replace"))
+                pending = b""
+        if pending.strip():
+            log_lines.append(pending.decode(errors="replace").rstrip())
+    except asyncio.CancelledError:
         raise
     except Exception as exc:
         _log_failure(f"drain ffmpeg log multiview={channel_id}", exc)
@@ -4073,15 +4380,71 @@ def _running_multiview_count(exclude: str = "") -> int:
     )
 
 
+MULTIVIEW_MEMBER_WARM_TIMEOUT = bounded_float(os.getenv("MULTIVIEW_MEMBER_WARM_TIMEOUT", "20"), 20.0, 3.0, 120.0)
+MULTIVIEW_WATCHDOG_INTERVAL = bounded_float(os.getenv("MULTIVIEW_WATCHDOG_INTERVAL", "3"), 3.0, 1.0, 60.0)
+MULTIVIEW_AUDIO_CHANNELS = os.getenv("MULTIVIEW_AUDIO_CHANNELS", "1").strip().lower() not in ("0", "false", "no")
+NVENC_FALLBACK_SECONDS = 3600.0
+PLACEHOLDER_SESSION_ID = "__placeholder__"
+_NVENC_FAILED_AT = 0.0
+_MULTIVIEW_RUN_COUNTER = 0
+_MULTIVIEW_START_TASKS: Dict[str, asyncio.Task] = {}
+_MULTIVIEW_LAST_VIEWER: Dict[str, float] = {}
+_NVENC_ERROR_MARKERS = (
+    "nvenc", "no capable devices", "openencodesessionex", "cuda", "cannot load nvcuda",
+    "driver does not support", "no nvenc capable",
+)
+
+
+def _multiview_encoder_choice() -> str:
+    if MULTIVIEW_HWACCEL == "nvenc" and time.monotonic() - _NVENC_FAILED_AT < NVENC_FALLBACK_SECONDS and _NVENC_FAILED_AT:
+        return "none"
+    return MULTIVIEW_HWACCEL
+
+
+def _looks_like_hw_encoder_failure(log_lines) -> bool:
+    text = "\n".join(log_lines).lower()
+    return any(marker in text for marker in _NVENC_ERROR_MARKERS)
+
+
+def _multiview_audio_index(data: dict) -> int:
+    members = data.get("member_team_ids") or []
+    active = data.get("active_audio_team_id") or (members[0] if members else "")
+    return members.index(active) if active in members else 0
+
+
+def _multiview_member_label(team_id: str) -> str:
+    member = stream_state.get(team_id)
+    return str(member.get("name") or team_id) if member else f"{team_id} (removed)"
+
+
+async def _warm_multiview_members(member_team_ids: List[str]) -> List[bool]:
+    """Start every member's channel session in parallel and wait for each to
+    have a playable window before ffmpeg opens them one after another (four
+    cold members used to blow the startup timeout). Returns audio presence per
+    member, as reported by each session's TS normalizer."""
+    sessions = []
+    for team_id in member_team_ids:
+        session_id = team_id if team_id in stream_state else PLACEHOLDER_SESSION_ID
+        session = SESSIONS.get(session_id)
+        session.touch()
+        sessions.append(session)
+    await asyncio.gather(
+        *(session.wait_ready(MULTIVIEW_MEMBER_WARM_TIMEOUT) for session in sessions),
+        return_exceptions=True,
+    )
+    return [session.has_audio is not False for session in sessions]
+
+
 async def _spawn_multiview(channel_id: str, data: dict) -> Tuple[bool, str]:
     """Start ffmpeg for a multiview channel if it isn't already running.
-    Returns (True, "") once the first segment is ready, or (False, detail) on refusal/failure —
-    `detail` is only meaningful when no entry has been recorded in _MULTIVIEW_FAILURES (the
-    caller prefers that dict's message when one exists, e.g. after a real ffmpeg failure)."""
+    Returns (True, "") once every per-audio output has a first segment, or
+    (False, detail) on refusal/failure - `detail` is only meaningful when no entry
+    has been recorded in _MULTIVIEW_FAILURES (the caller prefers that dict's
+    message when one exists, e.g. after a real ffmpeg failure)."""
+    global _MULTIVIEW_RUN_COUNTER, _NVENC_FAILED_AT
     async with _multiview_lock(channel_id):
         entry = _MULTIVIEW_PROCESSES.get(channel_id)
         if entry and entry["process"].returncode is None and not entry.get("exited"):
-            entry["last_access"] = time.monotonic()
             return True, ""
 
         if not FFMPEG_AVAILABLE:
@@ -4104,68 +4467,212 @@ async def _spawn_multiview(channel_id: str, data: dict) -> Tuple[bool, str]:
                 "channel(s) are already running. Stop one first, or raise MAX_CONCURRENT_MULTIVIEW."
             )
 
-        out_dir = MULTIVIEW_OUTPUT_ROOT / channel_id
-        shutil.rmtree(out_dir, ignore_errors=True)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        members = list(data["member_team_ids"])
+        audio_presence = await _warm_multiview_members(members)
 
-        args = _build_multiview_ffmpeg_args(channel_id, data, out_dir)
-        try:
-            process = await asyncio.create_subprocess_exec(FFMPEG_PATH, *args, **_multiview_popen_kwargs(out_dir))
-        except (FileNotFoundError, OSError) as exc:
-            _log_failure(f"spawn ffmpeg multiview={channel_id}", exc, logging.ERROR)
-            return False, "Multi-View stream failed to start: could not launch ffmpeg"
-        _assign_child_to_cleanup_job(process.pid)
+        for attempt in range(2):
+            encoder = _multiview_encoder_choice()
+            _MULTIVIEW_RUN_COUNTER += 1
+            run_id = _MULTIVIEW_RUN_COUNTER
+            run_dir = MULTIVIEW_OUTPUT_ROOT / channel_id / f"run{run_id}"
+            shutil.rmtree(run_dir, ignore_errors=True)
+            for idx in range(len(members)):
+                (run_dir / f"a{idx}").mkdir(parents=True, exist_ok=True)
 
-        log_lines: "deque[str]" = deque(maxlen=200)
-        watch_task = _spawn_background_task(
-            _watch_multiview_process(channel_id, process),
-            f"watch multiview ffmpeg={channel_id}",
-        )
-        log_task = _spawn_background_task(
-            _drain_multiview_log(channel_id, process, log_lines),
-            f"drain multiview ffmpeg log={channel_id}",
-        )
-        _MULTIVIEW_PROCESSES[channel_id] = {
-            "process": process,
-            "output_dir": out_dir,
-            "started_at": time.monotonic(),
-            "last_access": time.monotonic(),
-            "exited": False,
-            "exit_code": None,
-            "watch_task": watch_task,
-            "log_task": log_task,
-            "log_lines": log_lines,
-        }
+            args = _build_multiview_ffmpeg_args(channel_id, data, run_dir, audio_presence, encoder)
+            try:
+                process = await asyncio.create_subprocess_exec(FFMPEG_PATH, *args, **_multiview_popen_kwargs(run_dir))
+            except (FileNotFoundError, OSError) as exc:
+                _log_failure(f"spawn ffmpeg multiview={channel_id}", exc, logging.ERROR)
+                shutil.rmtree(run_dir, ignore_errors=True)
+                return False, "Multi-View stream failed to start: could not launch ffmpeg"
+            _assign_child_to_cleanup_job(process.pid)
 
-        ready = await _wait_for_first_segment(out_dir, process, MULTIVIEW_STARTUP_TIMEOUT_SECONDS)
-        if not ready:
+            log_lines: "deque[str]" = deque(maxlen=200)
+            watch_task = _spawn_background_task(
+                _watch_multiview_process(channel_id, process),
+                f"watch multiview ffmpeg={channel_id}",
+            )
+            log_task = _spawn_background_task(
+                _drain_multiview_log(channel_id, process, log_lines),
+                f"drain multiview ffmpeg log={channel_id}",
+            )
+            now = time.monotonic()
+            _MULTIVIEW_PROCESSES[channel_id] = {
+                "process": process,
+                "output_dir": run_dir,
+                "run_id": run_id,
+                "audio_count": len(members),
+                "encoder": encoder,
+                "ready": False,
+                "started_at": now,
+                "last_access": max(now, _MULTIVIEW_LAST_VIEWER.get(channel_id, 0.0)),
+                "exited": False,
+                "exit_code": None,
+                "watch_task": watch_task,
+                "log_task": log_task,
+                "log_lines": log_lines,
+            }
+
+            results = await asyncio.gather(*(
+                _wait_for_first_segment(run_dir / f"a{idx}", process, MULTIVIEW_STARTUP_TIMEOUT_SECONDS)
+                for idx in range(len(members))
+            ))
+            if all(results):
+                _MULTIVIEW_PROCESSES[channel_id]["ready"] = True
+                _clear_multiview_failure(channel_id)
+                LOGGER.info("Multi-View running channel=%s run=%d encoder=%s", channel_id, run_id, encoder)
+                for session_id in _multiview_view_session_ids(channel_id):
+                    SESSIONS.poke(session_id)
+                return True, ""
+
             failed_entry = _MULTIVIEW_PROCESSES.get(channel_id)
-            error = _multiview_error_from_log(failed_entry.get("log_lines", [])) if failed_entry else "ffmpeg exited unexpectedly"
-            _record_multiview_failure(channel_id, error)
-            LOGGER.error("multiview channel=%s failed to produce a first segment in time: %s", channel_id, error)
+            lines = list(failed_entry.get("log_lines", [])) if failed_entry else []
+            error = _multiview_error_from_log(lines) if lines else "ffmpeg exited unexpectedly"
             await _stop_multiview_process(channel_id)
+            if encoder == "nvenc" and attempt == 0 and _looks_like_hw_encoder_failure(lines):
+                # GPU unavailable (driver, session limit shared with Jellyfin's own
+                # transcodes, ...): fall back to software encoding for a while
+                # instead of failing into backoff.
+                _NVENC_FAILED_AT = time.monotonic()
+                LOGGER.warning("NVENC unavailable for multiview channel=%s (%s); retrying with libx264", channel_id, error)
+                continue
+            _record_multiview_failure(channel_id, error)
+            LOGGER.error("multiview channel=%s failed to produce first segments in time: %s", channel_id, error)
             return False, ""
-        _clear_multiview_failure(channel_id)
-        return True, ""
+        return False, ""
 
 
-async def _serve_multiview_stream(channel_id: str, data: dict, request: Request):
+def _request_multiview_start(channel_id: str) -> None:
+    data = stream_state.get(channel_id)
+    if not data or data.get("type") != "multiview":
+        return
+    task = _MULTIVIEW_START_TASKS.get(channel_id)
+    if task is not None and not task.done():
+        return
+    if _multiview_cooldown_remaining(channel_id) > 0:
+        return
+    _MULTIVIEW_START_TASKS[channel_id] = _spawn_background_task(
+        _spawn_multiview(channel_id, data), f"start multiview channel={channel_id}"
+    )
+
+
+def _multiview_view_session_ids(channel_id: str) -> List[str]:
+    data = stream_state.get(channel_id) or {}
+    return [channel_id] + [f"{channel_id}#a{idx}" for idx in range(len(data.get("member_team_ids") or []))]
+
+
+def _multiview_view_for_session(session_id: str) -> Optional[Tuple[str, Optional[int]]]:
+    """Map a session id to (multiview channel, audio index or None for 'active audio')."""
+    if "#a" in session_id:
+        channel_id, _, index_text = session_id.rpartition("#a")
+        data = stream_state.get(channel_id)
+        if data and data.get("type") == "multiview" and index_text.isdigit():
+            return channel_id, int(index_text)
+        return None
+    data = stream_state.get(session_id)
+    if data and data.get("type") == "multiview":
+        return session_id, None
+    return None
+
+
+def _resolve_multiview_view_source(channel_id: str, audio_index: Optional[int]) -> Optional[SourceSpec]:
+    data = stream_state.get(channel_id)
+    if not data or data.get("type") != "multiview":
+        return None
+    entry = _MULTIVIEW_PROCESSES.get(channel_id)
+    if entry and entry.get("ready") and entry["process"].returncode is None and not entry.get("exited"):
+        members = data.get("member_team_ids") or []
+        index = _multiview_audio_index(data) if audio_index is None else audio_index
+        index = max(0, min(index, entry["audio_count"] - 1))
+        label = _multiview_member_label(members[index]) if index < len(members) else f"audio {index}"
+        # Same key for every audio output of one run: switching the main
+        # channel's audio is just a URL change and continues seamlessly (all
+        # outputs share segment numbers and timestamps). A new run (restart)
+        # is a new key -> discontinuity, re-based timestamps.
+        return SourceSpec(
+            key=("multiview", channel_id, entry["run_id"]),
+            url=str(entry["output_dir"] / f"a{index}" / "index.m3u8"),
+            local=True,
+            label=f"Multi-View {label}",
+        )
+    _request_multiview_start(channel_id)
+    if _multiview_cooldown_remaining(channel_id) > 0 or not FFMPEG_AVAILABLE:
+        return _placeholder_source()
+    return None  # starting: the session waits (and keeps its current window)
+
+
+def _touch_multiview_viewer(channel_id: str) -> None:
+    now = time.monotonic()
+    _MULTIVIEW_LAST_VIEWER[channel_id] = now
     entry = _MULTIVIEW_PROCESSES.get(channel_id)
     if entry:
-        entry["last_access"] = time.monotonic()
-    if not entry or entry["process"].returncode is not None or entry.get("exited"):
-        started, refusal_detail = await _spawn_multiview(channel_id, data)
-        if not started:
-            failure = _MULTIVIEW_FAILURES.get(channel_id)
-            if failure:
-                retry_in = round(_multiview_cooldown_remaining(channel_id))
-                detail = f"Multi-View stream failed to start: {failure['last_error']} (retrying in {retry_in}s)"
-            else:
-                detail = refusal_detail or "Multi-View stream failed to start: ffmpeg is unavailable"
-            return Response(status_code=502, content=detail)
-        entry = _MULTIVIEW_PROCESSES.get(channel_id)
-    host = request.headers.get("host") or f"127.0.0.1:{PORT}"
-    return RedirectResponse(url=f"http://{host}/multiview/{channel_id}/index.m3u8")
+        entry["last_access"] = now
+
+
+def _on_multiview_view_failure(session_id: str, source_key: tuple, reason: str) -> None:
+    view = _multiview_view_for_session(session_id)
+    if view is None or len(source_key) != 3 or source_key[0] != "multiview":
+        return
+    channel_id = view[0]
+    entry = _MULTIVIEW_PROCESSES.get(channel_id)
+    if entry and entry.get("run_id") == source_key[2]:
+        _spawn_background_task(
+            _restart_multiview(channel_id, f"view reported {reason}"),
+            f"restart multiview channel={channel_id}",
+        )
+
+
+async def _restart_multiview(channel_id: str, reason: str) -> None:
+    entry = _MULTIVIEW_PROCESSES.get(channel_id)
+    if entry is None or entry.get("restarting"):
+        return
+    entry["restarting"] = True
+    LOGGER.warning("Restarting multiview channel=%s reason=%s", channel_id, reason)
+    await _stop_multiview_process(channel_id)
+    _request_multiview_start(channel_id)
+
+
+def _newest_segment_age(output_dir: Path) -> Optional[float]:
+    newest = None
+    try:
+        for path in output_dir.glob("seg_*.ts"):
+            mtime = path.stat().st_mtime
+            newest = mtime if newest is None or mtime > newest else newest
+    except OSError:
+        return None
+    return None if newest is None else max(0.0, time.time() - newest)
+
+
+async def multiview_watchdog() -> None:
+    """Restart a Multi-View run whose output stalls (one frozen input can hold
+    xstack) or whose ffmpeg died while people are watching. The channel
+    sessions hide the restart behind a discontinuity."""
+    stall_after = max(3.0 * MULTIVIEW_SEGMENT_SECONDS, 12.0)
+    while True:
+        await asyncio.sleep(MULTIVIEW_WATCHDOG_INTERVAL)
+        try:
+            now = time.monotonic()
+            for channel_id, entry in list(_MULTIVIEW_PROCESSES.items()):
+                if not entry.get("ready") or entry.get("restarting"):
+                    continue
+                watched = now - entry.get("last_access", 0.0) < MULTIVIEW_IDLE_TIMEOUT_SECONDS
+                if entry["process"].returncode is not None or entry.get("exited"):
+                    if watched:
+                        await _restart_multiview(channel_id, f"ffmpeg exited code={entry.get('exit_code')}")
+                    continue
+                if now - entry["started_at"] < MULTIVIEW_STARTUP_TIMEOUT_SECONDS:
+                    continue
+                ages = await asyncio.to_thread(
+                    lambda e=entry: [_newest_segment_age(e["output_dir"] / f"a{i}") for i in range(e["audio_count"])]
+                )
+                stalled = [i for i, age in enumerate(ages) if age is None or age > stall_after]
+                if stalled:
+                    await _restart_multiview(channel_id, f"output stalled audio={stalled}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log_failure("multiview watchdog", exc)
 
 
 async def multiview_idle_monitor() -> None:
@@ -4173,19 +4680,22 @@ async def multiview_idle_monitor() -> None:
         try:
             now = time.monotonic()
             for channel_id, entry in list(_MULTIVIEW_PROCESSES.items()):
+                if entry.get("restarting"):
+                    continue
                 if entry["process"].returncode is not None or entry.get("exited"):
-                    LOGGER.warning("Reaping dead multiview ffmpeg channel=%s code=%s", channel_id, entry.get("exit_code"))
-                    await _stop_multiview_process(channel_id)
+                    if now - entry.get("last_access", 0.0) >= MULTIVIEW_IDLE_TIMEOUT_SECONDS:
+                        LOGGER.warning("Reaping dead multiview ffmpeg channel=%s code=%s", channel_id, entry.get("exit_code"))
+                        await _stop_multiview_process(channel_id)
                 elif now - entry.get("last_access", now) > MULTIVIEW_IDLE_TIMEOUT_SECONDS:
                     LOGGER.info("Stopping idle multiview ffmpeg channel=%s", channel_id)
                     await _stop_multiview_process(channel_id)
 
-            # The shared placeholder is meant to always be available; if it died
-            # unexpectedly, respawn it eagerly rather than waiting for the next
-            # dead-channel request to notice (this call is a cheap no-op when
-            # it's already running fine).
-            if FFMPEG_AVAILABLE:
-                await _ensure_placeholder_running()
+            # The placeholder runs on demand: channel sessions (re)start it when a
+            # channel has nothing live, and it stops after a stretch of disuse.
+            state = _PLACEHOLDER_STATE
+            if state and now - state.get("last_access", now) > PLACEHOLDER_IDLE_SECONDS:
+                LOGGER.info("Stopping idle placeholder ffmpeg")
+                await _stop_placeholder_process()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -4210,48 +4720,35 @@ def _multiview_member_validation(member_team_ids: List[str]) -> Optional[str]:
     return None
 
 
-_MULTIVIEW_SEGMENT_NAME_RE = re.compile(r"^seg_\d{5,}\.ts$")
-
-
-@app.get("/multiview/{channel_id}/index.m3u8")
-async def serve_multiview_playlist(channel_id: str):
+def _multiview_audio_view(channel_id: str, audio_index: int) -> Optional[dict]:
     data = stream_state.get(channel_id)
     if not data or data.get("type") != "multiview":
-        raise HTTPException(status_code=404, detail="Multi-View channel not found")
-    entry = _MULTIVIEW_PROCESSES.get(channel_id)
-    if not entry or entry["process"].returncode is not None or entry.get("exited"):
-        raise HTTPException(status_code=503, detail="Multi-View stream is not running")
-    entry["last_access"] = time.monotonic()
-    playlist_path = entry["output_dir"] / "index.m3u8"
-    playlist_bytes = await _read_hls_playlist_snapshot(playlist_path)
-    if playlist_bytes is None:
-        raise HTTPException(status_code=503, detail="Multi-View stream is starting")
-    return Response(
-        content=playlist_bytes,
-        media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"},
-    )
+        return None
+    if not 0 <= audio_index < len(data.get("member_team_ids") or []):
+        return None
+    return data
 
 
-@app.get("/multiview/{channel_id}/{segment_name}")
-async def serve_multiview_segment(channel_id: str, segment_name: str):
-    data = stream_state.get(channel_id)
-    if not data or data.get("type") != "multiview":
+@app.api_route("/multiview/{channel_id}/audio/{audio_index}.m3u8", methods=["GET", "HEAD"])
+async def serve_multiview_audio_playlist(channel_id: str, audio_index: int, request: Request):
+    """Per-audio Multi-View channel ("Name · 🔊 Team"): the same composited video
+    with one member's audio. Switching audio inside Jellyfin = changing channel,
+    which works on every client."""
+    if _multiview_audio_view(channel_id, audio_index) is None:
         raise HTTPException(status_code=404, detail="Multi-View channel not found")
-    if not _MULTIVIEW_SEGMENT_NAME_RE.match(segment_name):
-        raise HTTPException(status_code=404, detail="Segment not found")
-    entry = _MULTIVIEW_PROCESSES.get(channel_id)
-    if not entry:
-        raise HTTPException(status_code=404, detail="Segment not found")
-    entry["last_access"] = time.monotonic()
-    segment_path = entry["output_dir"] / segment_name
-    if not segment_path.is_file():
-        raise HTTPException(status_code=404, detail="Segment not found")
-    return FileResponse(
-        segment_path,
-        media_type="video/mp2t",
-        headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"},
-    )
+    if request.method == "HEAD":
+        return Response(status_code=200, media_type=HLS_MEDIA_TYPE, headers={"Cache-Control": "no-cache"})
+    _touch_multiview_viewer(channel_id)
+    _maybe_record_playback_event(channel_id)
+    return await _serve_session_playlist(f"{channel_id}#a{audio_index}", f"{audio_index}/seg/")
+
+
+@app.get("/multiview/{channel_id}/audio/{audio_index}/seg/{seq}.ts")
+async def serve_multiview_audio_segment(channel_id: str, audio_index: int, seq: int):
+    if _multiview_audio_view(channel_id, audio_index) is None:
+        raise HTTPException(status_code=404, detail="Multi-View channel not found")
+    _touch_multiview_viewer(channel_id)
+    return _serve_session_segment(f"{channel_id}#a{audio_index}", seq)
 
 
 # --- SHARED "NO SIGNAL" PLACEHOLDER ---
@@ -4266,6 +4763,7 @@ async def serve_multiview_segment(channel_id: str, segment_name: str):
 # always succeeds.
 PLACEHOLDER_OUTPUT_DIR = DATA_DIR / "placeholder"
 PLACEHOLDER_STARTUP_TIMEOUT_SECONDS = 20.0
+PLACEHOLDER_IDLE_SECONDS = bounded_float(os.getenv("PLACEHOLDER_IDLE_SECONDS", "900"), 900.0, 60.0, 86400.0)
 _PLACEHOLDER_STATE: Optional[dict] = None
 _PLACEHOLDER_LOCK = asyncio.Lock()
 
@@ -4273,23 +4771,30 @@ _PLACEHOLDER_LOCK = asyncio.Lock()
 def _build_placeholder_ffmpeg_args(out_dir: Path) -> List[str]:
     """Pure command-builder for the shared "No Signal" loop (no I/O, unit-testable)."""
     logo_path = _resource_path("assets/jellyball-logo.png")
+    # -re paces both inputs at real time: without it ffmpeg encoded this loop as
+    # fast as the CPU allowed (pinning a core and racing segments far ahead of
+    # the wall clock). 1080p30 with 2s segments so a channel that starts on the
+    # placeholder and then goes live doesn't make Jellyfin lock in a low
+    # resolution/frame rate from its initial probe, and so a cold start has a
+    # playable buffer within a few seconds.
     return [
         "-y",
-        "-loop", "1", "-i", str(logo_path),
-        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+        "-hide_banner", "-nostats", "-loglevel", "warning",
+        "-re", "-loop", "1", "-framerate", "30", "-i", str(logo_path),
+        "-re", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
         "-vf", (
-            "scale=1280:720:force_original_aspect_ratio=decrease,"
-            "pad=1280:720:(ow-iw)/2:(oh-ih)/2,"
-            "drawtext=text='No Signal':font='Sans':fontcolor=white:fontsize=48:"
-            "box=1:boxcolor=black@0.5:boxborderw=12:x=(w-text_w)/2:y=h-140"
+            "scale=1920:1080:force_original_aspect_ratio=decrease,"
+            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
+            "drawtext=text='No Signal':font='Sans':fontcolor=white:fontsize=64:"
+            "box=1:boxcolor=black@0.5:boxborderw=16:x=(w-text_w)/2:y=h-200"
         ),
         "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
-        "-b:v", "800k", "-maxrate", "800k", "-bufsize", "1600k",
+        "-b:v", "1M", "-maxrate", "1M", "-bufsize", "2M",
         "-g", "60", "-keyint_min", "60", "-sc_threshold", "0", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "64k", "-ac", "2",
+        "-c:a", "aac", "-b:a", "64k", "-ac", "2", "-ar", "48000",
         "-f", "hls",
-        "-hls_time", "4",
-        "-hls_list_size", "6",
+        "-hls_time", "2",
+        "-hls_list_size", "8",
         "-hls_flags", "delete_segments+independent_segments",
         "-hls_segment_type", "mpegts",
         "-hls_segment_filename", "seg_%05d.ts",
@@ -4391,6 +4896,8 @@ async def _ensure_placeholder_running() -> bool:
             "watch_task": watch_task,
             "log_task": log_task,
             "log_lines": log_lines,
+            "ready": False,
+            "last_access": time.monotonic(),
         }
 
         ready = await _wait_for_first_segment(out_dir, process, PLACEHOLDER_STARTUP_TIMEOUT_SECONDS)
@@ -4399,6 +4906,8 @@ async def _ensure_placeholder_running() -> bool:
             LOGGER.error("placeholder ffmpeg failed to produce a first segment: %s", error)
             await _stop_placeholder_process()
             return False
+        if _PLACEHOLDER_STATE and _PLACEHOLDER_STATE["process"] is process:
+            _PLACEHOLDER_STATE["ready"] = True
         return True
 
 
@@ -4446,13 +4955,229 @@ async def serve_placeholder_segment(segment_name: str):
     )
 
 
-@app.get("/stream/{team_id}")
-async def proxy_stream(team_id: str, request: Request, provider: str = ""):
+# --- CHANNEL SESSIONS (proxy-built continuous playlists; see hls_session.py) ---
+
+SESSION_IDLE_SECONDS = bounded_float(os.getenv("SESSION_IDLE_SECONDS", "60"), 60.0, 10.0, 3600.0)
+STREAM_STARTUP_TIMEOUT = bounded_float(os.getenv("STREAM_STARTUP_TIMEOUT", "20"), 20.0, 3.0, 120.0)
+STREAM_MAX_BANDWIDTH = bounded_int(os.getenv("STREAM_MAX_BANDWIDTH", "0"), 0, 0, 1_000_000_000)
+PLACEHOLDER_SOURCE_KEY = ("placeholder",)
+HLS_MEDIA_TYPE = "application/vnd.apple.mpegurl"
+_PLACEHOLDER_START_TASK: Optional[asyncio.Task] = None
+
+
+def _media_client() -> Optional[httpx.AsyncClient]:
+    """Dedicated pool for playlists/segments so scrape bursts can't starve playback."""
+    return MEDIA_HTTP_CLIENT or SHARED_HTTP_CLIENT
+
+
+async def _session_fetch(url: str, headers: Dict[str, str], max_bytes: int, timeout_seconds: float) -> Optional[FetchResult]:
+    client = _media_client()
+    if client is None:
+        return None
+    timeout = httpx.Timeout(connect=5.0, read=timeout_seconds, write=10.0, pool=3.0)
+    try:
+        # httpx read timeouts are per-read; also cap the whole transfer so a
+        # trickling upstream can't hold a live segment for minutes.
+        result = await asyncio.wait_for(
+            _fetch_upstream_body(client, url, headers, max_bytes, timeout),
+            timeout_seconds + 5.0,
+        )
+    except asyncio.TimeoutError:
+        return None
+    if result is None:
+        return None
+    status_code, effective_url, content_type, body, _ = result
+    return FetchResult(status_code, effective_url, content_type, body)
+
+
+def _request_placeholder_start() -> None:
+    global _PLACEHOLDER_START_TASK
+    if not FFMPEG_AVAILABLE:
+        return
+    if _PLACEHOLDER_START_TASK is None or _PLACEHOLDER_START_TASK.done():
+        _PLACEHOLDER_START_TASK = _spawn_background_task(_ensure_placeholder_running(), "start placeholder stream")
+
+
+def _placeholder_source() -> Optional[SourceSpec]:
+    state = _PLACEHOLDER_STATE
+    if state and state.get("ready") and state["process"].returncode is None and not state.get("exited"):
+        state["last_access"] = time.monotonic()
+        return SourceSpec(
+            key=PLACEHOLDER_SOURCE_KEY,
+            url=str(state["output_dir"] / "index.m3u8"),
+            local=True,
+            label="No Signal",
+        )
+    _request_placeholder_start()
+    return None
+
+
+def _candidate_source(candidate: dict) -> Optional[SourceSpec]:
+    url = _validate_upstream_url(str(candidate.get("url") or ""))
+    if not url:
+        return None
+    referer = str(candidate.get("referer") or "")
+    if referer and not _validate_upstream_url(referer):
+        referer = ""
+    return SourceSpec(
+        key=candidate_source_key(candidate),
+        url=url,
+        referer=referer,
+        origin=str(candidate.get("origin") or ""),
+        label=str(candidate.get("provider") or ""),
+    )
+
+
+def _resolve_session_source(channel_id: str) -> Optional[SourceSpec]:
+    """What should this channel's session play right now? (pull model)"""
+    if channel_id == PLACEHOLDER_SESSION_ID:
+        return _placeholder_source()
+    view = _multiview_view_for_session(channel_id)
+    if view is not None:
+        return _resolve_multiview_view_source(*view)
+    data = stream_state.get(channel_id)
+    if data is None:
+        return None
+    candidates = data.get("candidates") or []
+    if not candidates or data.get("exhausted"):
+        return _placeholder_source()
+    active_index = data.get("active_index", 0)
+    if active_index >= len(candidates):
+        active_index = 0
+    return _candidate_source(candidates[active_index]) or _placeholder_source()
+
+
+def _on_session_failure(channel_id: str, source_key: tuple, reason: str) -> None:
+    if tuple(source_key) == PLACEHOLDER_SOURCE_KEY:
+        return
+    if _multiview_view_for_session(channel_id) is not None:
+        _on_multiview_view_failure(channel_id, source_key, reason)
+        return
+    _spawn_background_task(request_failover(channel_id, source_key, reason), f"session failover {channel_id}")
+
+
+def _on_session_incompatible(channel_id: str, source_key: tuple, reason: str) -> None:
+    if _multiview_view_for_session(channel_id) is not None:
+        return
+    _spawn_background_task(
+        request_failover(channel_id, source_key, reason, incompatible=True),
+        f"session incompatible failover {channel_id}",
+    )
+
+
+def _on_session_media_info(channel_id: str, source_key: tuple, has_audio: bool, signature: tuple) -> None:
+    data = stream_state.get(channel_id)
+    if not data:
+        return
+    for candidate in data.get("candidates") or []:
+        if candidate_source_key(candidate) == tuple(source_key):
+            candidate["has_audio"] = has_audio
+            candidate["codec_signature"] = tuple(signature)
+            break
+
+
+SESSIONS = SessionRegistry(
+    SessionHooks(
+        fetch=lambda url, headers, max_bytes, timeout: _session_fetch(url, headers, max_bytes, timeout),
+        headers_for=lambda referer, origin: _upstream_media_headers(referer, origin),
+        resolve_source=lambda channel_id: _resolve_session_source(channel_id),
+        report_failure=lambda channel_id, key, reason: _on_session_failure(channel_id, key, reason),
+        report_incompatible=lambda channel_id, key, reason: _on_session_incompatible(channel_id, key, reason),
+        on_media_info=lambda channel_id, key, has_audio, sig: _on_session_media_info(channel_id, key, has_audio, sig),
+    ),
+    SessionConfig(idle_timeout=SESSION_IDLE_SECONDS, bandwidth_cap=STREAM_MAX_BANDWIDTH),
+)
+
+
+def _hls_response(text: str) -> Response:
+    return Response(
+        content=text,
+        media_type=HLS_MEDIA_TYPE,
+        headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"},
+    )
+
+
+async def _serve_session_playlist(session_id: str, segment_prefix: str, legacy=None) -> Response:
+    session = SESSIONS.get(session_id)
+    session.touch()
+    if session.state == "legacy" and legacy is not None:
+        return await legacy()
+    await session.wait_ready(STREAM_STARTUP_TIMEOUT)
+    if session.state == "legacy" and legacy is not None:
+        return await legacy()
+    if not session.window:
+        return Response(
+            status_code=503,
+            content="Stream is starting",
+            headers={"Retry-After": "2", "Cache-Control": "no-cache"},
+        )
+    return _hls_response(session.render_playlist(segment_prefix))
+
+
+def _serve_session_segment(session_id: str, seq: int) -> Response:
+    session = SESSIONS.peek(session_id)
+    if session is None:
+        return Response(status_code=404, content="Segment not found")
+    session.touch()
+    segment = session.get_segment(seq)
+    if segment is None:
+        return Response(status_code=404, content="Segment not found")
+    return Response(
+        content=segment.data,
+        media_type="video/mp2t",
+        headers={"Cache-Control": "public, max-age=120", "Access-Control-Allow-Origin": "*"},
+    )
+
+
+async def _serve_channel_playlist(team_id: str, request: Request) -> Response:
+    if team_id == PLACEHOLDER_SESSION_ID and FFMPEG_AVAILABLE:
+        # Stand-in input for a Multi-View member that no longer exists.
+        return await _serve_session_playlist(team_id, f"{team_id}/seg/")
     data = stream_state.get(team_id)
     if not data:
         return Response(status_code=404, content="Stream unavailable")
+    if request.method == "HEAD":
+        # Jellyfin's M3U tuner HEADs extensionless URLs to decide between
+        # raw-TS sharing and ffmpeg HLS input; always say HLS.
+        return Response(status_code=200, media_type=HLS_MEDIA_TYPE, headers={"Cache-Control": "no-cache"})
     if data.get("type") == "multiview":
-        return await _serve_multiview_stream(team_id, data, request)
+        _touch_multiview_viewer(team_id)
+    _maybe_record_playback_event(team_id)
+
+    async def legacy():
+        return await _legacy_proxy_stream(team_id, request)
+
+    return await _serve_session_playlist(team_id, f"{team_id}/seg/", legacy=None if data.get("type") == "multiview" else legacy)
+
+
+@app.api_route("/stream/{team_id}.m3u8", methods=["GET", "HEAD"])
+async def stream_playlist(team_id: str, request: Request):
+    return await _serve_channel_playlist(team_id, request)
+
+
+@app.get("/stream/{team_id}/seg/{seq}.ts")
+async def stream_segment(team_id: str, seq: int):
+    if team_id in stream_state and stream_state[team_id].get("type") == "multiview":
+        _touch_multiview_viewer(team_id)
+    return _serve_session_segment(team_id, seq)
+
+
+@app.api_route("/stream/{team_id}", methods=["GET", "HEAD"])
+async def proxy_stream(team_id: str, request: Request, provider: str = ""):
+    """Extensionless alias kept for existing Jellyfin tuner configs. `?provider=`
+    pins one provider for debugging via the legacy passthrough proxy."""
+    if provider and request.method == "GET" and team_id in stream_state:
+        return await _legacy_proxy_stream(team_id, request, provider)
+    return await _serve_channel_playlist(team_id, request)
+
+
+async def _legacy_proxy_stream(team_id: str, request: Request, provider: str = ""):
+    """Pre-session passthrough proxy: rewrites the upstream playlist's URIs to
+    /substream.m3u8 and /chunk*. Only used for sources a channel session can't
+    normalize (fMP4, separate audio renditions, SAMPLE-AES) and for ?provider=."""
+    data = stream_state.get(team_id)
+    if not data:
+        return Response(status_code=404, content="Stream unavailable")
     if not data.get("candidates"):
         return await _serve_placeholder_stream(request)
     active_idx = data.get("active_index", 0)
@@ -4478,8 +5203,8 @@ async def proxy_stream(team_id: str, request: Request, provider: str = ""):
     host = request.headers.get("host") or f"127.0.0.1:{PORT}"
     proxy_origin = f"{request.url.scheme}://{host}"
 
-    owns_client = SHARED_HTTP_CLIENT is None
-    client = SHARED_HTTP_CLIENT or httpx.AsyncClient(follow_redirects=False, timeout=12.0, http2=True)
+    owns_client = _media_client() is None
+    client = _media_client() or httpx.AsyncClient(follow_redirects=False, timeout=12.0, http2=True)
     try:
         result = await _fetch_upstream_body(client, target_url, headers, MAX_MANIFEST_BYTES)
         if result is None:
@@ -4487,7 +5212,6 @@ async def proxy_stream(team_id: str, request: Request, provider: str = ""):
         status_code, effective_url, _, body, _ = result
         if status_code != 200:
             return Response(status_code=status_code)
-        _maybe_record_playback_event(team_id)
         manifest_text = body.decode("utf-8", errors="replace")
         await _ensure_startup_buffer(
             f"{effective_url}\0{referer}\0{origin}",
@@ -4497,17 +5221,14 @@ async def proxy_stream(team_id: str, request: Request, provider: str = ""):
             origin,
         )
         rewritten = rewrite_m3u8(manifest_text, effective_url, referer, proxy_origin, origin)
-        return Response(
-            content=rewritten,
-            media_type="application/vnd.apple.mpegurl",
-            headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"},
-        )
+        return _hls_response(rewritten)
     except Exception as exc:
         _log_failure(f"proxy manifest team={team_id}", exc, logging.ERROR)
         return Response(status_code=502, content="Upstream manifest unavailable")
     finally:
         if owns_client:
             await client.aclose()
+
 
 @app.get("/substream.m3u8")
 async def proxy_substream(request: Request, url: str, ref: str = "", org: str = ""):
@@ -4659,12 +5380,44 @@ async def prefetch_next_chunks(current_chunk_url: str, referer: str = "", origin
     )
 
 
+async def _open_upstream_media(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: Dict[str, str],
+) -> Tuple[Optional[object], Optional[httpx.Response]]:
+    """Open a streaming GET, following redirects manually so every hop is
+    SSRF-validated. Returns (stream context, response) or (None, None)."""
+    current_url = url
+    for _ in range(MAX_UPSTREAM_REDIRECTS + 1):
+        safe_url = await validate_http_url_async(current_url)
+        if not safe_url:
+            return None, None
+        stream_ctx = client.stream("GET", safe_url, headers=headers, timeout=STREAM_REQUEST_TIMEOUT, follow_redirects=False)
+        response = await stream_ctx.__aenter__()
+        if 300 <= response.status_code < 400:
+            location = response.headers.get("location")
+            await stream_ctx.__aexit__(None, None, None)
+            if not location:
+                return None, None
+            current_url = urllib.parse.urljoin(str(response.url), location)
+            continue
+        return stream_ctx, response
+    return None, None
+
+
+class _UpstreamBodyInterrupted(Exception):
+    """Raised mid-body so the server aborts the connection instead of ending a
+    chunked response cleanly: a cleanly-ended truncated segment looks complete
+    to ffmpeg, while an aborted one makes it retry."""
+
+
 @app.get("/chunk.mp4")
 @app.get("/chunk.aac")
 @app.get("/chunk.vtt")
 @app.get("/chunk.ts")
 @app.get("/chunk")
 async def proxy_chunk(request: Request, url: str, ref: str = "", org: str = ""):
+    """Legacy segment relay (for sources channel sessions can't normalize)."""
     decoded_url = url
     decoded_ref = ref or ""
     decoded_origin = org or ""
@@ -4676,172 +5429,108 @@ async def proxy_chunk(request: Request, url: str, ref: str = "", org: str = ""):
     range_header = request.headers.get("range", "").strip()
     if range_header and not re.fullmatch(r"bytes=\d*-\d*", range_header):
         range_header = ""
-    cache_key = f"{decoded_url}\0{decoded_ref}\0{decoded_origin}\0{range_header}"
-    cached_bytes = await CHUNK_CACHE.get(cache_key) if not range_header else None
-    if cached_bytes is not None:
-        if PREFETCH_CHUNK_COUNT > 0:
-            _spawn_background_task(prefetch_next_chunks(decoded_url, decoded_ref, decoded_origin), "prefetch cached stream chunks")
-        return Response(
-            content=cached_bytes,
-            media_type=_chunk_media_type(decoded_url),
-            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=15"},
-        )
+    # Same key format as prefetch/startup warm (previously this had an extra
+    # trailing field, so prefetched chunks could never be served from cache).
+    cache_key = f"{decoded_url}\0{decoded_ref}\0{decoded_origin}"
+    media_type = _chunk_media_type(decoded_url)
+    cache_headers = {"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=15"}
+
+    if not range_header:
+        cached_bytes = await CHUNK_CACHE.get(cache_key)
+        if cached_bytes is not None:
+            if PREFETCH_CHUNK_COUNT > 0:
+                _spawn_background_task(prefetch_next_chunks(decoded_url, decoded_ref, decoded_origin), "prefetch cached stream chunks")
+            return Response(content=cached_bytes, media_type=media_type, headers=cache_headers)
 
     owns_singleflight = False
     if not range_header:
         for _ in range(20):
             with _PREFETCH_LOCK:
-                in_flight = cache_key in _PREFETCH_IN_FLIGHT
-            if not in_flight:
-                with _PREFETCH_LOCK:
-                    if cache_key not in _PREFETCH_IN_FLIGHT:
-                        _PREFETCH_IN_FLIGHT.add(cache_key)
-                        owns_singleflight = True
-                        break
+                if cache_key not in _PREFETCH_IN_FLIGHT:
+                    _PREFETCH_IN_FLIGHT.add(cache_key)
+                    owns_singleflight = True
+                    break
             await asyncio.sleep(0.05)
             cached_bytes = await CHUNK_CACHE.get(cache_key)
             if cached_bytes is not None:
-                return Response(
-                    content=cached_bytes,
-                    media_type=_chunk_media_type(decoded_url),
-                    headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=15"},
-                )
+                return Response(content=cached_bytes, media_type=media_type, headers=cache_headers)
+
+    def release_singleflight() -> None:
+        if owns_singleflight:
+            with _PREFETCH_LOCK:
+                _PREFETCH_IN_FLIGHT.discard(cache_key)
 
     headers = _upstream_media_headers(decoded_ref, decoded_origin)
     if range_header:
         headers["Range"] = range_header
-    if not range_header and PREFETCH_CHUNK_COUNT > 0:
+    elif PREFETCH_CHUNK_COUNT > 0:
         _spawn_background_task(prefetch_next_chunks(decoded_url, decoded_ref, decoded_origin), "prefetch stream chunks")
 
-    if range_header:
-        # A Range request must be streamed, not buffered: clients that read
-        # byte-range HLS segments (multiple EXT-X-BYTERANGE cuts of one shared
-        # file, as real providers and ffmpeg's own hls demuxer both use) commonly
-        # ask for "bytes=X-<end-of-file>" and only read as many bytes as they
-        # actually need before closing the connection. Buffering the full
-        # declared range into memory first (as _fetch_upstream_body does, for
-        # the small bounded manifests/resources it's meant for) would reject
-        # that as exceeding MAX_RESOURCE_BYTES even though the real transfer is
-        # small - the fix is to relay bytes as they arrive instead.
-        owns_client = SHARED_HTTP_CLIENT is None
-        client = SHARED_HTTP_CLIENT or httpx.AsyncClient(
-            timeout=STREAM_REQUEST_TIMEOUT, follow_redirects=False, http2=True
-        )
-        current_url = decoded_url
-        stream_ctx = None
-        response = None
+    owns_client = _media_client() is None
+    client = _media_client() or httpx.AsyncClient(timeout=STREAM_REQUEST_TIMEOUT, follow_redirects=False, http2=True)
+
+    # Open upstream *before* committing a response status: previously the 200
+    # went out first and any upstream error became an empty "successful"
+    # segment that ffmpeg never retried. Retry only here, before any byte.
+    stream_ctx = None
+    response = None
+    status_code = 502
+    for attempt in range(3):
         try:
-            for _ in range(MAX_UPSTREAM_REDIRECTS + 1):
-                safe_url = await validate_http_url_async(current_url)
-                if not safe_url:
-                    return Response(status_code=502, content="Invalid upstream chunk redirect")
-                stream_ctx = client.stream("GET", safe_url, headers=headers, timeout=STREAM_REQUEST_TIMEOUT)
-                response = await stream_ctx.__aenter__()
-                if 300 <= response.status_code < 400:
-                    location = response.headers.get("location")
-                    await stream_ctx.__aexit__(None, None, None)
-                    if not location:
-                        return Response(status_code=502, content="Upstream ranged chunk unavailable")
-                    current_url = urllib.parse.urljoin(str(response.url), location)
-                    stream_ctx, response = None, None
-                    continue
-                break
-            if response is None:
-                return Response(status_code=502, content="Upstream ranged chunk unavailable")
-
-            if response.status_code not in (200, 206):
-                body = await response.aread()
-                await stream_ctx.__aexit__(None, None, None)
-                if owns_client:
-                    await client.aclose()
-                return Response(status_code=response.status_code, content=body)
-
-            response_headers_out = {
-                "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "no-cache",
-            }
-            for key in ("content-range", "accept-ranges"):
-                if response.headers.get(key):
-                    response_headers_out[key] = response.headers[key]
-            status_code = response.status_code
-            opened_response, opened_ctx = response, stream_ctx
-
-            async def ranged_stream_generator():
-                try:
-                    async for block in opened_response.aiter_bytes(chunk_size=131072):
-                        yield block
-                except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                    _log_failure("stream ranged chunk", exc)
-                finally:
-                    await opened_ctx.__aexit__(None, None, None)
-                    if owns_client:
-                        await client.aclose()
-
-            return StreamingResponse(
-                ranged_stream_generator(),
-                status_code=status_code,
-                media_type=_chunk_media_type(decoded_url),
-                headers=response_headers_out,
-            )
+            stream_ctx, response = await _open_upstream_media(client, decoded_url, headers)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            _log_failure("open ranged chunk stream", exc)
-            if stream_ctx is not None:
-                await stream_ctx.__aexit__(type(exc), exc, exc.__traceback__)
-            if owns_client:
-                await client.aclose()
-            return Response(status_code=502, content="Upstream ranged chunk unavailable")
+            LOGGER.debug("Chunk open attempt failed attempt=%d error=%s", attempt + 1, type(exc).__name__)
+            stream_ctx, response = None, None
+        if response is None:
+            status_code = 502
+        elif response.status_code in (200, 206):
+            break
+        else:
+            status_code = response.status_code
+            await stream_ctx.__aexit__(None, None, None)
+            stream_ctx, response = None, None
+            if status_code not in (429, 500, 502, 503, 504):
+                break
+        if attempt < 2:
+            await asyncio.sleep(0.25 * (attempt + 1))
 
-    async def stream_generator():
+    if response is None:
+        release_singleflight()
+        if owns_client:
+            await client.aclose()
+        return Response(status_code=status_code, content="Upstream chunk unavailable")
+
+    out_headers = dict(cache_headers) if not range_header else {"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"}
+    for key in ("content-range", "accept-ranges"):
+        if response.headers.get(key):
+            out_headers[key] = response.headers[key]
+    opened_ctx, opened_response = stream_ctx, response
+
+    async def relay():
         chunk_buffer = bytearray()
-        cacheable = True
-        owns_client = SHARED_HTTP_CLIENT is None
-        client = SHARED_HTTP_CLIENT or httpx.AsyncClient(
-            timeout=STREAM_REQUEST_TIMEOUT, follow_redirects=False, http2=True
-        )
+        cacheable = not range_header
         try:
-            for attempt in range(3):
-                try:
-                    async with client.stream(
-                        "GET", decoded_url, headers=headers, timeout=STREAM_REQUEST_TIMEOUT
-                    ) as resp:
-                        if resp.status_code not in (200, 206):
-                            if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
-                                await asyncio.sleep(0.25 * (attempt + 1))
-                                continue
-                            LOGGER.warning("Chunk request returned status=%s", resp.status_code)
-                            return
-
-                        async for block in resp.aiter_bytes(chunk_size=131072):
-                            if cacheable and not range_header:
-                                remaining = MAX_CACHEABLE_CHUNK_BYTES - len(chunk_buffer)
-                                if len(block) <= remaining:
-                                    chunk_buffer.extend(block)
-                                else:
-                                    cacheable = False
-                                    chunk_buffer.clear()
-                            yield block
-                        if cacheable and not range_header and chunk_buffer:
-                            await CHUNK_CACHE.put(cache_key, bytes(chunk_buffer), STREAM_CHUNK_CACHE_TTL)
-                        return
-                except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                    LOGGER.debug("Chunk request attempt failed attempt=%d error=%s", attempt + 1, type(exc).__name__)
-                    if attempt < 2:
-                        await asyncio.sleep(0.25 * (attempt + 1))
-                except Exception as exc:
-                    _log_failure("proxy chunk stream", exc)
-                    return
+            async for block in opened_response.aiter_bytes(chunk_size=131072):
+                if cacheable:
+                    if len(chunk_buffer) + len(block) <= MAX_CACHEABLE_CHUNK_BYTES:
+                        chunk_buffer.extend(block)
+                    else:
+                        cacheable = False
+                        chunk_buffer.clear()
+                yield block
+            if cacheable and chunk_buffer:
+                await CHUNK_CACHE.put(cache_key, bytes(chunk_buffer), STREAM_CHUNK_CACHE_TTL)
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+            _log_failure("relay upstream chunk", exc)
+            raise _UpstreamBodyInterrupted() from exc
         finally:
-            if owns_singleflight:
-                with _PREFETCH_LOCK:
-                    _PREFETCH_IN_FLIGHT.discard(cache_key)
+            await opened_ctx.__aexit__(None, None, None)
+            release_singleflight()
             if owns_client:
                 await client.aclose()
 
-    return StreamingResponse(
-        stream_generator(),
-        media_type=_chunk_media_type(decoded_url),
-        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=15"},
-    )
+    return StreamingResponse(relay(), status_code=opened_response.status_code, media_type=media_type, headers=out_headers)
+
 
 @app.get("/playlist.m3u", response_class=PlainTextResponse)
 async def generate_m3u(request: Request):
@@ -4852,26 +5541,46 @@ async def generate_m3u(request: Request):
     for team_id, data in stream_state.items():
         if _channel_is_off_season(data):
             continue
-        local_proxy_url = f"http://{host}/stream/{team_id}"
+        # The .m3u8 extension makes Jellyfin treat the URL as an HLS manifest
+        # (always through its own ffmpeg, never "direct play" of our URL or
+        # raw-TS sharing). Channel names stay stable: health is shown on the
+        # dashboard, not appended to the name (which renamed channels in
+        # Jellyfin on every guide refresh).
         name = str(data.get("name") or team_id)
         tvg_id = _channel_tvg_id(team_id, data)
         logo = _channel_logo_url(data)
         logo_attr = f' tvg-logo="{_m3u_attribute(logo)}"' if logo else ""
-
-        quality_hint = ""
-        if data.get("candidates"):
-            healthy = data.get("is_healthy", False)
-            status = "🟢" if healthy else "🔴"
-            quality_hint = f" {status}"
-
-        display_name = f"{name}{quality_hint}"
+        group = _m3u_attribute(_channel_group_title(data))
         lines.append(
             f'#EXTINF:-1 tvg-id="{_m3u_attribute(tvg_id)}" '
             f'tvg-name="{_m3u_attribute(name)}"{logo_attr} '
-            f'group-title="{_m3u_attribute(_channel_group_title(data))}",{display_name}'
+            f'group-title="{group}",{name}'
         )
-        lines.append(local_proxy_url)
+        lines.append(f"{base_url}/stream/{team_id}.m3u8")
+        for audio_id, audio_name, path in _multiview_audio_channels(team_id, data):
+            lines.append(
+                f'#EXTINF:-1 tvg-id="{_m3u_attribute(audio_id)}" '
+                f'tvg-name="{_m3u_attribute(audio_name)}"{logo_attr} '
+                f'group-title="{group}",{audio_name}'
+            )
+            lines.append(f"{base_url}{path}")
     return "\n".join(lines)
+
+
+def _multiview_audio_channels(channel_id: str, data: dict) -> List[Tuple[str, str, str]]:
+    """(tvg-id, display name, URL path) for each per-audio Multi-View channel."""
+    if data.get("type") != "multiview" or not MULTIVIEW_AUDIO_CHANNELS:
+        return []
+    base_tvg_id = _channel_tvg_id(channel_id, data)
+    name = str(data.get("name") or channel_id)
+    return [
+        (
+            f"{base_tvg_id}.a{index}",
+            f"{name} · 🔊 {_multiview_member_label(member)}",
+            f"/multiview/{channel_id}/audio/{index}.m3u8",
+        )
+        for index, member in enumerate(data.get("member_team_ids") or [])
+    ]
 
 
 TVGUIDE_SPECIAL_CHANNEL_IDS = {
@@ -4958,6 +5667,10 @@ async def generate_xmltv(request: Request = None):
         xml.append(f'  <channel id="{xml_escape(channel_id)}">')
         xml.append(f'    <display-name>{name_esc}</display-name>{icon_tag}')
         xml.append('  </channel>')
+        for audio_id, audio_name, _ in _multiview_audio_channels(team_id, data):
+            xml.append(f'  <channel id="{xml_escape(audio_id)}">')
+            xml.append(f'    <display-name>{xml_escape(audio_name)}</display-name>{icon_tag}')
+            xml.append('  </channel>')
 
     guide_start = now_utc - timedelta(hours=1)
     guide_end = now_utc + timedelta(days=GUIDE_HORIZON_DAYS)
@@ -4971,6 +5684,14 @@ async def generate_xmltv(request: Request = None):
         logo = _channel_logo_url(data)
         icon_tag = f'\n    <icon src="{xml_escape(logo)}" />' if logo else ""
         
+        for audio_id, audio_name, _ in _multiview_audio_channels(team_id, data):
+            xml.append(f'  <programme channel="{xml_escape(audio_id)}" start="{xmltv_ts(guide_start)}" stop="{xmltv_ts(guide_end)}">')
+            xml.append(f'    <title>{xml_escape(audio_name)}</title>')
+            xml.append('    <category>Sports</category>')
+            xml.append(f'    <desc>{name_esc} with this game\'s audio. Change channel to switch audio.</desc>')
+            if icon_tag: xml.append(f'    <icon src="{xml_escape(logo)}" />')
+            xml.append('  </programme>')
+
         dt_start, dt_stop = parse_team_schedule(data)
         has_specific_game = bool(
             dt_start and dt_stop and dt_stop >= guide_start and dt_start <= guide_end
@@ -6177,9 +6898,7 @@ async def _set_catalog_entry_enabled(entry: dict, enabled: bool) -> bool:
             return True
     else:
         if team_id in stream_state:
-            await _stop_team_scrape_loop(team_id)
-            del stream_state[team_id]
-            await delete_team_async(team_id)
+            await _remove_channel(team_id)
             return True
         await delete_team_async(team_id)
     return False
@@ -6295,12 +7014,45 @@ async def override_stream(team_id: str, candidate_index: int = Form(...), auth: 
             
     return RedirectResponse(url="/?tab=channels", status_code=303)
 
+async def _remove_channel(channel_id: str) -> None:
+    """Single removal path for every kind of channel: stops its scrape loop or
+    Multi-View ffmpeg, closes its channel sessions, and deletes its DB row."""
+    data = stream_state.get(channel_id)
+    if data is not None and data.get("type") == "multiview":
+        view_sessions = _multiview_view_session_ids(channel_id)
+        await _stop_multiview_process(channel_id)
+        _clear_multiview_failure(channel_id)
+        _MULTIVIEW_LOCKS.pop(channel_id, None)
+        _MULTIVIEW_LAST_VIEWER.pop(channel_id, None)
+        stream_state.pop(channel_id, None)
+        await delete_multiview_channel_async(channel_id)
+        for session_id in view_sessions:
+            await SESSIONS.close(session_id)
+        return
+    if data is not None:
+        await _stop_team_scrape_loop(channel_id)
+        stream_state.pop(channel_id, None)
+    await delete_team_async(channel_id)
+    await SESSIONS.close(channel_id)
+    dependents = [
+        cid for cid, other in stream_state.items()
+        if other.get("type") == "multiview" and channel_id in (other.get("member_team_ids") or [])
+    ]
+    for multiview_id in dependents:
+        # The removed member's pane now shows "No Signal"; restart any running
+        # run so it picks up the placeholder input.
+        LOGGER.warning("Channel %s removed but used by Multi-View %s; its pane will show No Signal", channel_id, multiview_id)
+        if multiview_id in _MULTIVIEW_PROCESSES:
+            _spawn_background_task(
+                _restart_multiview(multiview_id, f"member {channel_id} removed"),
+                f"restart multiview channel={multiview_id}",
+            )
+
+
 @app.post("/remove_team/{team_id}")
 async def remove_team(team_id: str, auth: bool = Depends(verify_dashboard_auth)):
     if team_id in stream_state:
-        await _stop_team_scrape_loop(team_id)
-        del stream_state[team_id]
-        await delete_team_async(team_id)
+        await _remove_channel(team_id)
         _spawn_background_task(trigger_jellyfin_refresh(), "refresh Jellyfin guide after team removal")
     return RedirectResponse(url="/?tab=channels", status_code=303)
 
@@ -6325,6 +7077,10 @@ async def create_multiview(
         raise HTTPException(status_code=400, detail=f"Layout {layout} requires exactly {MULTIVIEW_LAYOUTS[layout]['count']} channels")
 
     channel_id = _safe_team_id(f"multiview_{name}")
+    if channel_id in stream_state:
+        # INSERT OR REPLACE used to silently overwrite an existing Multi-View
+        # (leaving its old ffmpeg running against the old members).
+        raise HTTPException(status_code=409, detail="A channel with that name already exists")
     active_audio_team_id = members[0]
     _clear_multiview_failure(channel_id)
     await save_multiview_channel_async(channel_id, name, layout, members, active_audio_team_id)
@@ -6348,11 +7104,7 @@ async def create_multiview(
 async def remove_multiview(channel_id: str, auth: bool = Depends(verify_dashboard_auth)):
     data = stream_state.get(channel_id)
     if data and data.get("type") == "multiview":
-        await _stop_multiview_process(channel_id)
-        _clear_multiview_failure(channel_id)
-        _MULTIVIEW_LOCKS.pop(channel_id, None)
-        del stream_state[channel_id]
-        await delete_multiview_channel_async(channel_id)
+        await _remove_channel(channel_id)
         _spawn_background_task(trigger_jellyfin_refresh(), "refresh Jellyfin guide after multiview removal")
     return RedirectResponse(url="/?tab=channels", status_code=303)
 
@@ -6381,17 +7133,10 @@ async def set_multiview_audio(
         channel_id, data["name"], data["layout"], data["member_team_ids"], active_audio_team_id,
         data.get("tvg_id", ""), data.get("group_title", ""), data.get("logo_url", ""),
     )
-    # Audio mapping is baked in at spawn time; restart so the change takes effect.
-    await _stop_multiview_process(channel_id)
-    _clear_multiview_failure(channel_id)  # explicit user action: retry immediately, ignore any backoff
-    # Start warming up the replacement process immediately instead of leaving it to
-    # the next viewer request — that request would otherwise block for up to
-    # MULTIVIEW_STARTUP_TIMEOUT_SECONDS behind a synchronous spawn (observed ~20-30s
-    # in practice, dominated by re-fetching each member's stream).
-    _spawn_background_task(
-        _spawn_multiview(channel_id, data),
-        f"prewarm multiview after audio change channel={channel_id}",
-    )
+    # Every member's audio is already encoded into its own output, so switching
+    # the main channel's audio is just pointing its session at another output:
+    # no ffmpeg restart, no interruption (it takes effect at the next segment).
+    SESSIONS.poke(channel_id)
     return RedirectResponse(url="/?tab=channels", status_code=303)
 
 
@@ -6439,7 +7184,7 @@ async def toggle_favorite(team_id: str, auth: bool = Depends(verify_dashboard_au
 
 @app.post("/rescrape/{team_id}")
 async def manual_rescrape(team_id: str, auth: bool = Depends(verify_dashboard_auth)):
-    _spawn_background_task(trigger_scrape(team_id), f"manual rescrape {team_id}")
+    _spawn_background_task(trigger_scrape(team_id, force=True), f"manual rescrape {team_id}")
     return RedirectResponse(url="/?tab=channels", status_code=303)
 
 
@@ -6473,10 +7218,7 @@ async def bulk_remove(team_ids: str = Form(""), auth: bool = Depends(verify_dash
     ids = [t.strip() for t in team_ids.split(",") if t.strip()]
     try:
         for team_id in ids:
-            if team_id in stream_state:
-                await _stop_team_scrape_loop(team_id)
-                del stream_state[team_id]
-            await delete_team_async(team_id)
+            await _remove_channel(team_id)
     except Exception as exc:
         _log_failure("bulk remove", exc)
     _spawn_background_task(trigger_jellyfin_refresh(), "refresh Jellyfin guide after bulk removal")
