@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - "release-*"
+  pull_request:
+    branches:
+      - master
+      - "release-*"
+
+# Jellyball targets Windows (Windows service, PyInstaller + Inno Setup
+# installer), so windows-latest is the primary/required job. An ubuntu-latest
+# job is also run because the unit suite has no Windows-only dependency: every
+# pywin32 usage in Jellyball/main.py is guarded by `sys.platform == "win32"` /
+# `os.name == "nt"`, requirements.txt marks pywin32 itself
+# `sys_platform == "win32"` (so pip simply skips it on Linux), and pystray/PIL
+# (tray-icon mode) are imported lazily inside functions, never at module
+# import time. Neither ffmpeg nor installed Playwright browsers are required
+# for the unit suite: test_hls_session.py fakes segment "downloads" in
+# memory, and test_scraper_hardening.py drives Playwright through fakes for
+# Browser/BrowserContext/Page rather than a real browser.
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: Jellyball/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r Jellyball/requirements.txt
+
+      - name: Run unit tests
+        working-directory: Jellyball
+        run: python -m unittest discover -p "test_*.py"
+
+      - name: Install ruff
+        run: pip install ruff==0.16.9
+
+      - name: Lint (ruff)
+        run: ruff check Jellyball
