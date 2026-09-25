@@ -142,6 +142,8 @@ import urllib.parse
 import sqlite3
 import json
 import hashlib
+import hmac
+import ipaddress
 import secrets
 import time
 import random
@@ -331,11 +333,110 @@ def is_fuzzy_match(query: str, text: str, threshold: int = 65) -> tuple[bool, in
 
 DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+DASHBOARD_PASSWORD_FILE = DATA_DIR / "dashboard-password.txt"
+# "configured" (DASHBOARD_PASSWORD), "generated" (network bind without one), or
+# "open" (no password; only allowed while listening on loopback).
+DASHBOARD_AUTH_MODE = "configured" if DASHBOARD_PASSWORD else "open"
 security = HTTPBasic(auto_error=False)
 
-def verify_dashboard_auth(credentials: Optional[HTTPBasicCredentials] = Depends(security)):
-    if not DASHBOARD_PASSWORD:
+_LOOPBACK_HOSTNAMES = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+
+def _is_loopback_host(host: str) -> bool:
+    host = (host or "").strip().lower().strip("[]")
+    if host in _LOOPBACK_HOSTNAMES:
         return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _configure_dashboard_auth(bind_host: str) -> None:
+    """A dashboard with no password may only listen on loopback. Listening on the
+    network (Docker's 0.0.0.0, a LAN bind) without DASHBOARD_PASSWORD gets a
+    random password, generated once and kept in the data directory."""
+    global DASHBOARD_PASSWORD, DASHBOARD_AUTH_MODE
+    if DASHBOARD_PASSWORD or _is_loopback_host(bind_host):
+        return
+    generated = ""
+    try:
+        generated = DASHBOARD_PASSWORD_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    if not generated:
+        generated = secrets.token_urlsafe(12)
+        try:
+            DASHBOARD_PASSWORD_FILE.write_text(generated + "\n", encoding="utf-8")
+        except OSError as exc:
+            _log_failure("save generated dashboard password", exc)
+        # Logged once, on the run that creates it (docker logs / the console);
+        # later runs only point at the file.
+        LOGGER.warning(
+            "Dashboard listens on %s with no DASHBOARD_PASSWORD: generated one. user=%s password=%s (saved to %s)",
+            bind_host, DASHBOARD_USERNAME, generated, DASHBOARD_PASSWORD_FILE,
+        )
+    else:
+        LOGGER.warning(
+            "Dashboard listens on %s with no DASHBOARD_PASSWORD: using the generated password in %s (user=%s)",
+            bind_host, DASHBOARD_PASSWORD_FILE, DASHBOARD_USERNAME,
+        )
+    DASHBOARD_PASSWORD = generated
+    DASHBOARD_AUTH_MODE = "generated"
+
+
+def _request_host_name(request: Request) -> str:
+    host = request.headers.get("host", "")
+    if host.startswith("["):
+        return host[1:].split("]", 1)[0]
+    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+
+
+# Failed Basic-auth attempts per client address: (failures, window start, locked until).
+_AUTH_FAILURES: "OrderedDict[str, List[float]]" = OrderedDict()
+AUTH_FAILURE_LIMIT = 8
+AUTH_FAILURE_WINDOW = 300.0
+AUTH_LOCKOUT_SECONDS = 300.0
+
+
+def _auth_client_key(request: Optional[Request]) -> str:
+    client = getattr(request, "client", None) if request is not None else None
+    return getattr(client, "host", "") or "unknown"
+
+
+def _auth_locked_out(client_key: str, now: float) -> bool:
+    entry = _AUTH_FAILURES.get(client_key)
+    return bool(entry and entry[2] > now)
+
+
+def _record_auth_failure(client_key: str, now: float) -> None:
+    entry = _AUTH_FAILURES.get(client_key)
+    if entry is None or now - entry[1] > AUTH_FAILURE_WINDOW:
+        entry = [0.0, now, 0.0]
+    entry[0] += 1
+    if entry[0] >= AUTH_FAILURE_LIMIT:
+        entry[2] = now + AUTH_LOCKOUT_SECONDS
+        LOGGER.warning("Dashboard login locked for %.0fs after %d failures client=%s",
+                       AUTH_LOCKOUT_SECONDS, int(entry[0]), client_key)
+    _AUTH_FAILURES[client_key] = entry
+    _AUTH_FAILURES.move_to_end(client_key)
+    while len(_AUTH_FAILURES) > 256:
+        _AUTH_FAILURES.popitem(last=False)
+
+
+def verify_dashboard_auth(request: Request = None, credentials: Optional[HTTPBasicCredentials] = Depends(security)):
+    if not DASHBOARD_PASSWORD:
+        # Open access is only ever served on a loopback bind. Also require a
+        # loopback Host header, so a DNS-rebinding page (evil.example resolving
+        # to 127.0.0.1) can't drive the dashboard from the user's browser.
+        if request is not None and not _is_loopback_host(_request_host_name(request)) \
+                and _request_host_name(request).lower() != socket.gethostname().lower():
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Dashboard is local-only")
+        return True
+    now = time.monotonic()
+    client_key = _auth_client_key(request)
+    if _auth_locked_out(client_key, now):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many failed logins")
     if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -348,7 +449,6 @@ def verify_dashboard_auth(credentials: Optional[HTTPBasicCredentials] = Depends(
     cache_key = hashlib.sha256(
         f"{credentials.username}\0{credentials.password}\0{DASHBOARD_PASSWORD}".encode("utf-8")
     ).hexdigest()
-    now = time.monotonic()
     verified_at = _VERIFIED_CREDENTIALS.get(cache_key)
     if verified_at is not None and now - verified_at < _VERIFIED_CREDENTIALS_TTL:
         is_pass_ok = True
@@ -361,11 +461,13 @@ def verify_dashboard_auth(credentials: Optional[HTTPBasicCredentials] = Depends(
                 _VERIFIED_CREDENTIALS.popitem(last=False)
 
     if not (is_user_ok and is_pass_ok):
+        _record_auth_failure(client_key, now)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Basic"},
         )
+    _AUTH_FAILURES.pop(client_key, None)
     return True
 
 def init_db():
@@ -2168,8 +2270,47 @@ def _channel_logo_url(data: dict) -> str:
     )
 
 
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")
+# Characters XML 1.0 forbids outright (xml_escape leaves them in and the guide
+# then fails to parse).
+_XML_INVALID_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
+
+
+def _clean_label(value: object, max_length: int = 120) -> str:
+    """Single-line, bounded text for names/queries that end up in the M3U, EPG and UI."""
+    text = _CONTROL_CHARS_RE.sub(" ", str(value or ""))
+    return re.sub(r"\s+", " ", text).strip()[:max_length].strip()
+
+
 def _m3u_attribute(value: str) -> str:
-    return str(value or "").replace('"', "&quot;")
+    # A newline here would start a new playlist line (a planted channel/URL).
+    return _CONTROL_CHARS_RE.sub(" ", str(value or "")).replace('"', "&quot;")
+
+
+def _m3u_title(value: str) -> str:
+    return _CONTROL_CHARS_RE.sub(" ", str(value or "")).strip()
+
+
+def _xml_text(value: object) -> str:
+    return xml_escape(_XML_INVALID_RE.sub("", str(value or "")))
+
+
+def _xml_attr(value: object) -> str:
+    return xml_escape(_XML_INVALID_RE.sub("", str(value or "")), {'"': "&quot;"})
+
+
+_SAFE_HOST_HEADER_RE = re.compile(r"^[A-Za-z0-9.\-]+(:\d{1,5})?$|^\[[0-9A-Fa-f:.]+\](:\d{1,5})?$")
+
+
+def _public_base_url(request: Optional[Request]) -> str:
+    """Base URL for links we hand out (M3U entries, dashboard copy boxes).
+    Falls back to loopback when the Host header is missing or malformed."""
+    host = (request.headers.get("host") or "").strip() if request is not None else ""
+    if not _SAFE_HOST_HEADER_RE.match(host):
+        host = f"127.0.0.1:{PORT}"
+    scheme = getattr(getattr(request, "url", None), "scheme", "http")
+    scheme = scheme if scheme in ("http", "https") else "http"
+    return f"{scheme}://{host}"
 
 
 def _catalog_search_terms(record: TeamSlug, source_id: str) -> List[str]:
@@ -3702,7 +3843,62 @@ class RequestDiagnosticsMiddleware:
             await response(scope, receive, send)
 
 
+_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_DEFAULT_PORTS = {"http": "80", "https": "443"}
+
+
+def _normalized_netloc(scheme: str, netloc: str) -> str:
+    netloc = (netloc or "").strip().lower()
+    default_port = _DEFAULT_PORTS.get((scheme or "").lower())
+    if default_port and netloc.endswith(f":{default_port}") and not netloc.endswith("]"):
+        netloc = netloc[: -(len(default_port) + 1)]
+    return netloc
+
+
+def _is_cross_site_write(method: str, headers: Dict[str, str], scheme: str) -> bool:
+    """True for a state-changing request a browser sent from another site.
+
+    Basic-auth credentials are replayed by the browser on cross-site form POSTs,
+    so every dashboard write would otherwise be forgeable from any web page.
+    Browsers always send Origin (or at least Referer) on such requests;
+    non-browser clients (curl, scripts) send neither and aren't a CSRF vector."""
+    if method not in _UNSAFE_METHODS:
+        return False
+    allowed = {
+        _normalized_netloc(scheme, headers.get("host", "")),
+        _normalized_netloc(scheme, headers.get("x-forwarded-host", "").split(",")[0]),
+    } - {""}
+    origin = headers.get("origin")
+    source = origin if origin is not None else headers.get("referer")
+    if source is None:
+        return False
+    if source.strip().lower() == "null":
+        return True
+    parsed = urllib.parse.urlsplit(source)
+    if not parsed.netloc:
+        return True
+    return _normalized_netloc(parsed.scheme, parsed.netloc) not in allowed
+
+
+class CsrfOriginMiddleware:
+    """Pure ASGI: reject cross-site state-changing requests (see _is_cross_site_write)."""
+
+    def __init__(self, asgi_app) -> None:
+        self.app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope.get("method") in _UNSAFE_METHODS:
+            headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
+            if _is_cross_site_write(scope["method"], headers, scope.get("scheme", "http")):
+                LOGGER.warning("Rejected cross-site request method=%s path=%s", scope.get("method"), scope.get("path"))
+                response = PlainTextResponse("Cross-site request rejected", status_code=403)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 app = FastAPI(title="Jellyfin Sports Proxy - Titan Engine", version=__version__, lifespan=lifespan)
+app.add_middleware(CsrfOriginMiddleware)
 app.add_middleware(RequestDiagnosticsMiddleware)
 
 
@@ -3808,6 +4004,40 @@ def _chunk_route_for_url(url: str) -> str:
     if path.endswith((".vtt", ".webvtt")):
         return "/chunk.vtt"
     return "/chunk.ts"
+
+
+def _load_relay_signing_key() -> bytes:
+    """Key for signing legacy relay URLs, kept in the data dir so URLs handed to
+    a player before a restart stay valid after it."""
+    key_file = DATA_DIR / "relay-signing.key"
+    try:
+        key = key_file.read_bytes()
+        if len(key) >= 32:
+            return key[:32]
+    except OSError:
+        pass
+    key = secrets.token_bytes(32)
+    try:
+        key_file.write_bytes(key)
+    except OSError as exc:
+        _log_failure("save relay signing key", exc)
+    return key
+
+
+_RELAY_SIGNING_KEY = _load_relay_signing_key()
+
+
+def _relay_signature(url: str, ref: str = "", org: str = "") -> str:
+    """/substream.m3u8, /chunk* and /resource fetch whatever URL they are given
+    and must stay unauthenticated (Jellyfin's ffmpeg calls them), so they only
+    serve URLs this server wrote into a playlist itself: without a signature
+    they were an open fetch relay for anyone who could reach the port."""
+    message = f"{url}\n{ref or ''}\n{org or ''}".encode("utf-8")
+    return hmac.new(_RELAY_SIGNING_KEY, message, hashlib.sha256).hexdigest()[:32]
+
+
+def _relay_signature_ok(url: str, ref: str, org: str, sig: str) -> bool:
+    return bool(sig) and hmac.compare_digest(str(sig), _relay_signature(url, ref, org))
 
 
 _MAX_STORED_MANIFESTS = 50
@@ -3957,7 +4187,9 @@ def rewrite_m3u8(
             route = f"{host}/substream.m3u8?url={enc_url}&ref={enc_ref}"
         else:
             route = f"{host}{resource_path or _chunk_route_for_url(resolved_url)}?url={enc_url}&ref={enc_ref}"
-        return f"{route}&org={enc_origin}" if enc_origin else route
+        if enc_origin:
+            route = f"{route}&org={enc_origin}"
+        return f"{route}&sig={_relay_signature(resolved_url, referer, origin)}"
 
     manifest_lines = manifest_text.splitlines()
     if has_variants:
@@ -5479,8 +5711,7 @@ async def _legacy_proxy_stream(team_id: str, request: Request, provider: str = "
     if referer and not _validate_upstream_url(referer):
         referer = ""
     headers = _upstream_media_headers(referer, origin)
-    host = request.headers.get("host") or f"127.0.0.1:{PORT}"
-    proxy_origin = f"{request.url.scheme}://{host}"
+    proxy_origin = _public_base_url(request)
 
     owns_client = _media_client() is None
     client = _media_client() or httpx.AsyncClient(follow_redirects=False, timeout=12.0, http2=True)
@@ -5510,17 +5741,18 @@ async def _legacy_proxy_stream(team_id: str, request: Request, provider: str = "
 
 
 @app.get("/substream.m3u8")
-async def proxy_substream(request: Request, url: str, ref: str = "", org: str = ""):
+async def proxy_substream(request: Request, url: str, ref: str = "", org: str = "", sig: str = ""):
     decoded_url = url
     decoded_ref = ref or ""
     decoded_origin = org or ""
+    if not _relay_signature_ok(decoded_url, decoded_ref, decoded_origin, sig):
+        return Response(status_code=403, content="Unsigned relay URL")
     if not _validate_upstream_url(decoded_url):
         return Response(status_code=400, content="Invalid upstream manifest URL")
     if decoded_ref and not _validate_upstream_url(decoded_ref):
         return Response(status_code=400, content="Invalid upstream referer URL")
     headers = _upstream_media_headers(decoded_ref, decoded_origin)
-    host = request.headers.get("host") or f"127.0.0.1:{PORT}"
-    proxy_origin = f"{request.url.scheme}://{host}"
+    proxy_origin = _public_base_url(request)
     
     owns_client = SHARED_HTTP_CLIENT is None
     client = SHARED_HTTP_CLIENT or httpx.AsyncClient(follow_redirects=False, timeout=12.0, http2=True)
@@ -5554,11 +5786,13 @@ async def proxy_substream(request: Request, url: str, ref: str = "", org: str = 
 
 
 @app.get("/resource")
-async def proxy_resource(request: Request, url: str, ref: str = "", org: str = ""):
+async def proxy_resource(request: Request, url: str, ref: str = "", org: str = "", sig: str = ""):
     """Proxy HLS key and initialization resources with the original media type."""
     decoded_url = url
     decoded_ref = ref or ""
     decoded_origin = org or ""
+    if not _relay_signature_ok(decoded_url, decoded_ref, decoded_origin, sig):
+        return Response(status_code=403, content="Unsigned relay URL")
     if not _validate_upstream_url(decoded_url):
         return Response(status_code=400, content="Invalid upstream resource URL")
     if decoded_ref and not _validate_upstream_url(decoded_ref):
@@ -5695,11 +5929,13 @@ class _UpstreamBodyInterrupted(Exception):
 @app.get("/chunk.vtt")
 @app.get("/chunk.ts")
 @app.get("/chunk")
-async def proxy_chunk(request: Request, url: str, ref: str = "", org: str = ""):
+async def proxy_chunk(request: Request, url: str, ref: str = "", org: str = "", sig: str = ""):
     """Legacy segment relay (for sources channel sessions can't normalize)."""
     decoded_url = url
     decoded_ref = ref or ""
     decoded_origin = org or ""
+    if not _relay_signature_ok(decoded_url, decoded_ref, decoded_origin, sig):
+        return Response(status_code=403, content="Unsigned relay URL")
     if not _validate_upstream_url(decoded_url):
         return Response(status_code=400, content="Invalid upstream chunk URL")
     if decoded_ref and not _validate_upstream_url(decoded_ref):
@@ -5813,9 +6049,7 @@ async def proxy_chunk(request: Request, url: str, ref: str = "", org: str = ""):
 
 @app.get("/playlist.m3u", response_class=PlainTextResponse)
 async def generate_m3u(request: Request):
-    host = request.headers.get("host") or f"127.0.0.1:{PORT}"
-    scheme = getattr(getattr(request, "url", None), "scheme", "http")
-    base_url = f"{scheme}://{host}"
+    base_url = _public_base_url(request)
     lines = ["#EXTM3U"]
     for team_id, data in stream_state.items():
         if _channel_is_off_season(data):
@@ -5833,14 +6067,14 @@ async def generate_m3u(request: Request):
         lines.append(
             f'#EXTINF:-1 tvg-id="{_m3u_attribute(tvg_id)}" '
             f'tvg-name="{_m3u_attribute(name)}"{logo_attr} '
-            f'group-title="{group}",{name}'
+            f'group-title="{group}",{_m3u_title(name)}'
         )
-        lines.append(f"{base_url}/stream/{team_id}.m3u8")
+        lines.append(f"{base_url}/stream/{urllib.parse.quote(team_id, safe='')}.m3u8")
         for audio_id, audio_name, path in _multiview_audio_channels(team_id, data):
             lines.append(
                 f'#EXTINF:-1 tvg-id="{_m3u_attribute(audio_id)}" '
                 f'tvg-name="{_m3u_attribute(audio_name)}"{logo_attr} '
-                f'group-title="{group}",{audio_name}'
+                f'group-title="{group}",{_m3u_title(audio_name)}'
             )
             lines.append(f"{base_url}{path}")
     return "\n".join(lines)
@@ -6027,17 +6261,17 @@ def _channel_programmes(
 def _programme_xml_lines(channel_id: str, programmes: List[dict]) -> List[str]:
     """Render _channel_programmes()-shaped dicts as <programme> XML lines."""
     lines: List[str] = []
-    channel_id_esc = xml_escape(channel_id)
+    channel_id_esc = _xml_attr(channel_id)
     for p in programmes:
         lines.append(
             f'  <programme channel="{channel_id_esc}" start="{xmltv_ts(p["start"])}" stop="{xmltv_ts(p["stop"])}">'
         )
-        lines.append(f'    <title>{xml_escape(p["title"])}</title>')
+        lines.append(f'    <title>{_xml_text(p["title"])}</title>')
         if p.get("category"):
-            lines.append(f'    <category>{xml_escape(p["category"])}</category>')
-        lines.append(f'    <desc>{xml_escape(p["desc"])}</desc>')
+            lines.append(f'    <category>{_xml_text(p["category"])}</category>')
+        lines.append(f'    <desc>{_xml_text(p["desc"])}</desc>')
         if p.get("icon"):
-            lines.append(f'    <icon src="{xml_escape(p["icon"])}" />')
+            lines.append(f'    <icon src="{_xml_attr(p["icon"])}" />')
         lines.append('  </programme>')
     return lines
 
@@ -6297,15 +6531,15 @@ async def generate_xmltv(request: Request = None):
         if _channel_is_off_season(data):
             continue
         channel_id = _channel_tvg_id(team_id, data)
-        name_esc = xml_escape(data["name"])
+        name_esc = _xml_text(data["name"])
         logo = _channel_logo_url(data)
-        icon_tag = f'\n    <icon src="{xml_escape(logo)}" />' if logo else ""
-        xml.append(f'  <channel id="{xml_escape(channel_id)}">')
+        icon_tag = f'\n    <icon src="{_xml_attr(logo)}" />' if logo else ""
+        xml.append(f'  <channel id="{_xml_attr(channel_id)}">')
         xml.append(f'    <display-name>{name_esc}</display-name>{icon_tag}')
         xml.append('  </channel>')
         for audio_id, audio_name, _ in _multiview_audio_channels(team_id, data):
-            xml.append(f'  <channel id="{xml_escape(audio_id)}">')
-            xml.append(f'    <display-name>{xml_escape(audio_name)}</display-name>{icon_tag}')
+            xml.append(f'  <channel id="{_xml_attr(audio_id)}">')
+            xml.append(f'    <display-name>{_xml_text(audio_name)}</display-name>{icon_tag}')
             xml.append('  </channel>')
 
     guide_start = now_utc - timedelta(hours=1)
@@ -6406,7 +6640,7 @@ def _tail_log_file(limit: int) -> List[str]:
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, tab: str = "channels", status: str = "", auth: bool = Depends(verify_dashboard_auth)):
-    base_url = f"{request.url.scheme}://{request.headers.get('host', f'127.0.0.1:{PORT}')}"
+    base_url = _public_base_url(request)
     base_url_html = _html(base_url)
     dashboard_metrics = await _load_dashboard_metrics_async()
     metrics = dashboard_metrics
@@ -6493,7 +6727,12 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
     else:
         events_html = '<tr><td colspan="5" style="padding: 1rem; text-align: center; color: var(--text-muted); font-size: 0.85rem;">No historical events recorded yet.</td></tr>'
 
-    auth_badge = '<span class="badge" style="background: var(--surface-3); color: var(--text-muted);">🔓 Local Open Access</span>'
+    if DASHBOARD_AUTH_MODE == "open":
+        auth_badge = '<span class="badge" style="background: var(--surface-3); color: var(--text-muted);" title="No DASHBOARD_PASSWORD; only reachable from this computer">🔓 Local Open Access</span>'
+    elif DASHBOARD_AUTH_MODE == "generated":
+        auth_badge = f'<span class="badge" style="background: var(--surface-3); color: var(--text-muted);" title="Generated password in {_html(DASHBOARD_PASSWORD_FILE)}">🔒 Generated Password</span>'
+    else:
+        auth_badge = '<span class="badge" style="background: var(--surface-3); color: var(--text-muted);">🔒 Password Protected</span>'
     webhook_discord_badge = '<span class="badge" style="background: #5865F2; color: white;">Discord Alert On</span>' if notif_cfg["discord_webhook_url"] else '<span class="badge" style="background: var(--surface-3); color: var(--text-dim);">Discord Off</span>'
     webhook_telegram_badge = '<span class="badge" style="background: #229ED9; color: white;">Telegram Alert On</span>' if (notif_cfg["telegram_bot_token"] and notif_cfg["telegram_chat_id"]) else '<span class="badge" style="background: var(--surface-3); color: var(--text-dim);">Telegram Off</span>'
     jellyfin_badge = '<span class="badge" style="background: var(--purple); color: white;">🍇 Jellyfin Auto-Refresh On</span>' if jellyfin_cfg["jellyfin_api_key"] else '<span class="badge" style="background: var(--surface-3); color: var(--text-dim);">🍇 Jellyfin Manual</span>'
@@ -7013,7 +7252,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                     <form action="/settings/jellyfin" method="post" style="display: flex; flex-direction: column; gap: 1.25rem;">
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
                             <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">🌐 Jellyfin Server URL</label><input type="text" name="jellyfin_url" value="{_html(jellyfin_cfg['jellyfin_url'])}"></div>
-                            <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">🔑 Jellyfin API Key</label><input type="text" name="jellyfin_api_key" value="{_html(jellyfin_cfg['jellyfin_api_key'])}"></div>
+                            <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">🔑 Jellyfin API Key</label>{_secret_input("jellyfin_api_key", jellyfin_cfg['jellyfin_api_key'])}</div>
                         </div>
                         <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">⚙️ Refresh Guide Scheduled Task ID</label><input type="text" name="jellyfin_task_id" value="{_html(jellyfin_cfg['jellyfin_task_id'])}"></div>
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.25rem;"><button type="submit" style="background: var(--purple-dark);">💾 Save Jellyfin API Settings</button></div>
@@ -7027,9 +7266,9 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                 <div class="card">
                     <h3>Webhook Notification Settings</h3>
                     <form action="/settings/notifications" method="post" style="display: flex; flex-direction: column; gap: 1.25rem;">
-                        <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">👾 Discord Incoming Webhook URL</label><input type="text" name="discord_webhook_url" value="{_html(notif_cfg['discord_webhook_url'])}"></div>
+                        <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">👾 Discord Incoming Webhook URL</label>{_secret_input("discord_webhook_url", notif_cfg['discord_webhook_url'])}</div>
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
-                            <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">✈️ Telegram Bot Token</label><input type="text" name="telegram_bot_token" value="{_html(notif_cfg['telegram_bot_token'])}"></div>
+                            <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">✈️ Telegram Bot Token</label>{_secret_input("telegram_bot_token", notif_cfg['telegram_bot_token'])}</div>
                             <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">💬 Telegram Chat ID</label><input type="text" name="telegram_chat_id" value="{_html(notif_cfg['telegram_chat_id'])}"></div>
                         </div>
                         <button type="submit" style="margin-top: 0.5rem;">💾 Save Notification Settings</button>
@@ -7323,6 +7562,12 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                 const statusMessages = {{
                     'jellyfin_success': '✅ Jellyfin connection successful!',
                     'jellyfin_failed': '❌ Jellyfin connection failed',
+                    'jellyfin_key_required': '❌ Re-enter the API key when changing the Jellyfin server',
+                    'team_added': '✅ Channel added',
+                    'schedule_saved': '✅ Auto-disable date saved',
+                    'schedule_invalid': '❌ Enter a valid date (YYYY-MM-DD)',
+                    'schedule_failed': '❌ Could not save the auto-disable date',
+                    'jellyfin_url_invalid': '❌ Jellyfin URL must be an absolute http(s) URL',
                     'saved': '✅ Settings saved',
                     'test_sent': '✅ Test alert sent'
                 }};
@@ -7420,20 +7665,65 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
     """
     return html
 
+def _secret_input(name: str, saved_value: str) -> str:
+    """Password-type input that never echoes a saved secret back into the page.
+    Blank on submit keeps the saved value; the checkbox clears it."""
+    if not saved_value:
+        return f'<input type="password" name="{name}" value="" autocomplete="off">'
+    return (
+        f'<input type="password" name="{name}" value="" autocomplete="off" '
+        f'placeholder="Saved (ends {_html(saved_value[-4:])}) - leave blank to keep">'
+        f'<label style="font-size: 0.8rem; color: var(--text-muted); display: flex; gap: 0.35rem; align-items: center; margin-top: 0.35rem;">'
+        f'<input type="checkbox" name="clear_{name}" value="1" style="width: auto;"> Remove saved value</label>'
+    )
+
+
+def _submitted_secret(submitted: str, clear: str, current: str) -> str:
+    """Resolve a _secret_input submission against the current value."""
+    if clear:
+        return ""
+    return (submitted or "").strip() or current
+
+
 @app.post("/settings/notifications")
-async def update_notifications(discord_webhook_url: str = Form(""), telegram_bot_token: str = Form(""), telegram_chat_id: str = Form(""), auth: bool = Depends(verify_dashboard_auth)):
-    await set_setting_async("discord_webhook_url", discord_webhook_url.strip())
-    await set_setting_async("telegram_bot_token", telegram_bot_token.strip())
+async def update_notifications(
+    discord_webhook_url: str = Form(""),
+    telegram_bot_token: str = Form(""),
+    telegram_chat_id: str = Form(""),
+    clear_discord_webhook_url: str = Form(""),
+    clear_telegram_bot_token: str = Form(""),
+    auth: bool = Depends(verify_dashboard_auth),
+):
+    current = await get_notification_config()
+    discord = _submitted_secret(discord_webhook_url, clear_discord_webhook_url, current["discord_webhook_url"])
+    token = _submitted_secret(telegram_bot_token, clear_telegram_bot_token, current["telegram_bot_token"])
+    await set_setting_async("discord_webhook_url", discord)
+    await set_setting_async("telegram_bot_token", token)
     await set_setting_async("telegram_chat_id", telegram_chat_id.strip())
     return RedirectResponse(url="/?tab=alerts&status=saved", status_code=303)
 
 @app.post("/settings/jellyfin")
-async def update_jellyfin_settings(jellyfin_url: str = Form("http://localhost:8096"), jellyfin_api_key: str = Form(""), jellyfin_task_id: str = Form(""), auth: bool = Depends(verify_dashboard_auth)):
+async def update_jellyfin_settings(
+    jellyfin_url: str = Form("http://localhost:8096"),
+    jellyfin_api_key: str = Form(""),
+    jellyfin_task_id: str = Form(""),
+    clear_jellyfin_api_key: str = Form(""),
+    auth: bool = Depends(verify_dashboard_auth),
+):
     jellyfin_url = jellyfin_url.strip().rstrip("/")
     if not _validate_upstream_url(jellyfin_url, allow_private=True):
-        raise HTTPException(status_code=400, detail="Jellyfin URL must be an absolute HTTP(S) URL")
-    await set_setting_async("jellyfin_url", jellyfin_url.strip())
-    await set_setting_async("jellyfin_api_key", jellyfin_api_key.strip())
+        return RedirectResponse(url="/?tab=alerts&status=jellyfin_url_invalid", status_code=303)
+    current = await get_jellyfin_config()
+    new_key = (jellyfin_api_key or "").strip()
+    old_host = urllib.parse.urlsplit(current["jellyfin_url"]).netloc.lower()
+    new_host = urllib.parse.urlsplit(jellyfin_url).netloc.lower()
+    # The saved key must never follow a URL change to another host (that would
+    # hand the key to whatever server the new URL names): require it again.
+    if new_host != old_host and current["jellyfin_api_key"] and not new_key and not clear_jellyfin_api_key:
+        return RedirectResponse(url="/?tab=alerts&status=jellyfin_key_required", status_code=303)
+    api_key = "" if clear_jellyfin_api_key else (new_key or current["jellyfin_api_key"])
+    await set_setting_async("jellyfin_url", jellyfin_url)
+    await set_setting_async("jellyfin_api_key", api_key)
     await set_setting_async("jellyfin_task_id", jellyfin_task_id.strip())
     return RedirectResponse(url="/?tab=alerts&status=jellyfin_saved", status_code=303)
 
@@ -7560,25 +7850,42 @@ async def toggle_catalog(
     return RedirectResponse(url="/?tab=channels", status_code=303)
 
 
-@app.post("/add_team")
-async def add_team(team_name: str = Form(...), search_query: str = Form(...), auth: bool = Depends(verify_dashboard_auth)):
-    team_name = team_name.strip()
-    search_query = search_query.strip()
+TEAM_NAME_MAX_LENGTH = 120
+TEAM_QUERY_MAX_LENGTH = 200
+
+
+async def _add_manual_team(
+    team_name: str,
+    search_query: str,
+    *,
+    team_id: str = "",
+    logo_url: str = "",
+    category: str = "custom",
+) -> Optional[str]:
+    """Sanitize, persist and start one manually defined channel. Shared by the
+    dashboard form and config import so both apply the same rules. Returns the
+    team id, or None when the input is unusable."""
+    team_name = _clean_label(team_name, TEAM_NAME_MAX_LENGTH)
+    search_query = _clean_label(search_query, TEAM_QUERY_MAX_LENGTH)
     if not team_name or not search_query:
-        raise HTTPException(status_code=400, detail="Team name and search query are required")
-    team_id = _safe_team_id(team_name)
+        return None
+    team_id = _safe_team_id(team_id or team_name)
+    # Jellyfin fetches channel logos server-side: only public http(s) URLs.
+    logo_url = (_validate_upstream_url(logo_url.strip()) or "") if logo_url else ""
+    category = _clean_label(category, 40) or "custom"
     search_terms = get_team_search_terms(team_name, search_query, team_id)
-    await save_team_async(team_id, team_name, search_query, search_terms=search_terms, content_type="manual")
+    await save_team_async(team_id, team_name, search_query, logo_url, category=category,
+                          search_terms=search_terms, content_type="manual")
     stream_state[team_id] = {
         "name": team_name,
         "query": search_query,
         "candidates": [],
         "active_index": 0,
         "is_healthy": False,
-        "logo_url": "",
+        "logo_url": logo_url,
         "start_time": "",
         "stop_time": "",
-        "category": "custom",
+        "category": category,
         "source_id": "",
         "content_type": "manual",
         "search_terms": search_terms,
@@ -7587,7 +7894,15 @@ async def add_team(team_name: str = Form(...), search_query: str = Form(...), au
         **_scrape_lifecycle_defaults(),
     }
     _start_team_scrape_loop(team_id)
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+    return team_id
+
+
+@app.post("/add_team")
+async def add_team(team_name: str = Form(...), search_query: str = Form(...), auth: bool = Depends(verify_dashboard_auth)):
+    team_id = await _add_manual_team(team_name, search_query)
+    if team_id is None:
+        raise HTTPException(status_code=400, detail="Team name and search query are required")
+    return RedirectResponse(url="/?tab=channels&status=team_added", status_code=303)
 
 @app.post("/override/{team_id}")
 async def override_stream(team_id: str, candidate_index: int = Form(...), auth: bool = Depends(verify_dashboard_auth)):
@@ -7819,8 +8134,17 @@ async def bulk_remove(team_ids: str = Form(""), auth: bool = Depends(verify_dash
 def _export_teams_sync() -> list:
     with _db_session() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT team_id, name, query, logo_url, category, is_favorite FROM teams ORDER BY is_favorite DESC, name")
-        return [{"team_id": row[0], "name": row[1], "query": row[2], "logo_url": row[3], "category": row[4], "is_favorite": bool(row[5])} for row in cursor.fetchall()]
+        cursor.execute(
+            "SELECT team_id, name, query, logo_url, category, is_favorite, catalog_key FROM teams "
+            "ORDER BY is_favorite DESC, name"
+        )
+        return [
+            {
+                "team_id": row[0], "name": row[1], "query": row[2], "logo_url": row[3],
+                "category": row[4], "is_favorite": bool(row[5]), "catalog_key": row[6] or "",
+            }
+            for row in cursor.fetchall()
+        ]
 
 
 @app.get("/api/export-config", response_class=JSONResponse)
@@ -7828,7 +8152,8 @@ async def export_config(auth: bool = Depends(verify_dashboard_auth)):
     try:
         teams = await asyncio.to_thread(_export_teams_sync)
         config = {
-            "version": "1.0",
+            "version": "2.0",
+            "app_version": __version__,
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "teams": teams
         }
@@ -7838,34 +8163,70 @@ async def export_config(auth: bool = Depends(verify_dashboard_auth)):
         raise HTTPException(status_code=500, detail="Export failed")
 
 
-def _import_teams_sync(teams: list) -> None:
-    with _db_session() as conn:
-        for team in teams:
-            team_id = team.get("team_id", "")
-            name = team.get("name", "")
-            query = team.get("query", "")
-            logo_url = team.get("logo_url", "")
-            is_fav = 1 if team.get("is_favorite") else 0
-
-            if team_id and name and query:
-                conn.execute(
-                    "INSERT OR REPLACE INTO teams (team_id, name, query, logo_url, category, is_favorite) VALUES (?, ?, ?, ?, ?, ?)",
-                    (team_id, name, query, logo_url, "imported", is_fav)
-                )
-        conn.commit()
+IMPORT_MAX_TEAMS = 500
+IMPORT_MAX_BYTES = 2 * 1024 * 1024
 
 
 @app.post("/api/import-config")
 async def import_config(file: Request, auth: bool = Depends(verify_dashboard_auth)):
+    """Import channels from an export. Goes through the same sanitizing path as
+    the dashboard form and starts each new channel right away (imports used to
+    sit inert in the DB until a restart). Existing channels are left alone."""
     try:
-        body = await file.json()
-        teams = body.get("teams", [])
-        await asyncio.to_thread(_import_teams_sync, teams)
-        _spawn_background_task(trigger_jellyfin_refresh(), "refresh Jellyfin guide after import")
-        return JSONResponse({"status": "imported", "count": len(teams)})
+        raw = await file.body()
+        if len(raw) > IMPORT_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Import file too large")
+        body = json.loads(raw.decode("utf-8"))
+        teams = body.get("teams", []) if isinstance(body, dict) else None
+        if not isinstance(teams, list):
+            raise ValueError("teams must be a list")
+    except HTTPException:
+        raise
     except Exception as exc:
         _log_failure("import config", exc)
-        raise HTTPException(status_code=400, detail="Import failed")
+        raise HTTPException(status_code=400, detail="Import failed: not a Jellyball export")
+
+    catalog_by_key = {entry["catalog_key"]: entry for entry in await get_catalog_entries()}
+    imported, skipped, favorites = 0, 0, []
+    for team in teams[:IMPORT_MAX_TEAMS]:
+        if not isinstance(team, dict):
+            skipped += 1
+            continue
+        requested_id = _safe_team_id(str(team.get("team_id") or team.get("name") or ""))
+        if requested_id in stream_state:
+            skipped += 1
+            continue
+        catalog_entry = catalog_by_key.get(str(team.get("catalog_key") or ""))
+        if catalog_entry is not None:
+            # A catalog channel: enable the real catalog entry (keeps its
+            # search terms, schedule and guide metadata) instead of a copy.
+            if catalog_entry["team_id"] in stream_state:
+                skipped += 1
+                continue
+            await _set_catalog_entry_enabled(catalog_entry, True)
+            imported += 1
+            if team.get("is_favorite"):
+                favorites.append(catalog_entry["team_id"])
+            continue
+        team_id = await _add_manual_team(
+            str(team.get("name") or ""),
+            str(team.get("query") or ""),
+            team_id=requested_id,
+            logo_url=str(team.get("logo_url") or ""),
+            category=str(team.get("category") or "imported"),
+        )
+        if team_id is None:
+            skipped += 1
+            continue
+        imported += 1
+        if team.get("is_favorite"):
+            favorites.append(team_id)
+    skipped += max(0, len(teams) - IMPORT_MAX_TEAMS)
+    if favorites:
+        await asyncio.to_thread(_bulk_set_favorite_sync, favorites, True)
+    if imported:
+        request_jellyfin_guide_refresh_if_changed()
+    return JSONResponse({"status": "imported", "count": imported, "skipped": skipped})
 
 @app.post("/settings/playback")
 async def update_playback_settings(
@@ -8025,6 +8386,18 @@ async def set_provider_rotation(enabled: bool = Form(False), auth: bool = Depend
     return RedirectResponse(url="/?tab=channels&status=saved", status_code=303)
 
 
+def _parse_disable_date(value: str) -> Optional[str]:
+    """'' clears the schedule; anything else must be a real YYYY-MM-DD date
+    (it is compared as text against date('now'), so other formats never fire)."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return None
+
+
 def _schedule_team_disable_sync(team_id: str, disable_date: str) -> None:
     with _db_session() as conn:
         conn.execute("UPDATE teams SET auto_disable_after=? WHERE team_id=?", (disable_date, team_id))
@@ -8033,13 +8406,16 @@ def _schedule_team_disable_sync(team_id: str, disable_date: str) -> None:
 
 @app.post("/team/{team_id}/schedule-disable")
 async def schedule_team_disable(team_id: str, disable_date: str = Form(""), auth: bool = Depends(verify_dashboard_auth)):
+    parsed = _parse_disable_date(disable_date)
+    if parsed is None or team_id not in stream_state:
+        return RedirectResponse(url="/?tab=channels&status=schedule_invalid", status_code=303)
     try:
-        await asyncio.to_thread(_schedule_team_disable_sync, team_id, disable_date)
-        if team_id in stream_state:
-            stream_state[team_id]["auto_disable_after"] = disable_date
+        await asyncio.to_thread(_schedule_team_disable_sync, team_id, parsed)
+        stream_state[team_id]["auto_disable_after"] = parsed
     except Exception as exc:
         _log_failure(f"schedule disable {team_id}", exc)
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+        return RedirectResponse(url="/?tab=channels&status=schedule_failed", status_code=303)
+    return RedirectResponse(url="/?tab=channels&status=schedule_saved", status_code=303)
 
 def _create_tray_image():
     from PIL import Image, ImageDraw
@@ -8095,6 +8471,8 @@ def _existing_jellyball_instance(port: int) -> bool:
 
 def build_server(host: str, port: int):
     import uvicorn
+
+    _configure_dashboard_auth(host)
 
     try:
         import httptools  # noqa: F401

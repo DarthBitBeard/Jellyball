@@ -388,6 +388,7 @@ class JellyballChangesTests(unittest.TestCase):
                         request_for("/substream.m3u8"),
                         url=manifest_url,
                         ref="https://provider.example.test/watch/game",
+                        sig=main._relay_signature(manifest_url, "https://provider.example.test/watch/game"),
                     )
                     return response
             finally:
@@ -439,6 +440,7 @@ class JellyballChangesTests(unittest.TestCase):
                         request,
                         url=chunk_url,
                         ref="https://provider.example.test/watch/game",
+                        sig=main._relay_signature(chunk_url, "https://provider.example.test/watch/game"),
                     )
                     # proxy_chunk streams the ranged response rather than
                     # buffering it, so the body must be drained from the
