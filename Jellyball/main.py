@@ -5000,9 +5000,8 @@ def _multiview_audio_view(channel_id: str, audio_index: int) -> Optional[dict]:
     return data
 
 
-@app.api_route("/multiview/{channel_id}/audio/{audio_index}.m3u8", methods=["GET", "HEAD"])
-async def serve_multiview_audio_playlist(channel_id: str, audio_index: int, request: Request):
-    """Per-audio Multi-View channel ("Name · 🔊 Team"): the same composited video
+async def _serve_multiview_audio_playlist(channel_id: str, audio_index: int, request: Request, segment_prefix: str):
+    """Per-audio Multi-View channel ("🔊 Team · Name"): the same composited video
     with one member's audio. Switching audio inside Jellyfin = changing channel,
     which works on every client."""
     if _multiview_audio_view(channel_id, audio_index) is None:
@@ -5011,9 +5010,24 @@ async def serve_multiview_audio_playlist(channel_id: str, audio_index: int, requ
         return Response(status_code=200, media_type=HLS_MEDIA_TYPE, headers={"Cache-Control": "no-cache"})
     _touch_multiview_viewer(channel_id)
     _maybe_record_playback_event(channel_id)
-    return await _serve_session_playlist(f"{channel_id}#a{audio_index}", f"{audio_index}/seg/")
+    return await _serve_session_playlist(f"{channel_id}#a{audio_index}", segment_prefix)
 
 
+# The playlist filename is "audio-N", not "N": when an M3U entry has no
+# tvg-chno, Jellyfin falls back to a purely numeric URL filename as the channel
+# number, which turned the audio channels into stray channels 1, 2, 3.
+@app.api_route("/multiview/{channel_id}/audio-{audio_index}.m3u8", methods=["GET", "HEAD"])
+async def serve_multiview_audio_playlist(channel_id: str, audio_index: int, request: Request):
+    return await _serve_multiview_audio_playlist(channel_id, audio_index, request, f"audio-{audio_index}/seg/")
+
+
+@app.api_route("/multiview/{channel_id}/audio/{audio_index}.m3u8", methods=["GET", "HEAD"])
+async def serve_multiview_audio_playlist_legacy(channel_id: str, audio_index: int, request: Request):
+    # Old URL form, kept until Jellyfin's next guide refresh picks up the new one.
+    return await _serve_multiview_audio_playlist(channel_id, audio_index, request, f"{audio_index}/seg/")
+
+
+@app.get("/multiview/{channel_id}/audio-{audio_index}/seg/{seq}.ts")
 @app.get("/multiview/{channel_id}/audio/{audio_index}/seg/{seq}.ts")
 async def serve_multiview_audio_segment(channel_id: str, audio_index: int, seq: int):
     if _multiview_audio_view(channel_id, audio_index) is None:
@@ -5856,7 +5870,7 @@ def _multiview_audio_channels(channel_id: str, data: dict) -> List[Tuple[str, st
         (
             _multiview_audio_tvg_id(base_tvg_id, member),
             f"🔊 {_multiview_member_label(member)} · {mv_name}",
-            f"/multiview/{channel_id}/audio/{index}.m3u8",
+            f"/multiview/{channel_id}/audio-{index}.m3u8",
         )
         for index, member in enumerate(data.get("member_team_ids") or [])
     ]

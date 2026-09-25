@@ -6,7 +6,7 @@ Two member channels fed by fake live origins (different PIDs/timestamps), one
 side-by-side Multi-View over them. Verifies:
   * the main channel (/stream/mv.m3u8) plays through a Jellyfin-style ffmpeg;
   * every per-audio output (a0, a1) lists identical segment names/durations;
-  * the per-audio channel (/multiview/mv/audio/1.m3u8) serves a playlist;
+  * the per-audio channel (/multiview/mv/audio-1.m3u8) serves a playlist;
   * switching the main channel's audio via the dashboard route does NOT
     restart the Multi-View ffmpeg (same PID) and playback continues;
   * with MULTIVIEW_HWACCEL=nvenc on a machine without NVENC, the run falls
@@ -97,7 +97,7 @@ def main() -> int:
     }
 
     m3u = httpx.get(f"{app_base}/playlist.m3u", timeout=10).text
-    audio_entries = [line for line in m3u.splitlines() if "/multiview/mv/audio/" in line]
+    audio_entries = [line for line in m3u.splitlines() if "/multiview/mv/audio-" in line]
     print(f"per-audio M3U entries : {audio_entries}")
 
     channel_url = f"{app_base}/stream/mv.m3u8"
@@ -122,7 +122,7 @@ def main() -> int:
                 results["encoder"] = entry.get("encoder")
                 run_dir = entry["output_dir"]
                 results["outputs_identical"] = segment_listing(run_dir / "a0" / "index.m3u8") == segment_listing(run_dir / "a1" / "index.m3u8")
-                resp = httpx.get(f"{app_base}/multiview/mv/audio/1.m3u8", timeout=30)
+                resp = httpx.get(f"{app_base}/multiview/mv/audio-1.m3u8", timeout=30)
                 results["audio_channel_status"] = resp.status_code
                 results["audio_channel_segments"] = resp.text.count("#EXTINF")
                 resp = httpx.post(f"{app_base}/multiview/mv/set-audio", data={"active_audio_team_id": "tb"},
