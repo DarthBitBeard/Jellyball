@@ -46,7 +46,7 @@ class ExhaustedRecoveryTests(StateMixin, unittest.IsolatedAsyncioTestCase):
         }
         main.stream_state["t"] = data
 
-        async def health(url, referer, origin=""):
+        async def health(url, referer, origin="", **kwargs):
             return url.startswith("https://b.")
 
         with patch.object(main, "check_stream_health", side_effect=health):
