@@ -4074,6 +4074,33 @@ def _default_ffmpeg_path() -> str:
 
 
 FFMPEG_PATH = os.getenv("FFMPEG_PATH") or _default_ffmpeg_path()
+
+
+def _jellyfin_ffmpeg_path() -> Optional[str]:
+    """Jellyfin's own ffmpeg build, when Jellyball runs on the Jellyfin server."""
+    candidates: List[Path] = []
+    if sys.platform == "win32":
+        for root in (os.getenv("ProgramW6432"), os.getenv("ProgramFiles"), r"C:\Program Files"):
+            if root:
+                candidates.append(Path(root) / "Jellyfin" / "Server" / "ffmpeg.exe")
+    else:
+        candidates += [Path("/usr/lib/jellyfin-ffmpeg/ffmpeg"), Path("/usr/share/jellyfin-ffmpeg/ffmpeg")]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+# Multi-View's encoder must match the GPU driver. The bundled ffmpeg is a very
+# recent build (its NVENC needs NVIDIA driver 610+); on a Jellyfin server the
+# Jellyfin ffmpeg is built for whatever driver Jellyfin's own hardware
+# transcoding already uses, so prefer it unless a path is configured.
+MULTIVIEW_FFMPEG_PATH = (
+    os.getenv("MULTIVIEW_FFMPEG_PATH")
+    or (None if os.getenv("FFMPEG_PATH") else _jellyfin_ffmpeg_path())
+    or FFMPEG_PATH
+)
+MULTIVIEW_FFMPEG_VERSION_INFO = ""
 MULTIVIEW_HWACCEL = os.getenv("MULTIVIEW_HWACCEL", "nvenc").strip().lower()
 MULTIVIEW_BITRATE = os.getenv("MULTIVIEW_BITRATE", "6M")
 MULTIVIEW_SEGMENT_SECONDS = bounded_int(os.getenv("MULTIVIEW_SEGMENT_SECONDS", "4"), 4, 1, 15)
@@ -4171,6 +4198,31 @@ async def _check_ffmpeg_available() -> None:
         _log_failure("locate ffmpeg for multiview", exc, logging.WARNING)
     if not FFMPEG_AVAILABLE:
         LOGGER.warning("ffmpeg not found at FFMPEG_PATH=%r; Multi-View channels unavailable", FFMPEG_PATH)
+    await _check_multiview_ffmpeg()
+
+
+async def _check_multiview_ffmpeg() -> None:
+    global MULTIVIEW_FFMPEG_PATH, MULTIVIEW_FFMPEG_VERSION_INFO
+    if MULTIVIEW_FFMPEG_PATH != FFMPEG_PATH:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                MULTIVIEW_FFMPEG_PATH, "-version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                creationflags=_child_process_creationflags(),
+            )
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=5.0)
+            if process.returncode == 0 and stdout:
+                MULTIVIEW_FFMPEG_VERSION_INFO = stdout.decode(errors="replace").splitlines()[0]
+            else:
+                raise OSError(f"exit code {process.returncode}")
+        except (FileNotFoundError, OSError, asyncio.TimeoutError) as exc:
+            _log_failure(f"probe Multi-View ffmpeg {MULTIVIEW_FFMPEG_PATH!r}; using {FFMPEG_PATH!r}", exc)
+            MULTIVIEW_FFMPEG_PATH = FFMPEG_PATH
+    if MULTIVIEW_FFMPEG_PATH == FFMPEG_PATH:
+        MULTIVIEW_FFMPEG_VERSION_INFO = FFMPEG_VERSION_INFO
+    if MULTIVIEW_FFMPEG_VERSION_INFO:
+        LOGGER.info("Multi-View ffmpeg: %s (%s)", MULTIVIEW_FFMPEG_VERSION_INFO, MULTIVIEW_FFMPEG_PATH)
 
 
 def _multiview_bufsize(bitrate: str) -> str:
@@ -4411,7 +4463,7 @@ async def _watch_multiview_process(channel_id: str, process: "asyncio.subprocess
         entry["exited"] = True
         entry["exit_code"] = returncode
         if returncode != 0:
-            log_tail = "\n".join(entry.get("log_lines", []))
+            log_tail = "\n".join(list(entry.get("log_lines", []))[-25:])
             LOGGER.warning("multiview ffmpeg exited unexpectedly channel=%s code=%s\n%s", channel_id, returncode, log_tail)
 
 
@@ -4700,7 +4752,7 @@ async def _spawn_multiview(channel_id: str, data: dict) -> Tuple[bool, str]:
 
             args = _build_multiview_ffmpeg_args(channel_id, data, run_dir, audio_presence, encoder)
             try:
-                process = await asyncio.create_subprocess_exec(FFMPEG_PATH, *args, **_multiview_popen_kwargs(run_dir))
+                process = await asyncio.create_subprocess_exec(MULTIVIEW_FFMPEG_PATH, *args, **_multiview_popen_kwargs(run_dir))
             except (FileNotFoundError, OSError) as exc:
                 _log_failure(f"spawn ffmpeg multiview={channel_id}", exc, logging.ERROR)
                 shutil.rmtree(run_dir, ignore_errors=True)
