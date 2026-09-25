@@ -3641,14 +3641,16 @@ async def emergency_rescrape(team_id: str) -> None:
         _SCRAPE_IN_FLIGHT.discard(team_id)
 
 
-async def check_stream_health(url: str, referer: str, origin: str = "") -> bool:
+async def check_stream_health(url: str, referer: str, origin: str = "", probe_state: Optional[dict] = None) -> bool:
     owns_client = SHARED_HTTP_CLIENT is None
     client = SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=5.0, follow_redirects=True, http2=True)
     try:
         # Origin must be forwarded: streams captured with one (Playwright-intercepted
         # providers) play through the proxy, which sends it, but failed every probe
         # without it - causing endless false failovers.
-        return await verify_stream_live(client, url, referer, origin=origin)
+        # probe_state (kept on the candidate) lets the probe notice a playlist
+        # that stopped advancing between probes, not just one that is reachable.
+        return await verify_stream_live(client, url, referer, origin=origin, probe_state=probe_state)
     except Exception as exc:
         _log_failure("stream health check", exc)
         return False
@@ -3698,7 +3700,10 @@ async def _probe_active_candidate(team_id: str, data: dict) -> None:
         async with _ACTIVE_PROBE_SEMAPHORE:
             try:
                 is_alive = await asyncio.wait_for(
-                    check_stream_health(candidate["url"], candidate.get("referer", ""), candidate.get("origin", "")),
+                    check_stream_health(
+                        candidate["url"], candidate.get("referer", ""), candidate.get("origin", ""),
+                        probe_state=candidate.setdefault("probe_state", {}),
+                    ),
                     timeout=HEALTH_PROBE_TIMEOUT,
                 )
             except asyncio.TimeoutError:
@@ -3728,7 +3733,10 @@ async def _probe_standby_candidate(candidate: dict, semaphore: asyncio.Semaphore
     async with semaphore:
         try:
             is_alive = await asyncio.wait_for(
-                check_stream_health(candidate["url"], candidate.get("referer", ""), candidate.get("origin", "")),
+                check_stream_health(
+                    candidate["url"], candidate.get("referer", ""), candidate.get("origin", ""),
+                    probe_state=candidate.setdefault("probe_state", {}),
+                ),
                 timeout=HEALTH_PROBE_TIMEOUT,
             )
         except asyncio.TimeoutError:
