@@ -758,7 +758,7 @@ def _guide_signature() -> str:
     """Hash of everything Jellyfin's guide shows for our channels. Scrapes only
     trigger a guide refresh when this changes - previously every successful
     5-minute rescrape of every channel queued a full Jellyfin guide refresh."""
-    parts = []
+    parts = [f"show_offseason={SHOW_OFFSEASON_CHANNELS}"]
     for team_id, data in sorted(stream_state.items()):
         parts.append("\0".join(str(value) for value in (
             team_id,
@@ -2240,6 +2240,16 @@ def _channel_is_always_live(data: dict) -> bool:
 
 def _channel_is_off_season(data: dict) -> bool:
     return data.get("schedule_status") == "off_season"
+
+
+# Off-season channels leave the M3U/guide by default; with this on they stay
+# listed with an "Off-season - resumes <date>" guide block (Settings tab).
+SHOW_OFFSEASON_CHANNELS = False
+
+
+def _channel_listed(data: dict) -> bool:
+    """Whether a channel appears in the M3U playlist and XMLTV guide."""
+    return SHOW_OFFSEASON_CHANNELS or not _channel_is_off_season(data)
 
 
 def _channel_tvg_id(team_id: str, data: dict) -> str:
@@ -3839,6 +3849,8 @@ async def lifespan(app: FastAPI):
     shutil.rmtree(PLACEHOLDER_OUTPUT_DIR, ignore_errors=True)
     # Advanced settings saved from the dashboard override the env defaults.
     _load_tunable_overrides()
+    global SHOW_OFFSEASON_CHANNELS
+    SHOW_OFFSEASON_CHANNELS = get_setting("show_offseason_channels", "0") == "1"
     stream_state.clear()
     _TEAM_SCRAPE_TASKS.clear()
     _SCRAPE_IN_FLIGHT.clear()
@@ -6371,7 +6383,7 @@ async def generate_m3u(request: Request):
     base_url = _public_base_url(request)
     lines = ["#EXTM3U"]
     for team_id, data in stream_state.items():
-        if _channel_is_off_season(data):
+        if not _channel_listed(data):
             continue
         # The .m3u8 extension makes Jellyfin treat the URL as an HLS manifest
         # (always through its own ffmpeg, never "direct play" of our URL or
@@ -6513,6 +6525,18 @@ def _channel_programmes(
     channel_id = _channel_tvg_id(team_id, data)
     programmes: List[dict] = []
 
+    def block(start: datetime, stop: datetime, title: str, desc: str, category: str = "") -> None:
+        programmes.append({"start": start, "stop": stop, "title": title, "desc": desc,
+                           "category": category, "icon": logo})
+
+    if _channel_is_off_season(data):
+        resumes = _season_resume_label(data.get("category", ""))
+        block(guide_start, guide_end,
+              f"{name}: Off-season" + (f" (resumes {resumes})" if resumes else ""),
+              f"{name} is between seasons. The channel returns to the guide automatically"
+              + (f" when the season resumes around {resumes}." if resumes else " when the season resumes."))
+        return programmes
+
     dt_start, dt_stop = parse_team_schedule(data)
     has_specific_game = bool(
         dt_start and dt_stop and dt_stop >= guide_start and dt_start <= guide_end
@@ -6520,29 +6544,14 @@ def _channel_programmes(
 
     if has_specific_game:
         if dt_start > guide_start:
-            programmes.append({
-                "start": guide_start, "stop": min(dt_start, guide_end),
-                "title": f"{name} Standby",
-                "desc": f"Waiting for the scheduled {name} broadcast.",
-                "category": "", "icon": logo,
-            })
-
-        live_start = max(dt_start, guide_start)
-        live_stop = min(dt_stop, guide_end)
-        programmes.append({
-            "start": live_start, "stop": live_stop,
-            "title": f"{name} Scheduled Event",
-            "desc": f"Scheduled live stream window for {name}. Searching starts one hour before the event and continues one hour after the scheduled end.",
-            "category": "", "icon": logo,
-        })
-
+            block(guide_start, min(dt_start, guide_end), f"{name} Standby",
+                  f"Waiting for the scheduled {name} broadcast.")
+        block(max(dt_start, guide_start), min(dt_stop, guide_end), f"{name} Scheduled Event",
+              f"Scheduled live stream window for {name}. Searching starts one hour before the event "
+              "and continues one hour after the scheduled end.")
         if dt_stop < guide_end:
-            programmes.append({
-                "start": max(dt_stop, guide_start), "stop": guide_end,
-                "title": f"{name} Standby",
-                "desc": f"Post-event standby for {name}; the next scheduled event will refresh this guide.",
-                "category": "", "icon": logo,
-            })
+            block(max(dt_stop, guide_start), guide_end, f"{name} Standby",
+                  f"Post-event standby for {name}; the next scheduled event will refresh this guide.")
     else:
         programs = tvguide_schedules.get(channel_id, [])
         if _channel_is_always_live(data) and programs:
@@ -6551,29 +6560,15 @@ def _channel_programmes(
                 p_stop = datetime.fromtimestamp(prog.get("endTime", 0), tz=timezone.utc)
                 if p_stop <= guide_start or p_start >= guide_end:
                     continue
-                p_start = max(p_start, guide_start)
-                p_stop = min(p_stop, guide_end)
-                programmes.append({
-                    "start": p_start, "stop": p_stop,
-                    "title": prog.get("title") or f"{name} Live",
-                    "desc": prog.get("description") or f"Live broadcast on {name}.",
-                    "category": "Sports", "icon": logo,
-                })
+                block(max(p_start, guide_start), min(p_stop, guide_end),
+                      prog.get("title") or f"{name} Live",
+                      prog.get("description") or f"Live broadcast on {name}.", "Sports")
+        elif _channel_is_always_live(data):
+            block(guide_start, guide_end, f"{name} Live",
+                  f"Always-live sports channel for {name}; the linear stream is monitored continuously.", "Sports")
         else:
-            if _channel_is_always_live(data):
-                programmes.append({
-                    "start": guide_start, "stop": guide_end,
-                    "title": f"{name} Live",
-                    "desc": f"Always-live sports channel for {name}; the linear stream is monitored continuously.",
-                    "category": "Sports", "icon": logo,
-                })
-            else:
-                programmes.append({
-                    "start": guide_start, "stop": guide_end,
-                    "title": f"{name} Standby",
-                    "desc": f"No verified scheduled event is available for {name} in the next {GUIDE_HORIZON_DAYS} days.",
-                    "category": "", "icon": logo,
-                })
+            block(guide_start, guide_end, f"{name} Standby",
+                  f"No verified scheduled event is available for {name} in the next {GUIDE_HORIZON_DAYS} days.")
     return programmes
 
 
@@ -6838,16 +6833,11 @@ def _multiview_programmes(
 
 @app.api_route("/epg.xml", methods=["GET", "HEAD"], response_class=PlainTextResponse)
 async def generate_xmltv(request: Request = None):
-    base_url = ""
-    if request is not None:
-        host = request.headers.get("host") or f"127.0.0.1:{PORT}"
-        scheme = getattr(getattr(request, "url", None), "scheme", "http")
-        base_url = f"{scheme}://{host}"
     now_utc = datetime.now(timezone.utc)
     xml = ['<?xml version="1.0" encoding="UTF-8"?>', '<tv>']
 
     for team_id, data in stream_state.items():
-        if _channel_is_off_season(data):
+        if not _channel_listed(data):
             continue
         channel_id = _channel_tvg_id(team_id, data)
         name_esc = _xml_text(data["name"])
@@ -6866,7 +6856,7 @@ async def generate_xmltv(request: Request = None):
     tvguide_schedules = await _fetch_tvguide_epg()
 
     for team_id, data in stream_state.items():
-        if _channel_is_off_season(data):
+        if not _channel_listed(data):
             continue
         channel_id = _channel_tvg_id(team_id, data)
 
@@ -7611,6 +7601,15 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                     <form action="/settings/advanced" method="post" style="display: flex; flex-direction: column; gap: 1.25rem;">
                         {_advanced_settings_html()}
                         <button type="submit" style="width: auto; align-self: flex-start;">💾 Save Advanced Settings</button>
+                    </form>
+                </div>
+                <div class="card">
+                    <h3>Off-season Channels</h3>
+                    <p class="hint-text">By default a team's channel leaves Jellyfin's channel list and guide between seasons. Keep them listed instead, with an "Off-season" guide entry showing when the season resumes.</p>
+                    <form action="/settings/offseason" method="post" style="display: flex; align-items: center; gap: 0.75rem;">
+                        <input type="checkbox" name="enabled" value="true" id="offseason-toggle" {'checked' if SHOW_OFFSEASON_CHANNELS else ''} style="width: auto; cursor: pointer;">
+                        <label for="offseason-toggle" style="cursor: pointer;">Keep off-season channels in Jellyfin</label>
+                        <button type="submit" style="width: auto; margin-left: auto;">💾 Save</button>
                     </form>
                 </div>
                 <div class="card">
@@ -8922,7 +8921,17 @@ async def test_stream(team_id: str, auth: bool = Depends(verify_dashboard_auth))
 @app.post("/settings/provider-rotation")
 async def set_provider_rotation(enabled: bool = Form(False), auth: bool = Depends(verify_dashboard_auth)):
     await set_setting_async("provider_rotation_mode", "1" if enabled else "0")
-    return RedirectResponse(url="/?tab=channels&status=saved", status_code=303)
+    return RedirectResponse(url="/?tab=playback&status=saved", status_code=303)
+
+
+@app.post("/settings/offseason")
+async def set_offseason_listing(enabled: bool = Form(False), auth: bool = Depends(verify_dashboard_auth)):
+    global SHOW_OFFSEASON_CHANNELS
+    await set_setting_async("show_offseason_channels", "1" if enabled else "0")
+    if SHOW_OFFSEASON_CHANNELS != bool(enabled):
+        SHOW_OFFSEASON_CHANNELS = bool(enabled)
+        request_jellyfin_guide_refresh_if_changed()
+    return RedirectResponse(url="/?tab=playback&status=saved", status_code=303)
 
 
 def _parse_disable_date(value: str) -> Optional[str]:

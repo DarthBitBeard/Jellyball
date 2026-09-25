@@ -239,3 +239,24 @@ class LogScrubbingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OffSeasonGuideTests(StateMixin, unittest.TestCase):
+    def test_off_season_channels_hidden_by_default_and_listed_when_enabled(self):
+        main.stream_state["t"] = {"name": "Team", "query": "t", "candidates": [], "category": "nfl",
+                                  "schedule_status": "off_season"}
+        with patch.object(main, "SHOW_OFFSEASON_CHANNELS", False):
+            self.assertFalse(main._channel_listed(main.stream_state["t"]))
+        with patch.object(main, "SHOW_OFFSEASON_CHANNELS", True):
+            self.assertTrue(main._channel_listed(main.stream_state["t"]))
+            now = main.datetime.now(main.timezone.utc)
+            blocks = main._channel_programmes("t", main.stream_state["t"], now, now + main.timedelta(days=1), {})
+            self.assertEqual(len(blocks), 1)
+            self.assertIn("Off-season", blocks[0]["title"])
+
+    def test_guide_signature_changes_with_the_toggle(self):
+        with patch.object(main, "SHOW_OFFSEASON_CHANNELS", False):
+            off = main._guide_signature()
+        with patch.object(main, "SHOW_OFFSEASON_CHANNELS", True):
+            on = main._guide_signature()
+        self.assertNotEqual(off, on)
