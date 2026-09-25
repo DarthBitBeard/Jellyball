@@ -12,6 +12,7 @@ import asyncio
 import html
 import logging
 import os
+import time
 import urllib.parse
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, List, Dict, Tuple, Set, Optional, Iterable
@@ -19,6 +20,7 @@ import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import Browser, Page
 from network_safety import validate_http_url, validate_http_url_async, bounded_int
+from ts_normalize import find_ts_start
 
 LOGGER = logging.getLogger("jellyball.stream_extractor")
 MAX_INSPECTION_BYTES = 2 * 1024 * 1024
@@ -27,10 +29,15 @@ MAX_STREAMER_LINKS = 8
 MAX_EXTRACTED_STREAMS = 32
 _STREAM_HINTS = (".m3u8", "playlist", "manifest", "load-playlist", "stream", "hls", "live")
 
-DEFAULT_USER_AGENT = (
+# Playwright 1.62 (the version pinned in requirements.txt) bundles Chromium
+# 151.0.7922.34 -- checked directly via
+# `sync_playwright().chromium.launch().version` against this pin, not guessed.
+# JELLYBALL_USER_AGENT overrides this at runtime for providers that start
+# fingerprinting the UA string itself; both are read once at import time.
+DEFAULT_USER_AGENT = os.getenv("JELLYBALL_USER_AGENT", "").strip() or (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
+    "Chrome/151.0.0.0 Safari/537.36"
 )
 
 # lxml's C parser is materially faster than html.parser on the multi-hundred-KB
@@ -387,8 +394,17 @@ async def verify_stream_live(
     referer: str = "",
     timeout: float = 5.0,
     origin: str = "",
+    *,
+    probe_state: Optional[dict] = None,
 ) -> bool:
-    """Verify a stream URL and, for HLS, one actual media segment."""
+    """Verify a stream URL and, for HLS, one actual media segment.
+
+    probe_state is an optional caller-owned dict, one per candidate, that must
+    be passed back in on every subsequent probe of the *same* candidate. It is
+    used to detect a frozen live playlist (media sequence and last segment URI
+    not advancing): see _playlist_is_fresh below. Pass None (the default) to
+    skip freshness tracking, e.g. for a one-shot check.
+    """
     if not await validate_http_url_async(url) or (referer and not await validate_http_url_async(referer)):
         return False
 
@@ -404,16 +420,22 @@ async def verify_stream_live(
             parsed_origin = urllib.parse.urlsplit(safe_origin)
             headers["Origin"] = f"{parsed_origin.scheme}://{parsed_origin.netloc}"
 
-    def next_safe_url(current_url: str, response: httpx.Response) -> Optional[str]:
+    async def next_safe_url(current_url: str, response: httpx.Response) -> Optional[str]:
         location = response.headers.get("location")
         if not location:
             return None
-        return validate_http_url(urllib.parse.urljoin(str(response.url or current_url), location))
+        return await validate_http_url_async(urllib.parse.urljoin(str(response.url or current_url), location))
 
     def media_sample_is_playable(sample: bytes, content_type: str) -> bool:
         if not sample:
             return False
         content_type = content_type.lower()
+        # Some providers prefix real MPEG-TS with a fake image header to dodge
+        # naive hotlink/probe checks; find_ts_start skips such a prefix and
+        # locates the real aligned TS sync bytes, so check it before rejecting
+        # on image magic bytes.
+        if find_ts_start(sample) >= 0:
+            return True
         if content_type.startswith("image/") or sample.startswith((b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF")):
             return False
         if sample[:1] == b"<":
@@ -424,20 +446,27 @@ async def verify_stream_live(
             or any(kind in content_type for kind in ("video", "octet-stream", "audio"))
         )
 
-    async def read_sample(current_url: str, request_headers: Dict[str, str], max_bytes: int = 16 * 1024):
+    async def read_sample(current_url: str, request_headers: Dict[str, str], max_bytes: int = 64 * 1024):
+        # Range is capped to match max_bytes: a 206 (or a 200 from a server
+        # that ignores Range) both let us stop after max_bytes without having
+        # to abort the connection mid-body. max_bytes must stay >= 64KB so a
+        # sample is always large enough for find_ts_start to see past a fake
+        # image-header prefix.
+        range_headers = dict(request_headers)
+        range_headers["Range"] = f"bytes=0-{max_bytes - 1}"
         for _ in range(MAX_REDIRECTS + 1):
-            safe_url = validate_http_url(current_url)
+            safe_url = await validate_http_url_async(current_url)
             if not safe_url:
                 return None
             async with client.stream(
                 "GET",
                 safe_url,
-                headers=request_headers,
+                headers=range_headers,
                 timeout=timeout,
                 follow_redirects=False,
             ) as response:
                 if 300 <= response.status_code < 400:
-                    current_url = next_safe_url(current_url, response)
+                    current_url = await next_safe_url(current_url, response)
                     if not current_url:
                         return None
                     continue
@@ -451,6 +480,57 @@ async def verify_stream_live(
                 return str(response.url or safe_url), response.headers.get("content-type", ""), bytes(sample)
         return None
 
+    def _last_playlist_uri(text: str) -> str:
+        """Last non-comment URI line in a playlist: the newest segment for a
+        media playlist, or the last variant for a master playlist. Computed
+        independently of the #EXT-X-MAP short-circuit below, which would
+        otherwise pin this to a constant init-segment URI on fMP4 playlists."""
+        last = ""
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                last = stripped
+        return last
+
+    def _playlist_is_fresh(text: str, is_master: bool) -> bool:
+        """False when a *media* playlist's sequence and last segment URI have
+        gone stale: unchanged for longer than max(3 * target_duration, 20s)
+        since they were first seen unchanged (i.e. since they last advanced).
+
+        probe_state is the caller-owned, per-candidate dict passed into
+        verify_stream_live; it must be handed back in on the next probe of the
+        same candidate for this to detect anything. With no probe_state, or
+        on a master playlist (which has no media sequence), freshness can't
+        be judged, so this passes.
+        """
+        if probe_state is None or is_master:
+            return True
+        seq_match = re.search(r'#EXT-X-MEDIA-SEQUENCE:(\d+)', text)
+        media_sequence = int(seq_match.group(1)) if seq_match else 0
+        duration_match = re.search(r'#EXT-X-TARGETDURATION:(\d+(?:\.\d+)?)', text)
+        target_duration = float(duration_match.group(1)) if duration_match else 6.0
+        last_uri = _last_playlist_uri(text)
+
+        now = time.monotonic()
+        prev_sequence = probe_state.get("media_sequence")
+        prev_uri = probe_state.get("last_segment_uri")
+
+        probe_state["segment_count"] = text.count("#EXTINF")
+        probe_state["target_duration"] = target_duration
+
+        if prev_sequence is None or media_sequence != prev_sequence or last_uri != prev_uri:
+            # First probe of this candidate, or the playlist advanced: (re)start
+            # the clock. The first probe can't judge freshness yet, so either
+            # way this passes.
+            probe_state["media_sequence"] = media_sequence
+            probe_state["last_segment_uri"] = last_uri
+            probe_state["advanced_at"] = now
+            return True
+
+        stalled_for = now - probe_state.get("advanced_at", now)
+        threshold = max(3 * target_duration, 20.0)
+        return stalled_for <= threshold
+
     async def verify_hls_media(media_url: str, manifest_url: str, depth: int = 0) -> bool:
         result = await read_sample(media_url, headers)
         if not result:
@@ -459,6 +539,9 @@ async def verify_stream_live(
         text = sample.decode("utf-8", errors="replace")
         if sample.startswith(b"#EXTM3U") or "mpegurl" in content_type.lower():
             if depth >= 2:
+                return False
+            if "#EXT-X-ENDLIST" in text:
+                # A finished/VOD playlist, not a live one.
                 return False
             # Master playlists: the first variant is as good as any. Media playlists:
             # sample the *newest* segment - the oldest one in a live sliding window is
@@ -479,7 +562,9 @@ async def verify_stream_live(
                         break
             if not media_uri:
                 return False
-            next_url = validate_http_url(urllib.parse.urljoin(effective_url, media_uri))
+            if not _playlist_is_fresh(text, is_master):
+                return False
+            next_url = await validate_http_url_async(urllib.parse.urljoin(effective_url, media_uri))
             if not next_url:
                 return False
             return await verify_hls_media(next_url, effective_url, depth + 1)
@@ -487,23 +572,29 @@ async def verify_stream_live(
 
     # HEAD remains useful for direct media URLs, but a playlist must be read
     # and sampled because a healthy manifest can still contain image pixels or
-    # tracking requests instead of playable media.
-    try:
-        current_url = url
-        for _ in range(MAX_REDIRECTS + 1):
-            head_resp = await client.head(current_url, headers=headers, timeout=timeout, follow_redirects=False)
-            if 300 <= head_resp.status_code < 400:
-                current_url = next_safe_url(current_url, head_resp)
-                if not current_url:
-                    break
-                continue
-            if head_resp.status_code in (200, 206):
-                ctype = head_resp.headers.get("content-type", "").lower()
-                if "mpegurl" not in ctype and media_sample_is_playable(b"\x47", ctype):
-                    return True
-            break
-    except Exception as exc:
-        LOGGER.debug("Stream HEAD health check failed error=%s", type(exc).__name__)
+    # tracking requests instead of playable media. Skip it outright for a
+    # .m3u8 URL, master or media: verify_hls_media always ends up doing its
+    # own GET for those, so the HEAD would just be a wasted request, and
+    # skipping it keeps a master URL's chain at 3 GETs total (master, media
+    # playlist, segment).
+    is_playlist_url = urllib.parse.urlsplit(url).path.lower().endswith(".m3u8")
+    if not is_playlist_url:
+        try:
+            current_url = url
+            for _ in range(MAX_REDIRECTS + 1):
+                head_resp = await client.head(current_url, headers=headers, timeout=timeout, follow_redirects=False)
+                if 300 <= head_resp.status_code < 400:
+                    current_url = await next_safe_url(current_url, head_resp)
+                    if not current_url:
+                        break
+                    continue
+                if head_resp.status_code in (200, 206):
+                    ctype = head_resp.headers.get("content-type", "").lower()
+                    if "mpegurl" not in ctype and media_sample_is_playable(b"\x47", ctype):
+                        return True
+                break
+        except Exception as exc:
+            LOGGER.debug("Stream HEAD health check failed error=%s", type(exc).__name__)
 
     try:
         return await verify_hls_media(url, url)
