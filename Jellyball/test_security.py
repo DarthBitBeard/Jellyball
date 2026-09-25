@@ -308,6 +308,33 @@ class DashboardRenderTests(TempDbMixin, unittest.TestCase):
             main.SESSIONS.config.stale_min_seconds = main._TUNABLE_DEFAULTS["SESSION_STALE_SECONDS"]
 
 
+class ObservabilityEndpointTests(unittest.TestCase):
+    def test_sessions_and_metrics_endpoints(self):
+        async def exercise():
+            async with _client() as client:
+                return await client.get("/api/sessions"), await client.get("/metrics"), await client.get("/api/status")
+
+        with patch.object(main, "DASHBOARD_PASSWORD", ""):
+            sessions, metrics, status = asyncio.run(exercise())
+        self.assertEqual(sessions.status_code, 200)
+        self.assertIn("sessions", sessions.json())
+        self.assertEqual(metrics.status_code, 200)
+        self.assertIn("jellyball_channels", metrics.text)
+        self.assertEqual(status.status_code, 200)
+
+    def test_session_metrics_shape(self):
+        from hls_session import ChannelSession, SessionConfig, SessionHooks
+        hooks = SessionHooks(fetch=None, headers_for=None, resolve_source=None,
+                             report_failure=None, report_incompatible=None)
+        session = ChannelSession("c", hooks, SessionConfig())
+        session._recent_segments.extend([(750_000, 6.0), (750_000, 6.0)])
+        session._download_seconds.extend([0.2, 0.4, 1.0])
+        metrics = session.metrics()
+        self.assertEqual(metrics["bitrate_kbps"], 1000)
+        self.assertEqual(metrics["segment_ms_p95"], 1000)
+        self.assertEqual(metrics["segment_ms_avg"], 533)
+
+
 class RelaySigningTests(unittest.TestCase):
     def test_rewritten_urls_carry_valid_signatures(self):
         import urllib.parse

@@ -6902,10 +6902,15 @@ async def api_status(auth: bool = Depends(verify_dashboard_auth)):
         candidates = data.get("candidates", [])
         active_index = data.get("active_index", 0)
         active = candidates[active_index] if 0 <= active_index < len(candidates) else None
+        session = SESSIONS.peek(team_id)
         channels.append({
             "team_id": team_id,
             "name": data.get("name", team_id),
             "healthy": bool(data.get("is_healthy")),
+            "watching": bool(session is not None and session.is_watched()),
+            "on_placeholder": bool(session is not None and session.is_watched() and _session_on_placeholder(session)),
+            "exhausted": bool(data.get("exhausted")),
+            "failover_count": int(data.get("failover_count", 0)),
             "candidate_count": len(candidates),
             "active_provider": active.get("provider") if active else None,
             "stream_window_active": is_stream_window_active(data),
@@ -6930,6 +6935,82 @@ async def api_status(auth: bool = Depends(verify_dashboard_auth)):
         "channels": channels,
         "channel_count": len(channels),
     }
+
+
+def _session_status(channel_id: str, snapshot: dict) -> dict:
+    data = stream_state.get(channel_id) or {}
+    candidates = data.get("candidates") or []
+    active_index = data.get("active_index", 0)
+    active = candidates[active_index] if 0 <= active_index < len(candidates) else {}
+    source_key = snapshot.get("source_key") or []
+    return {
+        **snapshot,
+        "name": data.get("name", channel_id),
+        "on_placeholder": bool(source_key and source_key[0] == "placeholder"),
+        "exhausted": bool(data.get("exhausted")),
+        "active_provider": active.get("provider"),
+        "codec_signature": list(active.get("codec_signature") or []) or None,
+        "failover_count": int(data.get("failover_count", 0)),
+        "last_failover": data.get("last_failover"),
+        "candidate_count": len(candidates),
+    }
+
+
+@app.get("/api/sessions")
+async def api_sessions(auth: bool = Depends(verify_dashboard_auth)):
+    """Live per-channel playback state: what each running channel session is
+    playing, its throughput/latency, and its failover history."""
+    return {
+        "sessions": {cid: _session_status(cid, snap) for cid, snap in SESSIONS.snapshot().items()},
+    }
+
+
+def _prometheus_label(value: object) -> str:
+    return str(value).replace("\\", "\\\\").replace("\n", " ").replace('"', '\\"')
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def prometheus_metrics(auth: bool = Depends(verify_dashboard_auth)):
+    """Prometheus text exposition of the main health numbers (dashboard auth applies)."""
+    lines = [
+        "# HELP jellyball_channels Configured channels.",
+        "# TYPE jellyball_channels gauge",
+        f"jellyball_channels {len(stream_state)}",
+        "# HELP jellyball_channel_healthy 1 when the channel's active source is healthy.",
+        "# TYPE jellyball_channel_healthy gauge",
+    ]
+    for team_id, data in stream_state.items():
+        lines.append(f'jellyball_channel_healthy{{channel="{_prometheus_label(team_id)}"}} {1 if data.get("is_healthy") else 0}')
+    lines += [
+        "# HELP jellyball_channel_failovers_total Failovers since start.",
+        "# TYPE jellyball_channel_failovers_total counter",
+    ]
+    for team_id, data in stream_state.items():
+        lines.append(f'jellyball_channel_failovers_total{{channel="{_prometheus_label(team_id)}"}} {int(data.get("failover_count", 0))}')
+    snapshots = SESSIONS.snapshot()
+    lines += [
+        "# HELP jellyball_session_watched 1 while someone is watching the channel.",
+        "# TYPE jellyball_session_watched gauge",
+    ]
+    for cid, snap in snapshots.items():
+        lines.append(f'jellyball_session_watched{{channel="{_prometheus_label(cid)}"}} {1 if snap.get("watched") else 0}')
+    lines += [
+        "# HELP jellyball_session_bitrate_kbps Recent segment bitrate.",
+        "# TYPE jellyball_session_bitrate_kbps gauge",
+    ]
+    for cid, snap in snapshots.items():
+        if snap.get("bitrate_kbps") is not None:
+            lines.append(f'jellyball_session_bitrate_kbps{{channel="{_prometheus_label(cid)}"}} {snap["bitrate_kbps"]}')
+    lines += [
+        "# HELP jellyball_session_segment_seconds_p95 95th percentile segment download time.",
+        "# TYPE jellyball_session_segment_seconds_p95 gauge",
+    ]
+    for cid, snap in snapshots.items():
+        if snap.get("segment_ms_p95") is not None:
+            lines.append(
+                f'jellyball_session_segment_seconds_p95{{channel="{_prometheus_label(cid)}"}} {snap["segment_ms_p95"] / 1000:.3f}'
+            )
+    return "\n".join(lines) + "\n"
 
 
 @app.get("/api/logs")
