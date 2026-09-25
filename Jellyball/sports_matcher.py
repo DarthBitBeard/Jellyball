@@ -32,7 +32,7 @@ _TEAM_ALIASES_DB: Dict[str, List[str]] = {
     # Florida & Major Colleges
     "florida gators": ["florida", "gators", "uf", "univ of florida", "university of florida"],
     "florida state seminoles": ["florida state", "florida st", "seminoles", "noles", "fsu"],
-    "central florida knights": ["ucf", "central florida", "knights", "ucf knights", "cfl"],
+    "ucf knights": ["ucf", "central florida", "knights", "ucf knights", "cfl"],
     "miami hurricanes": ["miami", "hurricanes", "canes", "um", "miami hurricanes", "miami fl", "miami (fl)"],
     "south florida bulls": ["usf", "south florida", "bulls"],
     "florida atlantic owls": ["fau", "florida atlantic", "owls"],
@@ -60,7 +60,7 @@ _TEAM_ALIASES_DB: Dict[str, List[str]] = {
     "alabama crimson tide": ["alabama", "crimson tide", "bama", "bama tide"],
     "georgia bulldogs": ["georgia", "bulldogs", "uga", "dawgs"],
     "texas longhorns": ["texas", "longhorns", "horns", "ut"],
-    "texas a&m aggies": ["texas a&m", "texas am", "aggies", "tamu", "a&m"],
+    "texas a and m aggies": ["texas a&m", "texas am", "aggies", "tamu", "a&m"],
     "lsu tigers": ["lsu", "louisiana state", "tigers", "bayou bengals"],
     "tennessee volunteers": ["tennessee", "volunteers", "vols", "ut"],
     "oklahoma sooners": ["oklahoma", "sooners", "ou"],
@@ -172,7 +172,7 @@ _TEAM_ALIASES_DB: Dict[str, List[str]] = {
     "toronto blue jays": ["toronto blue jays", "blue jays", "jays", "tor"],
     "detroit tigers": ["detroit tigers", "tigers", "det"],
     "minnesota twins": ["minnesota twins", "twins", "min"],
-    "athletics": ["athletics", "a's", "as", "oakland athletics"],
+    "athletics": ["athletics", "a's", "as", "oakland athletics", "oakland", "sacramento", "sacramento athletics"],
 
     # NBA & NHL Teams (Key Florida / Major)
     "miami heat": ["miami heat", "heat", "mia"],
@@ -402,12 +402,121 @@ _TEAM_IDENTITY_FAMILIES = (
 )
 
 
+# --- D4: same-market identity-conflict groups, derived from the catalog ----
+# Some franchises share a city/market but are otherwise unrelated teams (Los
+# Angeles Rams vs. Los Angeles Lakers, New York Mets vs. New York Yankees,
+# Chicago Bears vs. Chicago Cubs, ...). A title naming one specific team from
+# a market must never satisfy a search for a different specific team from
+# that same market. Rather than hand-listing every such cluster (only
+# Michigan State, Tampa Bay, and the NY Jets were covered above), the groups
+# below are computed once from STATIC_TEAM_RECORDS, so a newly catalogued
+# team is automatically covered.
+#
+# Naming only the bare market/city, with no team-distinguishing word (e.g.
+# "Los Angeles vs Boston"), never triggers or blocks a match through this
+# mechanism -- that keeps today's behavior for a city-only title unchanged,
+# since the bare market name is deliberately excluded from every group below.
+
+_MULTI_WORD_MARKETS = (
+    "los angeles", "new york", "new orleans", "new england", "new jersey",
+    "kansas city", "tampa bay", "san francisco", "san diego", "san antonio",
+    "san jose", "st louis", "oklahoma city", "green bay", "las vegas",
+    "golden state",
+)
+
+# A handful of catalog canonical names open with a market word ESPN spells
+# differently from a sibling franchise in the same metro area.
+_MARKET_KEY_SYNONYMS = {
+    "vegas": "las vegas",     # Vegas Golden Knights <-> Las Vegas Raiders
+    "brooklyn": "new york",   # Brooklyn Nets <-> the rest of the NY teams
+    "la": "los angeles",      # "LA Clippers"/"LA Rams" style short aliases
+    "ny": "new york",
+}
+
+_MIN_IDENTITY_VARIANT_LEN = 3
+
+
+def _market_key(name: str) -> Optional[str]:
+    """Return the shared city/market prefix implied by a team-name variant."""
+    words = name.split()
+    if len(words) < 2:
+        return None
+    two_word = " ".join(words[:2])
+    if two_word in _MULTI_WORD_MARKETS:
+        return two_word
+    return _MARKET_KEY_SYNONYMS.get(words[0], words[0])
+
+
+def _derive_market_conflict_groups() -> Tuple[Tuple[Set[str], Tuple[Set[str], ...]], ...]:
+    """Group catalog records that share a city/market.
+
+    For every market with two or more distinct catalog teams, build one
+    family entry per team: its own distinguishing name variants versus every
+    other same-market team's variants. The bare market/city name itself is
+    excluded from both sides, so naming only the city never matches or
+    blocks anything here. A generic abbreviation shared by more than one
+    team in the same market (e.g. Buffalo Bills and Buffalo Sabres both use
+    "buf") cannot distinguish either one, so it is dropped from every team's
+    set too -- otherwise it would falsely flag its own team as a conflict.
+    """
+    market_candidates: Dict[str, Dict[str, Set[str]]] = {}
+
+    for record in STATIC_TEAM_RECORDS:
+        all_values = (record.canonical, *record.aliases)
+        keys = {key for key in (_market_key(value) for value in all_values) if key}
+        if not keys:
+            continue
+
+        candidates = {
+            value for value in all_values
+            if len(value) >= _MIN_IDENTITY_VARIANT_LEN and value not in keys
+        }
+        if not candidates:
+            continue
+
+        for key in keys:
+            bucket = market_candidates.setdefault(key, {})
+            bucket.setdefault(record.canonical, set()).update(candidates)
+
+    families: List[Tuple[Set[str], Tuple[Set[str], ...]]] = []
+    for members in market_candidates.values():
+        if len(members) < 2:
+            continue
+
+        value_owners: Dict[str, int] = {}
+        for variants in members.values():
+            for value in variants:
+                value_owners[value] = value_owners.get(value, 0) + 1
+        distinguishing = {
+            canonical: {value for value in variants if value_owners[value] == 1}
+            for canonical, variants in members.items()
+        }
+
+        canonicals = [canonical for canonical, variants in distinguishing.items() if variants]
+        if len(canonicals) < 2:
+            continue
+        for canonical in canonicals:
+            requested = set(distinguishing[canonical])
+            competing = tuple(
+                set(distinguishing[other])
+                for other in canonicals
+                if other != canonical
+            )
+            families.append((requested, competing))
+    return tuple(families)
+
+
+_MARKET_IDENTITY_FAMILIES = _derive_market_conflict_groups()
+
+_ALL_IDENTITY_FAMILIES = _TEAM_IDENTITY_FAMILIES + _MARKET_IDENTITY_FAMILIES
+
+
 def has_team_identity_conflict(search_terms: List[str], target: str) -> bool:
-    """Reject a different team in a known same-name identity family."""
+    """Reject a different team in a known or derived same-market identity family."""
     target_low = target.lower()
     normalized_terms = {term.lower().strip() for term in search_terms}
 
-    for requested_variants, competing_groups in _TEAM_IDENTITY_FAMILIES:
+    for requested_variants, competing_groups in _ALL_IDENTITY_FAMILIES:
         requested = requested_variants & normalized_terms
         if not requested:
             continue
