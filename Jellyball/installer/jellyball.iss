@@ -325,13 +325,19 @@ procedure ConfigureDataDirAcls;
 var
   DataDir, EnvPath: String;
 begin
+  { Must run AFTER the service exists: the virtual account NT SERVICE\Jellyball
+    is only resolvable once the service is created, and icacls rejects the
+    whole command otherwise (which previously left the .env - with the
+    dashboard password - readable by every local user). The data folder
+    (settings, database, logs) is limited to Administrators, SYSTEM and the
+    service; the .env is read-only for the service. }
   DataDir := ExpandConstant('{commonappdata}\Jellyball');
   ForceDirectories(DataDir);
-  RunHidden('icacls.exe', '"' + DataDir + '" /grant "NT SERVICE\Jellyball:(OI)(CI)M" /T');
+  RunHidden('icacls.exe', '"' + DataDir + '" /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "NT SERVICE\Jellyball:(OI)(CI)M" /T /C /Q');
 
   EnvPath := GetEnvFilePath();
   if FileExists(EnvPath) then
-    RunHidden('icacls.exe', '"' + EnvPath + '" /inheritance:r /grant:r "NT SERVICE\Jellyball:R" "*S-1-5-32-544:F" "*S-1-5-18:F"');
+    RunHidden('icacls.exe', '"' + EnvPath + '" /inheritance:r /grant:r "NT SERVICE\Jellyball:R" "*S-1-5-32-544:F" "*S-1-5-18:F" /C /Q');
 end;
 
 procedure RegisterService;
@@ -376,8 +382,8 @@ begin
   if CurStep = ssPostInstall then
   begin
     WriteEnvFileIfAbsent;
-    ConfigureDataDirAcls;
     RegisterService;
+    ConfigureDataDirAcls;
     ConfigureFirewall;
     RunHidden('sc.exe', 'start ' + ServiceName);
     CreateDashboardShortcutFile;
