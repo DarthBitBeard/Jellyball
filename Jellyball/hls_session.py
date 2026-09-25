@@ -390,6 +390,7 @@ class ChannelSession:
         self._stopped = False
         self._last_report: Dict[Tuple, float] = {}
         self._keys: "OrderedDict[str, bytes]" = OrderedDict()
+        self._switch_gap: Optional[float] = None
 
     # -- public API ---------------------------------------------------------
 
@@ -570,7 +571,7 @@ class ChannelSession:
         self.target_duration = max(self.target_duration, int(math.ceil(declared - 1e-6)))
 
         if self.last_useq is None:
-            new = segments[-self.cfg.live_edge_segments:]
+            new = segments[-self._live_edge_count(segments):]
         else:
             newest = segments[-1].useq
             if newest < self.last_useq:
@@ -598,6 +599,21 @@ class ChannelSession:
             return
         await self._ingest(new)
 
+    def _live_edge_count(self, segments: List[UpstreamSegment]) -> int:
+        gap = self._switch_gap
+        self._switch_gap = None
+        limit = max(1, min(self.cfg.live_edge_segments, len(segments)))
+        if gap is None:
+            return limit  # cold start: a few segments of buffer for the player
+        covered = 0.0
+        count = 0
+        for segment in reversed(segments[-limit:]):
+            count += 1
+            covered += segment.duration
+            if covered >= gap:
+                break
+        return count
+
     def _switch_source(self, spec: SourceSpec) -> None:
         if self.source is not None:
             self.stats["source_switches"] += 1
@@ -605,6 +621,12 @@ class ChannelSession:
                 "Channel session switching source channel=%s from=%s to=%s",
                 self.channel_id, self.source.label or self.source.key[0], spec.label or spec.key[0],
             )
+        # How much real time passed since the last segment we published: on
+        # a mid-playback switch only that much of the new source is appended
+        # (see _live_edge_count). Appending a fixed 3 live-edge segments made
+        # every failover replay a few seconds, so viewers drifted ~3s further
+        # behind live per failover (seen in the soak test).
+        self._switch_gap = (time.monotonic() - self.last_new_segment_at) if self.window else None
         self.source = spec
         self.media_url = None
         self.last_useq = None
