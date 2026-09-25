@@ -333,7 +333,18 @@ begin
     service; the .env is read-only for the service. }
   DataDir := ExpandConstant('{commonappdata}\Jellyball');
   ForceDirectories(DataDir);
-  RunHidden('icacls.exe', '"' + DataDir + '" /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "NT SERVICE\Jellyball:(OI)(CI)M" /T /C /Q');
+  { Protect the folder itself with inheritable grants, then reset everything
+    inside it to inherit from the folder. (Applying /inheritance:r with the
+    folder-style grants recursively via /T stripped existing files' inherited
+    ACEs without granting anything, locking the service out of its own
+    database and log.) }
+  RunHidden('icacls.exe', '"' + DataDir + '" /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "NT SERVICE\Jellyball:(OI)(CI)M" /C /Q');
+  { Take ownership first (takeown enables the take-ownership privilege; icacls
+    /setowner does not): files the
+    service created are owned by it, and a broken earlier install could leave
+    them with no ACE an administrator can use to reset them. }
+  RunHidden('takeown.exe', '/F "' + DataDir + '" /A /R /D Y');
+  RunHidden('icacls.exe', '"' + DataDir + '\*" /reset /T /C /Q');
 
   EnvPath := GetEnvFilePath();
   if FileExists(EnvPath) then
