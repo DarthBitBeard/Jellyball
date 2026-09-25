@@ -99,7 +99,7 @@ MLB_TEAMS: Tuple[TeamSlug, ...] = tuple(
         ("minnesota twins", "min", ("minnesota", "twins", "min")),
         ("new york mets", "nym", ("new york mets", "mets", "nym")),
         ("new york yankees", "nyy", ("new york yankees", "yankees", "nyy")),
-        ("oakland athletics", "oak", ("oakland", "athletics", "as", "oak")),
+        ("athletics", "oak", ("oakland athletics", "oakland", "sacramento", "sacramento athletics", "a's", "as", "oak")),
         ("philadelphia phillies", "phi", ("philadelphia", "phillies", "phi")),
         ("pittsburgh pirates", "pit", ("pittsburgh", "pirates", "pit")),
         ("san diego padres", "sd", ("san diego", "padres", "sd")),
