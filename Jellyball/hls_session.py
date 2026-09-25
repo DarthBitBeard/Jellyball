@@ -408,6 +408,10 @@ class ChannelSession:
         self._keys: "OrderedDict[str, bytes]" = OrderedDict()
         self._switch_gap: Optional[float] = None
         self._reset_seen_at: Optional[int] = None  # upstream sequence reset awaiting confirmation
+        # Observability: recent segment download times and sizes.
+        self._download_seconds: Deque[float] = deque(maxlen=60)
+        self._recent_segments: Deque[Tuple[int, float]] = deque(maxlen=30)  # (bytes, duration)
+        self.started_at: Optional[float] = None
         self._resolved_once = False
         self._last_poll_error_log: Dict[str, float] = {}
 
@@ -428,6 +432,7 @@ class ChannelSession:
             self._stopped = False
             if not self.window:
                 self.state = "starting"
+            self.started_at = time.monotonic()
             self._task = asyncio.create_task(self._run(), name=f"hls session {self.channel_id}")
 
     def poke(self) -> None:
@@ -485,8 +490,23 @@ class ChannelSession:
                     return segment
         return self.grace.get(seq)
 
+    def metrics(self) -> dict:
+        """Recent throughput/latency numbers for the dashboard and /api/sessions."""
+        latencies = sorted(self._download_seconds)
+        total_bytes = sum(b for b, _ in self._recent_segments)
+        total_seconds = sum(d for _, d in self._recent_segments)
+        p95 = latencies[min(len(latencies) - 1, int(math.ceil(0.95 * len(latencies))) - 1)] if latencies else None
+        return {
+            "bitrate_kbps": round(total_bytes * 8 / total_seconds / 1000) if total_seconds > 0 else None,
+            "segment_ms_avg": round(1000 * sum(latencies) / len(latencies)) if latencies else None,
+            "segment_ms_p95": round(1000 * p95) if p95 is not None else None,
+            "seconds_since_segment": round(time.monotonic() - self.last_new_segment_at, 1) if self.window else None,
+            "uptime_seconds": round(time.monotonic() - self.started_at) if self.started_at and self.is_running else 0,
+        }
+
     def snapshot(self) -> dict:
         return {
+            **self.metrics(),
             "state": self.state,
             "watched": self.is_watched(),
             "flowing": self.is_flowing(),
@@ -740,10 +760,14 @@ class ChannelSession:
             async with semaphore:
                 # The deadline covers both download attempts, and starts once a
                 # download slot is free (queueing behind others isn't its fault).
+                started = time.monotonic()
                 try:
-                    return await asyncio.wait_for(self._download(segment), self._segment_deadline(segment))
+                    data = await asyncio.wait_for(self._download(segment), self._segment_deadline(segment))
                 except asyncio.TimeoutError:
                     return None
+                if data is not None and not (self.source and self.source.local):
+                    self._download_seconds.append(time.monotonic() - started)
+                return data
 
         downloads = [asyncio.create_task(bounded(segment)) for segment in new]
         try:
@@ -821,6 +845,7 @@ class ChannelSession:
         self.last_new_segment_at = self._stale_timer_start = time.monotonic()
         self.stats["segments"] += 1
         self.stats["bytes"] += len(segment.data)
+        self._recent_segments.append((len(segment.data), segment.duration))
         self._raise_target_duration(segment.duration)
         self.window.append(segment)
         self._window_bytes += len(segment.data)
