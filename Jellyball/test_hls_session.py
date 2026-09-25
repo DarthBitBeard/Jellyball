@@ -471,7 +471,30 @@ class ChannelSessionTests(unittest.IsolatedAsyncioTestCase):
         switched_segment = next(s for s in published if s.seq == seq_before_switch)
         self.assertTrue(switched_segment.discontinuity)
         # Sequence numbering is proxy-owned and never resets on a source switch.
-        self.assertEqual(session.next_seq, seq_before_switch + 3)
+        # The switch happened right after the last publish, so only one
+        # segment of the new source is appended (no replayed overlap).
+        self.assertEqual(session.next_seq, seq_before_switch + 1)
+
+    async def test_switch_appends_segments_covering_the_outage_gap(self):
+        base = "http://upstream"
+        self.harness.source = SourceSpec(key=("primary",), url=f"{base}/media.m3u8", label="primary")
+        self.harness.set_playlist(f"{base}/media.m3u8", playlist_text(base, list(range(3))))
+        for u in range(3):
+            self.harness.set_response(f"{base}/seg{u}.ts", make_ts_segment())
+        session = self.make_session()
+        await session._poll_once()
+        seq_before_switch = session.next_seq
+        # The old source went quiet ~7s before failover: with ~6s segments,
+        # two new-source segments are needed to cover that gap.
+        session.last_new_segment_at -= 7.0
+        self.harness.source = SourceSpec(key=("backup",), url=f"{base}/media2.m3u8", label="backup")
+        self.harness.set_playlist(f"{base}/media2.m3u8", playlist_text("http://backup", list(range(3))))
+        for u in range(3):
+            self.harness.set_response(f"http://backup/seg{u}.ts", make_ts_segment())
+        await session._poll_once()
+        durations = [s.duration for s in list(session.window)[-3:]]
+        expected = 1 if durations[-1] >= 7.0 else (2 if sum(durations[-2:]) >= 7.0 else 3)
+        self.assertEqual(session.next_seq - seq_before_switch, expected)
 
     async def test_same_key_url_only_change_no_discontinuity_continues_by_upstream_seq(self):
         base = "http://upstream"
