@@ -255,6 +255,59 @@ class ImportConfigTests(TempDbMixin, unittest.TestCase):
         self.assertIsNone(main._parse_disable_date("2026-02-30"))
 
 
+class DashboardRenderTests(TempDbMixin, unittest.TestCase):
+    def test_dashboard_renders_and_escapes_hostile_names(self):
+        main.stream_state["evil"] = {
+            "name": '<script>alert(1)</script>', "query": "q", "candidates": [
+                {"provider": "<img src=x onerror=alert(2)>", "url": "https://cdn.example/a.m3u8",
+                 "match_title": '"><svg onload=alert(3)>'},
+            ],
+            "active_index": 0, "is_healthy": True, "category": "custom", "logo_url": "",
+            "start_time": "", "stop_time": "", **main._scrape_lifecycle_defaults(),
+        }
+
+        async def exercise():
+            async with _client() as client:
+                return await client.get("/?tab=channels")
+
+        with patch.object(main, "DASHBOARD_PASSWORD", ""),                 patch.object(main, "get_catalog_entries", return_value=[]):
+            response = asyncio.run(exercise())
+        self.assertEqual(response.status_code, 200)
+        body = response.text
+        self.assertNotIn("<script>alert(1)</script>", body)
+        self.assertNotIn("<img src=x onerror=alert(2)>", body)
+        self.assertNotIn('"><svg onload=alert(3)>', body)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", body)
+        self.assertIn("Advanced Settings", body)
+
+    def test_advanced_settings_apply_live_and_reset(self):
+        async def post(data):
+            async with _client() as client:
+                return await client.post("/settings/advanced", data=data)
+
+        original = main.IDLE_HEALTH_INTERVAL
+        try:
+            with patch.object(main, "DASHBOARD_PASSWORD", ""):
+                response = asyncio.run(post({"IDLE_HEALTH_INTERVAL": "45", "SESSION_STALE_SECONDS": "9999"}))
+                self.assertEqual(response.status_code, 303)
+                self.assertEqual(main.IDLE_HEALTH_INTERVAL, 45.0)
+                # Clamped to the tunable's maximum and applied to live sessions.
+                self.assertEqual(main.SESSIONS.config.stale_min_seconds, 300.0)
+                self.assertEqual(main.get_setting("tunable:IDLE_HEALTH_INTERVAL"), "45.0")
+
+                main.IDLE_HEALTH_INTERVAL = 1.0
+                main._load_tunable_overrides()
+                self.assertEqual(main.IDLE_HEALTH_INTERVAL, 45.0)
+
+                asyncio.run(post({"IDLE_HEALTH_INTERVAL": "", "SESSION_STALE_SECONDS": ""}))
+                self.assertEqual(main.IDLE_HEALTH_INTERVAL, main._TUNABLE_DEFAULTS["IDLE_HEALTH_INTERVAL"])
+                self.assertEqual(main.SESSIONS.config.stale_min_seconds,
+                                 main._TUNABLE_DEFAULTS["SESSION_STALE_SECONDS"])
+        finally:
+            main.IDLE_HEALTH_INTERVAL = original
+            main.SESSIONS.config.stale_min_seconds = main._TUNABLE_DEFAULTS["SESSION_STALE_SECONDS"]
+
+
 class RelaySigningTests(unittest.TestCase):
     def test_rewritten_urls_carry_valid_signatures(self):
         import urllib.parse

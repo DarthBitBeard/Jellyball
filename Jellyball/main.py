@@ -161,6 +161,7 @@ import re
 import urllib.parse
 import sqlite3
 import json
+import math
 import hashlib
 import hmac
 import ipaddress
@@ -170,6 +171,7 @@ import random
 import threading
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from xml.sax.saxutils import escape as xml_escape
 from dotenv import load_dotenv
@@ -344,12 +346,6 @@ def _dashboard_password_matches(candidate: str, configured: str) -> bool:
         except ValueError:
             return False
     return secrets.compare_digest(candidate.encode("utf-8"), configured.encode("utf-8"))
-
-def is_fuzzy_match(query: str, text: str, threshold: int = 65) -> tuple[bool, int]:
-    """Compatibility wrapper that delegates to the robust sports_matcher engine."""
-    terms = get_team_search_terms(query, query)
-    matched, score, _ = match_team(terms, text, threshold=threshold)
-    return matched, score
 
 DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
@@ -954,15 +950,6 @@ async def log_metric_event_async(*args, **kwargs) -> None:
     await _METRIC_WRITER.enqueue(("stream_event", args, kwargs))
 
 
-def _record_playback_event_sync(team_id: str) -> None:
-    try:
-        with _db_session() as conn:
-            conn.execute("INSERT INTO playback_events (team_id, success) VALUES (?, 1)", (team_id,))
-            conn.commit()
-    except Exception as exc:
-        _log_failure("record playback event", exc)
-
-
 class MetricBatchWriter:
     def __init__(self, max_queue: int = 1000, batch_size: int = 50, flush_seconds: float = 1.0):
         self.queue = asyncio.Queue(maxsize=max_queue)
@@ -1056,22 +1043,6 @@ def _maybe_record_playback_event(team_id: str) -> None:
         _METRIC_WRITER.enqueue(("playback_event", (team_id,), {})),
         f"record playback event team={team_id}",
     )
-
-def get_stability_metrics() -> dict:
-    try:
-        with _db_session() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT provider, COUNT(*) FROM stream_events WHERE event_type = 'failover' GROUP BY provider")
-            failovers = dict(cursor.fetchall())
-            cursor.execute("SELECT event_type, COUNT(*) FROM stream_events GROUP BY event_type")
-            summary = dict(cursor.fetchall())
-            cursor.execute("SELECT timestamp, team_id, provider, event_type, details FROM stream_events ORDER BY id DESC LIMIT 8")
-            events = cursor.fetchall()
-            return {"failovers_by_provider": failovers, "events_summary": summary, "recent_events": events}
-    except Exception as exc:
-        _log_failure("read stability metrics", exc)
-        return {"failovers_by_provider": {}, "events_summary": {}, "recent_events": []}
-
 
 def _load_dashboard_metrics() -> dict:
     """Single-connection dashboard() helper: stability metrics + favorites + per-provider
@@ -3859,7 +3830,6 @@ def _install_loop_exception_filter() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global SHARED_HTTP_CLIENT, MEDIA_HTTP_CLIENT, PLAYWRIGHT_CLIENT, SHARED_BROWSER, _PREFETCH_SEMAPHORE
-    global STREAM_STARTUP_BUFFER_SECONDS, PREFETCH_CHUNK_COUNT, STREAM_CHUNK_CACHE_TTL
 
     _install_loop_exception_filter()
     init_db()
@@ -3867,20 +3837,8 @@ async def lifespan(app: FastAPI):
     shutil.rmtree(MULTIVIEW_OUTPUT_ROOT, ignore_errors=True)
     MULTIVIEW_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(PLACEHOLDER_OUTPUT_DIR, ignore_errors=True)
-    # The Playback Settings tab persists these three to app_settings, but they were
-    # previously only ever read from the env var at import time — saving the sliders
-    # updated the DB and nothing else. Restore any saved values now so they actually
-    # take effect (update_playback_settings() below updates these same globals live).
-    STREAM_STARTUP_BUFFER_SECONDS = bounded_float(
-        get_setting("startup_buffer_seconds", str(STREAM_STARTUP_BUFFER_SECONDS)),
-        STREAM_STARTUP_BUFFER_SECONDS, 0.0, 120.0,
-    )
-    PREFETCH_CHUNK_COUNT = bounded_int(
-        get_setting("prefetch_chunk_count", str(PREFETCH_CHUNK_COUNT)), PREFETCH_CHUNK_COUNT, 0, 32
-    )
-    STREAM_CHUNK_CACHE_TTL = bounded_float(
-        get_setting("stream_chunk_cache_ttl", str(STREAM_CHUNK_CACHE_TTL)), STREAM_CHUNK_CACHE_TTL, 0.001, 86400.0
-    )
+    # Advanced settings saved from the dashboard override the env defaults.
+    _load_tunable_overrides()
     stream_state.clear()
     _TEAM_SCRAPE_TASKS.clear()
     _SCRAPE_IN_FLIGHT.clear()
@@ -4520,9 +4478,11 @@ def _chunk_media_type(url: str) -> str:
 
 
 def _startup_media_urls(manifest_text: str, target_url: str) -> List[str]:
+    """The newest segments: a live player starts ~3 from the end, so warming
+    the oldest ones (as this used to) fetched segments nobody asked for."""
     urls = extract_manifest_media_urls(manifest_text, target_url)
     limit = PREFETCH_CHUNK_COUNT if PREFETCH_CHUNK_COUNT > 0 else 5
-    return urls[:limit]
+    return urls[-limit:]
 
 
 async def _warm_startup_buffer(
@@ -6073,8 +6033,8 @@ async def proxy_substream(request: Request, url: str, ref: str = "", org: str = 
     headers = _upstream_media_headers(decoded_ref, decoded_origin)
     proxy_origin = _public_base_url(request)
     
-    owns_client = SHARED_HTTP_CLIENT is None
-    client = SHARED_HTTP_CLIENT or httpx.AsyncClient(follow_redirects=False, timeout=12.0, http2=True)
+    owns_client = _media_client() is None
+    client = _media_client() or httpx.AsyncClient(follow_redirects=False, timeout=12.0, http2=True)
     try:
         result = await _fetch_upstream_body(client, decoded_url, headers, MAX_MANIFEST_BYTES)
         if result is None:
@@ -6117,8 +6077,8 @@ async def proxy_resource(request: Request, url: str, ref: str = "", org: str = "
     if decoded_ref and not _validate_upstream_url(decoded_ref):
         return Response(status_code=400, content="Invalid upstream referer URL")
 
-    owns_client = SHARED_HTTP_CLIENT is None
-    client = SHARED_HTTP_CLIENT or httpx.AsyncClient(
+    owns_client = _media_client() is None
+    client = _media_client() or httpx.AsyncClient(
         follow_redirects=False,
         timeout=STREAM_REQUEST_TIMEOUT,
         http2=True,
@@ -6168,7 +6128,7 @@ async def prefetch_next_chunks(current_chunk_url: str, referer: str = "", origin
     if PREFETCH_CHUNK_COUNT <= 0:
         return
 
-    client = SHARED_HTTP_CLIENT
+    client = _media_client()
     if client is None:
         return
 
@@ -6243,6 +6203,23 @@ class _UpstreamBodyInterrupted(Exception):
     to ffmpeg, while an aborted one makes it retry."""
 
 
+class _ClosingStreamingResponse(StreamingResponse):
+    """StreamingResponse that always runs `on_close`, even when the client
+    disconnects before the body generator starts (its own `finally` then never
+    runs, which leaked the upstream stream and its pool slot)."""
+
+    def __init__(self, *args, on_close=None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_close = on_close
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if self._on_close is not None:
+                await self._on_close()
+
+
 @app.get("/chunk.mp4")
 @app.get("/chunk.aac")
 @app.get("/chunk.vtt")
@@ -6309,24 +6286,34 @@ async def proxy_chunk(request: Request, url: str, ref: str = "", org: str = "", 
     stream_ctx = None
     response = None
     status_code = 502
-    for attempt in range(3):
-        try:
-            stream_ctx, response = await _open_upstream_media(client, decoded_url, headers)
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            LOGGER.debug("Chunk open attempt failed attempt=%d error=%s", attempt + 1, type(exc).__name__)
-            stream_ctx, response = None, None
-        if response is None:
-            status_code = 502
-        elif response.status_code in (200, 206):
-            break
-        else:
-            status_code = response.status_code
-            await stream_ctx.__aexit__(None, None, None)
-            stream_ctx, response = None, None
-            if status_code not in (429, 500, 502, 503, 504):
+    try:
+        for attempt in range(3):
+            try:
+                stream_ctx, response = await _open_upstream_media(client, decoded_url, headers)
+            except httpx.HTTPError as exc:
+                LOGGER.debug("Chunk open attempt failed attempt=%d error=%s", attempt + 1, type(exc).__name__)
+                stream_ctx, response = None, None
+            if response is None:
+                status_code = 502
+            elif response.status_code in (200, 206):
                 break
-        if attempt < 2:
-            await asyncio.sleep(0.25 * (attempt + 1))
+            else:
+                status_code = response.status_code
+                await stream_ctx.__aexit__(None, None, None)
+                stream_ctx, response = None, None
+                if status_code not in (429, 500, 502, 503, 504):
+                    break
+            if attempt < 2:
+                await asyncio.sleep(0.25 * (attempt + 1))
+    except BaseException:
+        # Anything else (client gone mid-retry, an unexpected error): never
+        # leave the single-flight key or an open upstream stream behind.
+        if stream_ctx is not None:
+            await stream_ctx.__aexit__(None, None, None)
+        release_singleflight()
+        if owns_client:
+            await client.aclose()
+        raise
 
     if response is None:
         release_singleflight()
@@ -6339,6 +6326,19 @@ async def proxy_chunk(request: Request, url: str, ref: str = "", org: str = "", 
         if response.headers.get(key):
             out_headers[key] = response.headers[key]
     opened_ctx, opened_response = stream_ctx, response
+    closed = False
+
+    async def close_upstream() -> None:
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        try:
+            await opened_ctx.__aexit__(None, None, None)
+        finally:
+            release_singleflight()
+            if owns_client:
+                await client.aclose()
 
     async def relay():
         chunk_buffer = bytearray()
@@ -6358,12 +6358,12 @@ async def proxy_chunk(request: Request, url: str, ref: str = "", org: str = "", 
             _log_failure("relay upstream chunk", exc)
             raise _UpstreamBodyInterrupted() from exc
         finally:
-            await opened_ctx.__aexit__(None, None, None)
-            release_singleflight()
-            if owns_client:
-                await client.aclose()
+            await close_upstream()
 
-    return StreamingResponse(relay(), status_code=opened_response.status_code, media_type=media_type, headers=out_headers)
+    return _ClosingStreamingResponse(
+        relay(), status_code=opened_response.status_code, media_type=media_type, headers=out_headers,
+        on_close=close_upstream,
+    )
 
 
 @app.api_route("/playlist.m3u", methods=["GET", "HEAD"], response_class=PlainTextResponse)
@@ -6967,7 +6967,6 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
     provider_totals = dashboard_metrics["provider_totals"]
     notif_cfg = await get_notification_config()
     jellyfin_cfg = await get_jellyfin_config()
-    playback_cfg = await get_playback_settings()
     provider_rotation_enabled = await get_setting_async("provider_rotation_mode", "0") == "1"
     catalog_entries = await get_catalog_entries()
     active_catalog_keys = {
@@ -7413,7 +7412,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                 <button type="button" class="tab-btn {'active' if tab == 'channels' else ''}" id="btn-channels" onclick="switchTab('channels')">📺 Channels & Streams</button>
                 <button type="button" class="tab-btn {'active' if tab == 'metrics' else ''}" id="btn-metrics" onclick="switchTab('metrics')">📊 Stability Metrics</button>
                 <button type="button" class="tab-btn {'active' if tab == 'performance' else ''}" id="btn-performance" onclick="switchTab('performance')">⚡ Performance</button>
-                <button type="button" class="tab-btn {'active' if tab == 'playback' else ''}" id="btn-playback" onclick="switchTab('playback')">⚙️ Playback Settings</button>
+                <button type="button" class="tab-btn {'active' if tab == 'playback' else ''}" id="btn-playback" onclick="switchTab('playback')">⚙️ Settings</button>
                 <button type="button" class="tab-btn {'active' if tab == 'alerts' else ''}" id="btn-alerts" onclick="switchTab('alerts')">🔔 Alerts & Integrations</button>
                 <button type="button" class="tab-btn {'active' if tab == 'logs' else ''}" id="btn-logs" onclick="switchTab('logs')">📜 Logs</button>
             </div>
@@ -7526,24 +7525,11 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
             </div>
             <div id="tab-playback" class="tab-pane {'active' if tab == 'playback' else ''}">
                 <div class="card">
-                    <h3>Playback & Stream Settings</h3>
-                    <form action="/settings/playback" method="post" style="display: flex; flex-direction: column; gap: 1.5rem;">
-                        <div>
-                            <label style="font-size: 0.9rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.5rem;">Startup Buffer Duration: <span id="startup-value">{playback_cfg['startup_buffer_seconds']}</span>s</label>
-                            <input type="range" name="startup_buffer" min="5" max="30" value="{playback_cfg['startup_buffer_seconds']}" style="width: 100%; cursor: pointer;" oninput="document.getElementById('startup-value').textContent = this.value">
-                            <p class="hint-text">Higher values reduce buffering but increase startup delay. Range: 5-30 seconds.</p>
-                        </div>
-                        <div>
-                            <label style="font-size: 0.9rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.5rem;">Prefetch Chunk Count: <span id="prefetch-value">{playback_cfg['prefetch_chunk_count']}</span></label>
-                            <input type="range" name="prefetch_count" min="1" max="10" value="{playback_cfg['prefetch_chunk_count']}" style="width: 100%; cursor: pointer;" oninput="document.getElementById('prefetch-value').textContent = this.value">
-                            <p class="hint-text">Number of upcoming chunks to download ahead. Higher values reduce buffering at cost of bandwidth. Range: 1-10.</p>
-                        </div>
-                        <div>
-                            <label style="font-size: 0.9rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.5rem;">Chunk Cache TTL: <span id="cache-value">{playback_cfg['stream_chunk_cache_ttl']}</span>s</label>
-                            <input type="range" name="cache_ttl" min="5" max="60" value="{playback_cfg['stream_chunk_cache_ttl']}" style="width: 100%; cursor: pointer;" oninput="document.getElementById('cache-value').textContent = this.value">
-                            <p class="hint-text">How long cached chunks are kept in memory. Range: 5-60 seconds.</p>
-                        </div>
-                        <button type="submit" style="width: auto; align-self: flex-start;">💾 Save Playback Settings</button>
+                    <h3>Advanced Settings</h3>
+                    <p class="hint-text">Leave a field blank to use its default (the .env value, or the built-in default). Changes apply immediately.</p>
+                    <form action="/settings/advanced" method="post" style="display: flex; flex-direction: column; gap: 1.25rem;">
+                        {_advanced_settings_html()}
+                        <button type="submit" style="width: auto; align-self: flex-start;">💾 Save Advanced Settings</button>
                     </form>
                 </div>
                 <div class="card">
@@ -7927,7 +7913,8 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                     checkbox.addEventListener('change', updateBulkTeamIds);
                 }});
 
-                statusMessages['playback_saved'] = '✅ Playback settings saved';
+                statusMessages['advanced_saved'] = '✅ Advanced settings saved';
+                statusMessages['advanced_invalid'] = '❌ A value was not a number; nothing after it was saved';
 
                 if (activeTab === 'performance') {{
                     async function refreshPerformanceTab(withTopTeams) {{
@@ -8553,43 +8540,189 @@ async def import_config(file: Request, auth: bool = Depends(verify_dashboard_aut
         request_jellyfin_guide_refresh_if_changed()
     return JSONResponse({"status": "imported", "count": imported, "skipped": skipped})
 
-@app.post("/settings/playback")
-async def update_playback_settings(
-    startup_buffer: int = Form(15),
-    prefetch_count: int = Form(5),
-    cache_ttl: int = Form(15),
-    auth: bool = Depends(verify_dashboard_auth)
-):
-    global STREAM_STARTUP_BUFFER_SECONDS, PREFETCH_CHUNK_COUNT, STREAM_CHUNK_CACHE_TTL
+@dataclass(frozen=True)
+class Tunable:
+    """A setting the dashboard can change at runtime. The env var (or built-in
+    default) is the default; a value saved in app_settings overrides it and is
+    applied live - no restart."""
 
-    startup_buffer = max(5, min(30, startup_buffer))
-    prefetch_count = max(1, min(10, prefetch_count))
-    cache_ttl = max(5, min(60, cache_ttl))
+    name: str  # env var name; also the form field
+    label: str
+    group: str
+    kind: type  # int or float
+    minimum: float
+    maximum: float
+    target: str  # module global, or "session.<SessionConfig field>"
+    help: str = ""
+    db_key: str = ""  # keys saved by 1.x's Playback Settings sliders
 
-    await set_setting_async("startup_buffer_seconds", str(startup_buffer))
-    await set_setting_async("prefetch_chunk_count", str(prefetch_count))
-    await set_setting_async("stream_chunk_cache_ttl", str(cache_ttl))
+    @property
+    def key(self) -> str:
+        return self.db_key or f"tunable:{self.name}"
 
-    # Take effect immediately instead of only on the next restart — these three
-    # module-level globals are what the proxy/prefetch code actually reads on the
-    # hot path, so saving the sliders previously changed the DB and nothing else.
-    STREAM_STARTUP_BUFFER_SECONDS = float(startup_buffer)
-    PREFETCH_CHUNK_COUNT = prefetch_count
-    STREAM_CHUNK_CACHE_TTL = float(cache_ttl)
 
-    return RedirectResponse(url="/?tab=channels&status=playback_saved", status_code=303)
+TUNABLES: Tuple[Tunable, ...] = (
+    Tunable("IDLE_HEALTH_INTERVAL", "Unwatched channel probe interval (s)", "Health & failover", float, 5, 600,
+            "IDLE_HEALTH_INTERVAL", "How often the active source of a channel nobody is watching is checked."),
+    Tunable("HEALTH_FAILURE_THRESHOLD", "Failed probes before failover", "Health & failover", int, 1, 10,
+            "HEALTH_FAILURE_THRESHOLD"),
+    Tunable("HEALTH_PROBE_TIMEOUT", "Probe timeout (s)", "Health & failover", float, 3, 60, "HEALTH_PROBE_TIMEOUT"),
+    Tunable("STANDBY_HEALTH_INTERVAL", "Standby check interval, watched channels (s)", "Health & failover", float,
+            10, 3600, "STANDBY_HEALTH_INTERVAL"),
+    Tunable("UNWATCHED_STANDBY_INTERVAL", "Standby check interval, unwatched channels (s)", "Health & failover",
+            float, 30, 7200, "UNWATCHED_STANDBY_INTERVAL"),
+    Tunable("EXHAUSTED_PROBE_INTERVAL", "Recovery probe interval when all sources failed (s)", "Health & failover",
+            float, 5, 600, "EXHAUSTED_PROBE_INTERVAL"),
+    Tunable("WINDOW_CLOSE_GRACE_SECONDS", "Keep a finished game on air without playback for (s)", "Health & failover",
+            float, 0, 3600, "WINDOW_CLOSE_GRACE_SECONDS"),
+    Tunable("SELF_RETRY_LIMIT", "Retries of a channel's only source before No Signal", "Health & failover", int,
+            0, 10, "SELF_RETRY_LIMIT"),
+    Tunable("EMERGENCY_SCRAPE_COOLDOWN", "Min seconds between emergency rescans", "Health & failover", float,
+            10, 3600, "EMERGENCY_SCRAPE_COOLDOWN"),
+    Tunable("FAILOVER_ALERT_COOLDOWN", "Min seconds between failover alerts per channel", "Health & failover",
+            float, 0, 86400, "FAILOVER_ALERT_COOLDOWN"),
+    Tunable("HEALTHY_RESCRAPE_SECONDS", "Refresh standbys of healthy channels every (s)", "Scraping", float,
+            300, 86400, "HEALTHY_RESCRAPE_SECONDS"),
+    Tunable("MAX_STREAM_CANDIDATES", "Max stream candidates per channel", "Scraping", int, 1, 200,
+            "MAX_STREAM_CANDIDATES"),
+    Tunable("PROVIDER_BREAKER_FAILURES", "Provider failures before its breaker opens", "Scraping", int, 1, 20,
+            "PROVIDER_BREAKER_FAILURES"),
+    Tunable("PROVIDER_BREAKER_COOLDOWN", "Provider breaker cooldown (s)", "Scraping", float, 5, 3600,
+            "PROVIDER_BREAKER_COOLDOWN"),
+    Tunable("PROVIDER_TIMEOUT_MIN", "Provider search timeout, minimum (s)", "Scraping", float, 5, 300,
+            "PROVIDER_TIMEOUT_MIN"),
+    Tunable("PROVIDER_TIMEOUT_MAX", "Provider search timeout, maximum (s)", "Scraping", float, 10, 600,
+            "PROVIDER_TIMEOUT_MAX"),
+    Tunable("SESSION_IDLE_SECONDS", "Stop a channel session after idle (s)", "Channel sessions", float, 10, 3600,
+            "session.idle_timeout"),
+    Tunable("SESSION_LIVE_EDGE_SEGMENTS", "Segments of buffer at tune-in", "Channel sessions", int, 1, 10,
+            "session.live_edge_segments"),
+    Tunable("SESSION_WINDOW_SECONDS", "Playlist window (s)", "Channel sessions", float, 12, 600,
+            "session.window_min_seconds"),
+    Tunable("SESSION_STALE_SECONDS", "Fail over when no new segment for at least (s)", "Channel sessions", float,
+            5, 300, "session.stale_min_seconds"),
+    Tunable("SESSION_FAIL_THRESHOLD", "Consecutive fetch failures before failover", "Channel sessions", int, 1, 20,
+            "session.fail_threshold"),
+    Tunable("SESSION_SEGMENT_TIMEOUT", "Segment download timeout (s)", "Channel sessions", float, 3, 120,
+            "session.segment_timeout"),
+    Tunable("STREAM_STARTUP_TIMEOUT", "Wait for a channel to start before No Signal (s)", "Channel sessions", float,
+            3, 120, "STREAM_STARTUP_TIMEOUT"),
+    Tunable("STARTUP_PLACEHOLDER_SECONDS", "No Signal shown for a slow start (s)", "Channel sessions", float,
+            5, 600, "STARTUP_PLACEHOLDER_SECONDS"),
+    Tunable("MULTIVIEW_IDLE_TIMEOUT_SECONDS", "Stop an unwatched Multi-View after (s)", "Multi-View", float, 30, 3600,
+            "MULTIVIEW_IDLE_TIMEOUT_SECONDS"),
+    Tunable("STREAM_STARTUP_BUFFER_SECONDS", "Warm-up cache time (s)", "Legacy proxy (fMP4 / separate-audio sources)",
+            float, 0, 120, "STREAM_STARTUP_BUFFER_SECONDS", db_key="startup_buffer_seconds"),
+    Tunable("PREFETCH_CHUNK_COUNT", "Read-ahead chunks", "Legacy proxy (fMP4 / separate-audio sources)", int, 0, 32,
+            "PREFETCH_CHUNK_COUNT", db_key="prefetch_chunk_count"),
+    Tunable("STREAM_CHUNK_CACHE_TTL", "Chunk cache TTL (s)", "Legacy proxy (fMP4 / separate-audio sources)", float,
+            1, 600, "STREAM_CHUNK_CACHE_TTL", db_key="stream_chunk_cache_ttl"),
+)
+_TUNABLES_BY_NAME = {t.name: t for t in TUNABLES}
 
-@app.get("/api/playback-settings", response_class=JSONResponse)
-async def get_playback_settings(auth: bool = Depends(verify_dashboard_auth)):
-    startup = await get_setting_async("startup_buffer_seconds", "15")
-    prefetch = await get_setting_async("prefetch_chunk_count", "5")
-    ttl = await get_setting_async("stream_chunk_cache_ttl", "15")
 
-    return {
-        "startup_buffer_seconds": int(startup),
-        "prefetch_chunk_count": int(prefetch),
-        "stream_chunk_cache_ttl": int(ttl)
-    }
+def _tunable_value(tunable: Tunable):
+    if tunable.target.startswith("session."):
+        return getattr(SESSIONS.config, tunable.target.split(".", 1)[1])
+    return globals()[tunable.target]
+
+
+_TUNABLE_DEFAULTS = {t.name: _tunable_value(t) for t in TUNABLES}
+
+
+def _coerce_tunable(tunable: Tunable, raw: object):
+    """Parse and clamp; None when the value is unusable."""
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    value = min(max(value, tunable.minimum), tunable.maximum)
+    return int(round(value)) if tunable.kind is int else float(value)
+
+
+def _apply_tunable(tunable: Tunable, value) -> None:
+    if tunable.target.startswith("session."):
+        # Every channel session shares this config object, so running
+        # sessions pick the change up on their next poll.
+        setattr(SESSIONS.config, tunable.target.split(".", 1)[1], value)
+    else:
+        globals()[tunable.target] = value
+
+
+def _load_tunable_overrides() -> None:
+    for tunable in TUNABLES:
+        raw = get_setting(tunable.key, "")
+        if raw == "":
+            continue
+        value = _coerce_tunable(tunable, raw)
+        if value is not None:
+            _apply_tunable(tunable, value)
+
+
+def _advanced_settings_snapshot() -> List[dict]:
+    return [
+        {
+            "name": t.name, "label": t.label, "group": t.group, "help": t.help,
+            "value": _tunable_value(t), "default": _TUNABLE_DEFAULTS[t.name],
+            "min": t.minimum, "max": t.maximum, "type": t.kind.__name__,
+        }
+        for t in TUNABLES
+    ]
+
+
+def _advanced_settings_html() -> str:
+    groups: Dict[str, List[str]] = {}
+    for item in _advanced_settings_snapshot():
+        overridden = item["value"] != item["default"]
+        step = "1" if item["type"] == "int" else "any"
+        hint = f"Default {item['default']:g}" if isinstance(item["default"], (int, float)) else ""
+        if item["help"]:
+            hint = f"{hint}. {item['help']}" if hint else item["help"]
+        groups.setdefault(item["group"], []).append(
+            f'<div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; '
+            f'margin-bottom: 0.35rem;" for="adv-{_html(item["name"])}">{_html(item["label"])}'
+            f'{" <span class=\"badge\">changed</span>" if overridden else ""}</label>'
+            f'<input type="number" id="adv-{_html(item["name"])}" name="{_html(item["name"])}" '
+            f'step="{step}" min="{item["min"]:g}" max="{item["max"]:g}" '
+            f'value="{_html(item["value"] if overridden else "")}" placeholder="{_html(item["default"])}">'
+            f'<p class="hint-text" style="margin: 0.25rem 0 0;">{_html(hint)}</p></div>'
+        )
+    sections = []
+    for group, fields in groups.items():
+        sections.append(
+            f'<fieldset style="border: 1px solid var(--border); border-radius: 8px; padding: 1rem;">'
+            f'<legend style="padding: 0 0.5rem; font-weight: 700;">{_html(group)}</legend>'
+            f'<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem;">'
+            f'{"".join(fields)}</div></fieldset>'
+        )
+    return "".join(sections)
+
+
+@app.get("/api/settings/advanced", response_class=JSONResponse)
+async def get_advanced_settings(auth: bool = Depends(verify_dashboard_auth)):
+    return {"settings": _advanced_settings_snapshot()}
+
+
+@app.post("/settings/advanced")
+async def update_advanced_settings(request: Request, auth: bool = Depends(verify_dashboard_auth)):
+    """Blank field = back to the default (env var or built-in). Applied live."""
+    form = await request.form()
+    for tunable in TUNABLES:
+        if tunable.name not in form:
+            continue
+        raw = str(form.get(tunable.name) or "").strip()
+        if raw == "":
+            await set_setting_async(tunable.key, "")
+            _apply_tunable(tunable, _TUNABLE_DEFAULTS[tunable.name])
+            continue
+        value = _coerce_tunable(tunable, raw)
+        if value is None:
+            return RedirectResponse(url="/?tab=playback&status=advanced_invalid", status_code=303)
+        await set_setting_async(tunable.key, str(value))
+        _apply_tunable(tunable, value)
+    return RedirectResponse(url="/?tab=playback&status=advanced_saved", status_code=303)
 
 @app.get("/api/cache-metrics", response_class=JSONResponse)
 async def get_cache_metrics(auth: bool = Depends(verify_dashboard_auth)):
