@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+import re
 import queue
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 import subprocess
@@ -88,9 +89,28 @@ for _noisy_logger in ("httpx", "httpcore", "uvicorn.access", "hpack", "h2"):
     logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
 
 
+_URL_IN_TEXT_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+")
+
+
+def _safe_exception_detail(exc: BaseException, limit: int = 160) -> str:
+    """Exception text with URLs (tokens, webhook secrets) cut down to their host."""
+    def _host_only(match) -> str:
+        text = match.group(0)
+        scheme, _, rest = text.partition("://")
+        host = rest.split("/", 1)[0].split("?", 1)[0].rsplit("@", 1)[-1]
+        return f"{scheme}://{host}/..."
+
+    detail = _URL_IN_TEXT_RE.sub(_host_only, str(exc)).replace("\n", " ").strip()
+    return detail[:limit]
+
+
 def _log_failure(operation: str, exc: BaseException, level: int = logging.WARNING) -> None:
-    """Log a failure without including exception text that may contain secrets or URLs."""
-    LOGGER.log(level, "%s failed (%s)", operation, type(exc).__name__)
+    """Log a failure with its type and a URL-scrubbed detail (URLs carry tokens)."""
+    detail = _safe_exception_detail(exc)
+    if detail:
+        LOGGER.log(level, "%s failed (%s: %s)", operation, type(exc).__name__, detail)
+    else:
+        LOGGER.log(level, "%s failed (%s)", operation, type(exc).__name__)
 
 
 def _bootstrap_runtime_files() -> None:
@@ -156,7 +176,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Form, Request, Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import PlainTextResponse, Response, HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse, FileResponse
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Callable, Dict, List, Optional, Tuple, Set
 from playwright.async_api import async_playwright, Browser, Playwright, Page
 # pystray/PIL are imported lazily in tray mode only: on a headless Linux host
 # `import pystray` tries to open an X display at import time and crashes.
@@ -2838,7 +2858,12 @@ async def master_scrape(
     team_id: str = "",
     search_terms: Optional[List[str]] = None,
     always_live: bool = False,
+    on_partial: Optional[Callable[[List[dict]], None]] = None,
 ) -> List[dict]:
+    """Search every provider for the team's streams. `on_partial`, if given, is
+    called with each provider's playable results as they arrive (ranked), so an
+    emergency rescrape can put a channel back on air without waiting for the
+    slowest provider's timeout."""
     identity = canonical_team_name(team_name or query)
     if search_terms:
         search_terms = list(dict.fromkeys(term.strip() for term in search_terms if term and term.strip()))
@@ -2893,8 +2918,20 @@ async def master_scrape(
             _log_failure(f"provider search {provider.name} for {display_title}", e)
             return []
 
+    async def _search_and_report(provider):
+        res = await _jittered_search(provider)
+        if on_partial is not None and res:
+            playable = [s for s in res if always_live or _stream_matches_requested_event(s, search_terms)]
+            if playable:
+                try:
+                    ranked = rank_streams(playable, await _get_active_provider_priority())
+                    on_partial(ranked[:MAX_STREAM_CANDIDATES])
+                except Exception as exc:
+                    _log_failure("apply partial scrape results", exc)
+        return res
+
     try:
-        tasks = [_jittered_search(provider) for provider in providers]
+        tasks = [_search_and_report(provider) for provider in providers]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         all_streams = [
             stream
@@ -2945,14 +2982,35 @@ def _mark_scrape_finished(data: dict, result: str, error: str = "") -> None:
     data["scrape_error"] = error
 
 
-_CANDIDATE_HEALTH_FIELDS = ("last_health_check", "last_health_ok", "consecutive_failures", "session_compatible")
+_CANDIDATE_HEALTH_FIELDS = (
+    "last_health_check", "last_health_ok", "consecutive_failures", "session_compatible", "incompatible_at",
+    "probe_state", "has_audio", "codec_signature",
+)
+
+
+_TOKEN_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_\-.~=]{24,}$")
+
+
+def _is_token_path_segment(segment: str) -> bool:
+    """Long mixed letters+digits segments (or signed 'exp=...~hmac=...' ones) are
+    rotating tokens, not stream identity. Channel names/ids are short."""
+    if "=" in segment and ("exp" in segment.lower() or "hmac" in segment.lower() or "token" in segment.lower()):
+        return True
+    return bool(
+        _TOKEN_PATH_SEGMENT_RE.match(segment)
+        and any(c.isdigit() for c in segment)
+        and any(c.isalpha() for c in segment)
+    )
 
 
 def candidate_source_key(candidate: dict) -> Tuple[str, str, str]:
-    """Identity of a stream source ignoring its query string: aggregator URLs carry
-    rotating tokens, so the same CDN stream gets a new URL on every rescrape."""
+    """Identity of a stream source ignoring its query string and token-like path
+    segments: aggregator URLs carry rotating tokens, so the same CDN stream gets
+    a new URL on every rescrape (a new key lost its health history and made a
+    token refresh look like a source switch)."""
     parts = urllib.parse.urlsplit(str(candidate.get("url") or ""))
-    return (str(candidate.get("provider") or "").lower(), parts.netloc.lower(), parts.path)
+    path = "/".join("*" if _is_token_path_segment(seg) else seg for seg in parts.path.split("/"))
+    return (str(candidate.get("provider") or "").lower(), parts.netloc.lower(), path)
 
 
 def _merge_stream_candidates(
@@ -3002,7 +3060,16 @@ def _merge_stream_candidates(
         merged.append(candidate)
         seen.add(key)
 
-    return merged[:MAX_STREAM_CANDIDATES], 0
+    merged = merged[:MAX_STREAM_CANDIDATES]
+    kept_active = (
+        keep_active and bool(merged) and 0 <= active_index < len(previous)
+        and merged[0] is previous[active_index]
+    )
+    if kept_active:
+        return merged, 0
+    # Nothing to keep: start at the best-health source, not blindly at [0]
+    # (which may have failed seconds ago).
+    return merged, _best_candidate_index(merged)
 
 
 async def trigger_scrape(team_id: str, force: bool = False):
@@ -3220,18 +3287,27 @@ async def team_scrape_loop(team_id: str, initial_delay: float = 0.0):
         except asyncio.TimeoutError:
             pass
 
+PROVIDER_TIMEOUT_MIN = bounded_float(os.getenv("PROVIDER_TIMEOUT_MIN", "20"), 20.0, 5.0, 300.0)
+PROVIDER_TIMEOUT_MAX = bounded_float(os.getenv("PROVIDER_TIMEOUT_MAX", "90"), 90.0, 10.0, 600.0)
+PROVIDER_TIMEOUT_DEFAULT = bounded_float(os.getenv("PROVIDER_TIMEOUT_DEFAULT", "45"), 45.0, 5.0, 600.0)
+
+
 def _dynamic_provider_timeout_sync(provider: str) -> float:
+    # Only successful searches: failures were recorded as the timeout itself
+    # (ratcheting a slow provider up to the maximum for good) or as 0 ms
+    # (dragging a failing one down to the minimum).
     with _db_session() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT AVG(response_time_ms) FROM provider_performance WHERE provider=? AND timestamp > datetime('now', '-1 hour')",
+            "SELECT AVG(response_time_ms) FROM provider_performance "
+            "WHERE provider=? AND success=1 AND timestamp > datetime('now', '-1 hour')",
             (provider,)
         )
         row = cursor.fetchone()
         if row and row[0]:
             avg_ms = row[0]
-            return float(max(20, min(90, (avg_ms / 1000) * 3)))
-    return 45.0
+            return float(max(PROVIDER_TIMEOUT_MIN, min(PROVIDER_TIMEOUT_MAX, (avg_ms / 1000) * 3)))
+    return PROVIDER_TIMEOUT_DEFAULT
 
 
 async def _get_dynamic_provider_timeout(provider: str) -> float:
@@ -3240,7 +3316,7 @@ async def _get_dynamic_provider_timeout(provider: str) -> float:
         return await asyncio.to_thread(_dynamic_provider_timeout_sync, provider)
     except Exception as exc:
         _log_failure("calculate dynamic provider timeout", exc)
-        return 45.0
+        return PROVIDER_TIMEOUT_DEFAULT
 
 
 def _track_provider_response_time_sync(provider: str, response_time_ms: int, success: bool) -> None:
@@ -3266,7 +3342,60 @@ STANDBY_PROBES_PER_CHANNEL = bounded_int(os.getenv("STANDBY_PROBES_PER_CHANNEL",
 UNWATCHED_STANDBY_INTERVAL = _positive_env_number("UNWATCHED_STANDBY_INTERVAL", 300.0)
 HEALTHY_RESCRAPE_SECONDS = _positive_env_number("HEALTHY_RESCRAPE_SECONDS", 1800.0)
 STARTUP_SCRAPE_SPREAD_SECONDS = bounded_float(os.getenv("STARTUP_SCRAPE_SPREAD_SECONDS", "45"), 45.0, 0.0, 600.0)
+# While every candidate is marked failed, keep probing them all (watched or
+# not) and recover on the first that plays again.
+EXHAUSTED_PROBE_INTERVAL = _positive_env_number("EXHAUSTED_PROBE_INTERVAL", 20.0)
+# Outside the scheduled window a channel is only closed after it has not been
+# flowing for this long (one missed sample used to end overtime games).
+WINDOW_CLOSE_GRACE_SECONDS = _positive_env_number("WINDOW_CLOSE_GRACE_SECONDS", 180.0)
+# A channel's only source stalls: retry it this many times before No Signal.
+SELF_RETRY_LIMIT = bounded_int(os.getenv("SELF_RETRY_LIMIT", "2"), 2, 0, 10)
+SELF_RETRY_WINDOW = _positive_env_number("SELF_RETRY_WINDOW", 120.0)
+# Session-incompatible sources (fMP4, separate audio) get another chance later.
+INCOMPATIBLE_RETRY_SECONDS = _positive_env_number("INCOMPATIBLE_RETRY_SECONDS", 3600.0)
+FAILOVER_ALERT_COOLDOWN = _positive_env_number("FAILOVER_ALERT_COOLDOWN", 300.0)
+TOKEN_REFRESH_COOLDOWN = _positive_env_number("TOKEN_REFRESH_COOLDOWN", 120.0)
+# Failover candidate tiers: known-good within this long; failed longer ago than
+# FAILED_RETRY_AFTER is worth another try.
+CANDIDATE_GOOD_FOR_SECONDS = _positive_env_number("CANDIDATE_GOOD_FOR_SECONDS", 180.0)
+CANDIDATE_FAILED_RETRY_AFTER = _positive_env_number("CANDIDATE_FAILED_RETRY_AFTER", 60.0)
 _ACTIVE_PROBE_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+
+def _candidate_tier(candidate: dict, now: float) -> int:
+    """0 known-good recently, 1 unknown, 2 failed a while ago, 3 failed moments ago."""
+    ok = candidate.get("last_health_ok")
+    checked = float(candidate.get("last_health_check") or 0.0)
+    if ok is True and now - checked < CANDIDATE_GOOD_FOR_SECONDS:
+        return 0
+    if ok is None or ok is True:
+        return 1
+    if now - checked > CANDIDATE_FAILED_RETRY_AFTER:
+        return 2
+    return 3
+
+
+def _candidate_session_compatible(candidate: dict, now: float) -> bool:
+    if candidate.get("session_compatible", True) is not False:
+        return True
+    return now - float(candidate.get("incompatible_at") or 0.0) > INCOMPATIBLE_RETRY_SECONDS
+
+
+def _best_candidate_index(candidates: List[dict]) -> int:
+    """Where a (re)built candidate list should start: the best-health usable
+    source, list order breaking ties (the list is already ranked by quality)."""
+    if not candidates:
+        return 0
+    now = time.time()
+    ranked = sorted(
+        range(len(candidates)),
+        key=lambda i: (
+            0 if _candidate_session_compatible(candidates[i], now) else 1,
+            _candidate_tier(candidates[i], now),
+            i,
+        ),
+    )
+    return ranked[0]
 
 
 def _pick_next_candidate(
@@ -3288,23 +3417,14 @@ def _pick_next_candidate(
 
     def rank(index: int) -> Tuple[int, int, int]:
         candidate = candidates[index]
-        ok = candidate.get("last_health_ok")
-        checked = float(candidate.get("last_health_check") or 0.0)
-        if ok is True and now - checked < 180:
-            tier = 0
-        elif ok is None or ok is True:
-            tier = 1
-        elif now - checked > 60:
-            tier = 2
-        else:
-            tier = 3  # failed moments ago; not worth switching to
+        tier = _candidate_tier(candidate, now)  # 3 = failed moments ago; not worth switching to
         signature = candidate.get("codec_signature")
         codec_penalty = 0 if prefer_signature is None or signature in (None, prefer_signature) else 1
         return tier, codec_penalty, order.index(index)
 
     eligible = [
         index for index in order
-        if candidates[index].get("session_compatible", True) is not False and rank(index)[0] < 3
+        if _candidate_session_compatible(candidates[index], now) and rank(index)[0] < 3
     ]
     return min(eligible, key=rank) if eligible else None
 
@@ -3328,17 +3448,30 @@ async def request_failover(team_id: str, source_key: tuple, reason: str, incompa
     active["last_health_check"] = time.time()
     if incompatible:
         active["session_compatible"] = False
+        active["incompatible_at"] = time.time()
     team_name = data.get("name", team_id)
+    if reason == "playlist forbidden":
+        _request_token_refresh(team_id, data)
     next_index = _pick_next_candidate(candidates, active_index, active.get("codec_signature"))
     if next_index is None:
+        if not incompatible and _allow_self_retry(data):
+            # The only (usable) source stalled. A stall is often brief, so give
+            # it another stale window instead of going straight to No Signal.
+            LOGGER.info("Retrying the same source team=%s reason=%s", team_id, reason)
+            return False
         data["is_healthy"] = False
         data["exhausted"] = True
+        data["exhausted_since"] = time.monotonic()
         SESSIONS.poke(team_id)
         _handle_candidates_exhausted(team_id, data, team_name)
         return False
 
     data["active_index"] = next_index
     data["exhausted"] = False
+    data["self_retries"] = 0
+    # The new source starts with a clean failure count (a stale count left
+    # from an earlier stint made its first failed probe fail over at once).
+    candidates[next_index]["consecutive_failures"] = 0
     new_provider = candidates[next_index].get("provider", "Unknown")
     SESSIONS.poke(team_id)
     LOGGER.info(
@@ -3346,11 +3479,85 @@ async def request_failover(team_id: str, source_key: tuple, reason: str, incompa
         team_id, active.get("provider", "Unknown"), new_provider, reason,
     )
     await log_metric_event_async(team_id, new_provider, "failover", reason)
+    data["failover_count"] = int(data.get("failover_count", 0)) + 1
+    data["last_failover"] = {"at": time.time(), "reason": reason, "to": new_provider}
+    _send_failover_alert(team_id, data, team_name, new_provider)
+    return True
+
+
+def _allow_self_retry(data: dict) -> bool:
+    now = time.monotonic()
+    if now - float(data.get("self_retry_window_start") or 0.0) > SELF_RETRY_WINDOW:
+        data["self_retry_window_start"] = now
+        data["self_retries"] = 0
+    if int(data.get("self_retries", 0)) >= SELF_RETRY_LIMIT:
+        return False
+    data["self_retries"] = int(data.get("self_retries", 0)) + 1
+    return True
+
+
+def _send_failover_alert(team_id: str, data: dict, team_name: str, new_provider: str) -> None:
+    """At most one failover alert per channel per FAILOVER_ALERT_COOLDOWN; a
+    flapping channel used to send one every few seconds (and got the webhook
+    rate-limited right before the more important 'exhausted' alert)."""
+    now = time.monotonic()
+    last = data.get("last_failover_alert")
+    if last is not None and now - last < FAILOVER_ALERT_COOLDOWN:
+        data["suppressed_failover_alerts"] = int(data.get("suppressed_failover_alerts", 0)) + 1
+        return
+    suppressed = int(data.get("suppressed_failover_alerts", 0))
+    data["last_failover_alert"] = now
+    data["suppressed_failover_alerts"] = 0
+    extra = f" ({suppressed} more failover(s) since the last alert)" if suppressed else ""
     _spawn_background_task(
-        send_alert("⚠️ Stream Failover", f"Failed over to {new_provider} for **{team_name}**.", "warning"),
+        send_alert("⚠️ Stream Failover", f"Failed over to {new_provider} for **{team_name}**.{extra}", "warning"),
         f"send failover alert team={team_id}",
     )
-    return True
+
+
+def _request_token_refresh(team_id: str, data: dict) -> None:
+    """The active playlist answered 401/403: its token probably expired, and
+    standbys from the same scrape carry tokens just as old. Rescrape now (the
+    merge keeps health history) rather than waiting for the next cycle."""
+    now = time.monotonic()
+    if now - float(data.get("last_token_refresh") or 0.0) < TOKEN_REFRESH_COOLDOWN:
+        return
+    data["last_token_refresh"] = now
+    LOGGER.info("Refreshing stream tokens team=%s", team_id)
+    _spawn_background_task(_trigger_scrape(team_id, force=True), f"token refresh rescrape team={team_id}")
+
+
+async def _probe_exhausted_candidates(team_id: str, data: dict) -> None:
+    """Recover an exhausted channel as soon as any known source plays again,
+    instead of waiting for a rescrape to return candidates."""
+    try:
+        candidates = list(data.get("candidates") or [])
+        if not candidates:
+            return
+        semaphore = asyncio.Semaphore(STANDBY_HEALTH_CONCURRENCY)
+        await asyncio.gather(
+            *(_probe_standby_candidate(candidate, semaphore) for candidate in candidates),
+            return_exceptions=True,
+        )
+        current = stream_state.get(team_id)
+        if current is not data or not data.get("exhausted") or data.get("candidates") is None:
+            return
+        now = time.time()
+        for index, candidate in enumerate(data["candidates"]):
+            if candidate.get("last_health_ok") is True and _candidate_session_compatible(candidate, now):
+                data["active_index"] = index
+                data["exhausted"] = False
+                data["is_healthy"] = True
+                data["self_retries"] = 0
+                candidate["consecutive_failures"] = 0
+                SESSIONS.poke(team_id)
+                LOGGER.info(
+                    "Recovered exhausted channel team=%s provider=%s",
+                    team_id, candidate.get("provider", "Unknown"),
+                )
+                return
+    finally:
+        data["exhausted_probe_in_flight"] = False
 
 
 def _handle_candidates_exhausted(team_id: str, data: dict, team_name: str) -> None:
@@ -3375,6 +3582,22 @@ async def emergency_rescrape(team_id: str) -> None:
         return
     _SCRAPE_IN_FLIGHT.add(team_id)
     _mark_scrape_started(data)
+
+    def _install_partial(streams: List[dict]) -> None:
+        # First playable provider result while still off the air: use it now.
+        current = stream_state.get(team_id)
+        if current is None or not current.get("exhausted"):
+            return
+        merged, merged_index = _merge_stream_candidates(
+            current.get("candidates", []), 0, streams, keep_active=False
+        )
+        current["candidates"] = merged
+        current["active_index"] = merged_index
+        current["exhausted"] = False
+        current["is_healthy"] = True
+        SESSIONS.poke(team_id)
+        LOGGER.info("Emergency rescrape found streams early team=%s count=%d", team_id, len(streams))
+
     try:
         candidates = await master_scrape(
             data["query"],
@@ -3382,14 +3605,18 @@ async def emergency_rescrape(team_id: str) -> None:
             team_id=team_id,
             search_terms=data.get("search_terms") or None,
             always_live=bool(data.get("always_live")),
+            on_partial=_install_partial,
         )
         current = stream_state.get(team_id)
         if current is not None:
             if candidates:
                 # Every known candidate just failed, so nothing is kept active, but
-                # standbys found again keep their health history.
+                # standbys found again keep their health history. If an early
+                # partial result is already playing, keep playing it.
+                playing_early = not current.get("exhausted") and bool(current.get("candidates"))
                 merged, merged_index = _merge_stream_candidates(
-                    current.get("candidates", []), 0, candidates, keep_active=False
+                    current.get("candidates", []), current.get("active_index", 0) if playing_early else 0,
+                    candidates, keep_active=playing_early,
                 )
                 current["candidates"] = merged
                 current["active_index"] = merged_index
@@ -3430,17 +3657,32 @@ async def check_stream_health(url: str, referer: str, origin: str = "") -> bool:
             await client.aclose()
 
 
+def _session_on_placeholder(session) -> bool:
+    source = getattr(session, "source", None)
+    return source is not None and bool(source.key) and source.key[0] == "placeholder"
+
+
+def _session_playing_real_source(session) -> bool:
+    """Flowing with real content: the No Signal placeholder also produces
+    segments, but a channel showing it is not healthy."""
+    return session is not None and session.is_flowing() and not _session_on_placeholder(session)
+
+
 def _session_flowing(team_id: str) -> bool:
     session = SESSIONS.peek(team_id)
-    return session is not None and session.is_watched() and session.is_flowing()
+    return session is not None and session.is_watched() and _session_playing_real_source(session)
 
 
 def _stream_window_should_close(team_id: str, data: dict) -> bool:
     """Outside the scheduled window, but keep a game that runs long (overtime,
-    rain delay) while people are watching it and it is still flowing."""
-    if is_stream_window_active(data):
+    rain delay) while people are watching it and it is still flowing. Closing
+    needs WINDOW_CLOSE_GRACE_SECONDS without real playback, not one sample."""
+    if is_stream_window_active(data) or _session_flowing(team_id):
+        data.pop("window_close_pending_since", None)
         return False
-    return not _session_flowing(team_id)
+    now = time.monotonic()
+    pending_since = data.setdefault("window_close_pending_since", now)
+    return now - pending_since >= WINDOW_CLOSE_GRACE_SECONDS
 
 
 async def _probe_active_candidate(team_id: str, data: dict) -> None:
@@ -3493,6 +3735,8 @@ async def _probe_standby_candidate(candidate: dict, semaphore: asyncio.Semaphore
             is_alive = False
     candidate["last_health_check"] = time.time()
     candidate["last_health_ok"] = is_alive
+    if is_alive:
+        candidate["consecutive_failures"] = 0
 
 
 async def standby_health_loop() -> None:
@@ -3547,12 +3791,20 @@ def _failover_monitor_tick() -> None:
         if data.get("active_index", 0) >= len(candidates):
             data["active_index"] = 0
 
+        if data.get("exhausted"):
+            data["is_healthy"] = False
+            if not data.get("exhausted_probe_in_flight") and now >= data.get("next_exhausted_probe", 0.0):
+                data["exhausted_probe_in_flight"] = True
+                data["next_exhausted_probe"] = now + EXHAUSTED_PROBE_INTERVAL
+                _spawn_background_task(_probe_exhausted_candidates(team_id, data), f"exhausted probe team={team_id}")
+            continue
+
         session = SESSIONS.peek(team_id)
         if session is not None and session.is_watched():
             # Real playback is the health signal for watched channels: the
             # session reports stale playlists / failing segments itself, so no
             # synthetic probes (which used to fail over on a single blip).
-            data["is_healthy"] = session.is_flowing()
+            data["is_healthy"] = _session_playing_real_source(session)
             continue
 
         if data.get("probe_in_flight") or now < data.get("next_active_probe", 0.0):
@@ -3797,6 +4049,13 @@ async def lifespan(app: FastAPI):
     _PREFETCH_SEMAPHORE = None
     stream_state.clear()
 
+def _is_expected_slow_request(scope) -> bool:
+    """A channel playlist's first request waits for the session to start (up to
+    STREAM_STARTUP_TIMEOUT); that's normal, not worth a warning each time."""
+    path = scope.get("path") or ""
+    return path.endswith(".m3u8") and (path.startswith("/stream/") or path.startswith("/multiview/"))
+
+
 class RequestDiagnosticsMiddleware:
     """Pure ASGI middleware: logs 5xx and slow responses, turns unhandled errors
     into a 500. Replaces @app.middleware("http") (BaseHTTPMiddleware), which
@@ -3822,7 +4081,7 @@ class RequestDiagnosticsMiddleware:
                         "HTTP failure method=%s path=%s status=%d duration_ms=%.0f",
                         scope.get("method"), scope.get("path"), message["status"], elapsed_ms,
                     )
-                elif elapsed_ms >= 5000:
+                elif elapsed_ms >= 5000 and not _is_expected_slow_request(scope):
                     LOGGER.warning(
                         "Slow request method=%s path=%s status=%d duration_ms=%.0f",
                         scope.get("method"), scope.get("path"), message["status"], elapsed_ms,
@@ -3977,9 +4236,27 @@ async def _fetch_upstream_body(
                     dict(response.headers),
                 )
         except Exception as exc:
-            _log_failure("fetch upstream proxy resource", exc)
+            _log_upstream_exception(safe_url, exc)
             return None
     return None
+
+
+_UPSTREAM_EXCEPTION_LOGGED: "OrderedDict[Tuple[str, str], float]" = OrderedDict()
+
+
+def _log_upstream_exception(url: str, exc: BaseException) -> None:
+    """Once per (host, error type) per minute: a dead CDN is polled every few
+    seconds by every session using it."""
+    host = urllib.parse.urlsplit(url).netloc.lower()
+    key = (host, type(exc).__name__)
+    now = time.monotonic()
+    if now - _UPSTREAM_EXCEPTION_LOGGED.get(key, -1e9) < 60.0:
+        return
+    _UPSTREAM_EXCEPTION_LOGGED[key] = now
+    _UPSTREAM_EXCEPTION_LOGGED.move_to_end(key)
+    while len(_UPSTREAM_EXCEPTION_LOGGED) > 256:
+        _UPSTREAM_EXCEPTION_LOGGED.popitem(last=False)
+    LOGGER.warning("Upstream fetch failed host=%s error=%s", host, type(exc).__name__)
 
 
 def _manifest_uri_is_playlist(url: str) -> bool:
@@ -5470,6 +5747,10 @@ async def serve_placeholder_segment(segment_name: str):
 
 SESSION_IDLE_SECONDS = bounded_float(os.getenv("SESSION_IDLE_SECONDS", "60"), 60.0, 10.0, 3600.0)
 STREAM_STARTUP_TIMEOUT = bounded_float(os.getenv("STREAM_STARTUP_TIMEOUT", "20"), 20.0, 3.0, 120.0)
+# A channel whose source hasn't produced anything by STREAM_STARTUP_TIMEOUT plays
+# No Signal for this long (then retries the real source) instead of answering
+# 503: Jellyfin's ffmpeg does not retry a failed first open.
+STARTUP_PLACEHOLDER_SECONDS = bounded_float(os.getenv("STARTUP_PLACEHOLDER_SECONDS", "30"), 30.0, 5.0, 600.0)
 STREAM_MAX_BANDWIDTH = bounded_int(os.getenv("STREAM_MAX_BANDWIDTH", "0"), 0, 0, 1_000_000_000)
 PLACEHOLDER_SOURCE_KEY = ("placeholder",)
 HLS_MEDIA_TYPE = "application/vnd.apple.mpegurl"
@@ -5552,6 +5833,8 @@ def _resolve_session_source(channel_id: str) -> Optional[SourceSpec]:
     candidates = data.get("candidates") or []
     if not candidates or data.get("exhausted"):
         return _placeholder_source()
+    if data.get("startup_placeholder_until", 0.0) > time.monotonic():
+        return _placeholder_source()
     active_index = data.get("active_index", 0)
     if active_index >= len(candidates):
         active_index = 0
@@ -5567,13 +5850,28 @@ def _on_session_failure(channel_id: str, source_key: tuple, reason: str) -> None
     _spawn_background_task(request_failover(channel_id, source_key, reason), f"session failover {channel_id}")
 
 
-def _on_session_incompatible(channel_id: str, source_key: tuple, reason: str) -> None:
+def _on_session_incompatible(channel_id: str, source_key: tuple, reason: str) -> bool:
+    """Returns True when a compatible standby exists (the session keeps going
+    and picks it up), False to let a cold-starting session use the legacy proxy."""
     if _multiview_view_for_session(channel_id) is not None:
-        return
+        return False
+    data = stream_state.get(channel_id) or {}
+    candidates = data.get("candidates") or []
+    active_index = data.get("active_index", 0)
+    has_alternative = (
+        0 <= active_index < len(candidates)
+        and candidate_source_key(candidates[active_index]) == tuple(source_key)
+        and _pick_next_candidate(candidates, active_index) is not None
+    )
+    if has_alternative:
+        # Mark it now so the next resolve can't hand the session the same source.
+        candidates[active_index]["session_compatible"] = False
+        candidates[active_index]["incompatible_at"] = time.time()
     _spawn_background_task(
         request_failover(channel_id, source_key, reason, incompatible=True),
         f"session incompatible failover {channel_id}",
     )
+    return has_alternative
 
 
 def _on_session_media_info(channel_id: str, source_key: tuple, has_audio: bool, signature: tuple) -> None:
@@ -5608,6 +5906,17 @@ def _hls_response(text: str) -> Response:
     )
 
 
+def _start_on_placeholder(channel_id: str) -> bool:
+    data = stream_state.get(channel_id)
+    if not data or data.get("type") == "multiview" or not FFMPEG_AVAILABLE:
+        return False
+    data["startup_placeholder_until"] = time.monotonic() + STARTUP_PLACEHOLDER_SECONDS
+    LOGGER.info("Stream slow to start; showing No Signal meanwhile channel=%s", channel_id)
+    _request_placeholder_start()
+    SESSIONS.poke(channel_id)
+    return True
+
+
 async def _serve_session_playlist(session_id: str, segment_prefix: str, legacy=None) -> Response:
     session = SESSIONS.get(session_id)
     session.touch()
@@ -5616,6 +5925,8 @@ async def _serve_session_playlist(session_id: str, segment_prefix: str, legacy=N
     await session.wait_ready(STREAM_STARTUP_TIMEOUT)
     if session.state == "legacy" and legacy is not None:
         return await legacy()
+    if not session.window and _start_on_placeholder(session_id):
+        await session.wait_ready(10.0)
     if not session.window:
         return Response(
             status_code=503,
@@ -5666,7 +5977,7 @@ async def stream_playlist(team_id: str, request: Request):
     return await _serve_channel_playlist(team_id, request)
 
 
-@app.get("/stream/{team_id}/seg/{seq}.ts")
+@app.api_route("/stream/{team_id}/seg/{seq}.ts", methods=["GET", "HEAD"])
 async def stream_segment(team_id: str, seq: int):
     if team_id in stream_state and stream_state[team_id].get("type") == "multiview":
         _touch_multiview_viewer(team_id)
@@ -6047,7 +6358,7 @@ async def proxy_chunk(request: Request, url: str, ref: str = "", org: str = "", 
     return StreamingResponse(relay(), status_code=opened_response.status_code, media_type=media_type, headers=out_headers)
 
 
-@app.get("/playlist.m3u", response_class=PlainTextResponse)
+@app.api_route("/playlist.m3u", methods=["GET", "HEAD"], response_class=PlainTextResponse)
 async def generate_m3u(request: Request):
     base_url = _public_base_url(request)
     lines = ["#EXTM3U"]
@@ -6517,7 +6828,7 @@ def _multiview_programmes(
     return main_programmes, audio_programmes
 
 
-@app.get("/epg.xml", response_class=PlainTextResponse)
+@app.api_route("/epg.xml", methods=["GET", "HEAD"], response_class=PlainTextResponse)
 async def generate_xmltv(request: Request = None):
     base_url = ""
     if request is not None:
@@ -7911,6 +8222,12 @@ async def override_stream(team_id: str, candidate_index: int = Form(...), auth: 
         if 0 <= candidate_index <= max_idx:
             stream_state[team_id]["active_index"] = candidate_index
             stream_state[team_id]["is_healthy"] = True
+            stream_state[team_id]["exhausted"] = False
+            stream_state[team_id]["self_retries"] = 0
+            candidate = stream_state[team_id]["candidates"][candidate_index]
+            candidate["consecutive_failures"] = 0
+            candidate.pop("session_compatible", None)
+            SESSIONS.poke(team_id)
             
             team_name = stream_state[team_id]["name"]
             prov = stream_state[team_id]["candidates"][candidate_index].get("provider", "Unknown")
@@ -7919,7 +8236,7 @@ async def override_stream(team_id: str, candidate_index: int = Form(...), auth: 
                 f"send manual-override alert team={team_id}",
             )
             
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+    return RedirectResponse(url="/?tab=channels&status=override_saved", status_code=303)
 
 async def _remove_channel(channel_id: str) -> None:
     """Single removal path for every kind of channel: stops its scrape loop or

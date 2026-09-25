@@ -6,6 +6,7 @@ dict via a fake SessionHooks.fetch, and segment bodies are small synthetic
 MPEG-TS blobs built by hand (just enough structure for TsNormalizer to parse
 them: PAT + PMT + one video PES with PTS/DTS, optionally one audio PES).
 """
+import asyncio
 import os
 import sys
 import time
@@ -317,6 +318,7 @@ class Harness:
         self.incompatibles: List[Tuple[str, Tuple, str]] = []
         self.media_info: List[Tuple[str, Tuple, bool, Tuple]] = []
         self.fetch_calls: List[str] = []
+        self.incompatible_result: Optional[bool] = None
 
     def set_response(self, url: str, body: bytes, status: int = 200, content_type: str = "application/octet-stream"):
         self.responses[url] = FetchResult(status=status, url=url, content_type=content_type, body=body)
@@ -342,6 +344,7 @@ class Harness:
 
     def report_incompatible(self, channel_id, key, reason):
         self.incompatibles.append((channel_id, key, reason))
+        return self.incompatible_result
 
     def on_media_info(self, channel_id, key, has_audio, signature):
         self.media_info.append((channel_id, key, has_audio, signature))
@@ -588,13 +591,16 @@ class ChannelSessionTests(unittest.IsolatedAsyncioTestCase):
 
         # No new segments upstream; make the "last new segment" look old
         # enough to exceed the stale threshold.
-        session.last_new_segment_at = time.monotonic() - 100.0
+        session.last_new_segment_at = session._stale_timer_start = time.monotonic() - 100.0
         await session._poll_once()
         self.assertEqual(len(self.harness.failures), 1)
         self.assertEqual(self.harness.failures[0][2], "playlist stale")
+        # Reporting restarts the stale timer but must not make the channel
+        # look flowing again (that hid stalls from health and window-close).
+        self.assertFalse(session.is_flowing())
 
         # A second poll right away must be rate limited by the cooldown.
-        session.last_new_segment_at = time.monotonic() - 100.0
+        session.last_new_segment_at = session._stale_timer_start = time.monotonic() - 100.0
         await session._poll_once()
         self.assertEqual(len(self.harness.failures), 1)
 
@@ -624,8 +630,90 @@ class ChannelSessionTests(unittest.IsolatedAsyncioTestCase):
         session = self.make_session()
         await session._poll_once()
 
+        # No other compatible source (hook returned None): legacy passthrough.
         self.assertEqual(session.state, "legacy")
+        self.assertEqual(len(self.harness.incompatibles), 1)
+
+    async def test_fmp4_cold_start_tries_another_source_before_legacy(self):
+        base = "http://upstream"
+        self.harness.source = SourceSpec(key=("primary",), url=f"{base}/media.m3u8", label="primary")
+        self.harness.set_playlist(f"{base}/media.m3u8", playlist_text(base, list(range(3)), has_map=True))
+        self.harness.incompatible_result = True  # main found a compatible standby
+
+        session = self.make_session()
+        await session._poll_once()
+        self.assertNotEqual(session.state, "legacy")
+        self.assertIsNone(session.source)
+
+        self.harness.source = SourceSpec(key=("backup",), url="http://backup/media.m3u8", label="backup")
+        self.harness.set_playlist("http://backup/media.m3u8", playlist_text("http://backup", list(range(3))))
+        for u in range(3):
+            self.harness.set_response(f"http://backup/seg{u}.ts", make_ts_segment())
+        await session._poll_once()
+        self.assertEqual(session.state, "live")
+        self.assertEqual(len(session.window), 3)
+
+    async def test_single_non_ts_segment_is_skipped_not_incompatible(self):
+        base = "http://upstream"
+        self.harness.source = SourceSpec(key=("primary",), url=f"{base}/media.m3u8", label="primary")
+        self.harness.set_playlist(f"{base}/media.m3u8", playlist_text(base, list(range(4))))
+        self.harness.set_response(f"{base}/seg0.ts", b"<html>error</html>" * 20)
+        for u in range(1, 4):
+            self.harness.set_response(f"{base}/seg{u}.ts", make_ts_segment())
+        cfg = fast_config(live_edge_segments=4, min_start_segments=3, window_max_segments=4)
+        session = self.make_session(cfg)
+        await session._poll_once()
         self.assertEqual(len(self.harness.incompatibles), 0)
+        self.assertEqual(len(session.window), 3)
+        self.assertEqual(session.stats["segment_failures"], 1)
+
+    async def test_slow_segment_is_skipped_after_its_deadline(self):
+        base = "http://upstream"
+        self.harness.source = SourceSpec(key=("primary",), url=f"{base}/media.m3u8", label="primary")
+        self.harness.set_playlist(f"{base}/media.m3u8", playlist_text(base, list(range(3)), durations=[0.1] * 3))
+        for u in range(3):
+            self.harness.set_response(f"{base}/seg{u}.ts", make_ts_segment())
+        original_fetch = self.harness.fetch
+
+        async def slow_fetch(url, headers, max_bytes, timeout):
+            if url.endswith("seg0.ts"):
+                await asyncio.sleep(5.0)
+            return await original_fetch(url, headers, max_bytes, timeout)
+
+        self.harness.fetch = slow_fetch
+        cfg = fast_config(segment_deadline_min=0.2, segment_deadline_factor=1.0, min_start_segments=2)
+        session = ChannelSession("chan1", self.harness.hooks(), cfg)
+        started = time.monotonic()
+        await session._poll_once()
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual(len(session.window), 2)
+
+    async def test_target_duration_is_clamped_and_resets_with_the_run(self):
+        base = "http://upstream"
+        self.harness.source = SourceSpec(key=("primary",), url=f"{base}/media.m3u8", label="primary")
+        self.harness.set_playlist(f"{base}/media.m3u8", playlist_text(base, list(range(3)), target_duration=600))
+        for u in range(3):
+            self.harness.set_response(f"{base}/seg{u}.ts", make_ts_segment())
+        session = self.make_session(fast_config(max_target_duration=15))
+        await session._poll_once()
+        self.assertEqual(session.target_duration, 15)
+        session._release_memory()
+        self.assertEqual(session.target_duration, 0)
+
+    async def test_failure_report_cooldown_map_is_bounded(self):
+        session = self.make_session()
+        for i in range(100):
+            session._note_report(("run", i), float(i) * 1000)
+        self.assertLessEqual(len(session._last_report), 32)
+
+    async def test_forbidden_playlist_is_reported_as_token_expiry(self):
+        base = "http://upstream"
+        self.harness.source = SourceSpec(key=("primary",), url=f"{base}/media.m3u8", label="primary")
+        self.harness.set_response(f"{base}/media.m3u8", b"denied", status=403)
+        session = self.make_session(fast_config(fail_threshold=2))
+        await session._poll_once()
+        await session._poll_once()
+        self.assertEqual(self.harness.failures[-1][2], "playlist forbidden")
 
     async def test_fmp4_source_after_segments_reports_incompatible(self):
         base = "http://upstream"
@@ -701,6 +789,11 @@ class ChannelSessionTests(unittest.IsolatedAsyncioTestCase):
             self.harness.set_response(f"{base}/seg{u}.ts", make_ts_segment())
 
         with patch.object(session.normalizer, "start_new_epoch", wraps=session.normalizer.start_new_epoch) as spy:
+            # A single far-behind response could be a stale CDN edge: ignored.
+            await session._poll_once()
+            spy.assert_not_called()
+            self.assertEqual(session.next_seq, seq_before)
+            # Confirmed by the next poll: a real reset.
             await session._poll_once()
             spy.assert_called_once()
 

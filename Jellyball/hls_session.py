@@ -121,6 +121,7 @@ class SessionSegment:
     duration: float
     discontinuity: bool
     data: bytes
+    removed_at: float = 0.0  # when it left the window (grace buffer aging)
 
 
 @dataclass
@@ -132,18 +133,25 @@ class SessionConfig:
     window_min_seconds: float = 30.0
     window_max_segments: int = 30
     grace_segments: int = 12
+    grace_seconds: float = 45.0  # rolled-off segments stay fetchable this long
     max_session_bytes: int = 256 * 1024 * 1024
     stale_min_seconds: float = 15.0
     fail_threshold: int = 3
     failure_report_cooldown: float = 10.0
     playlist_timeout: float = 8.0
     segment_timeout: float = 15.0
+    # A segment that isn't downloaded within max(min, factor x its duration) is
+    # skipped (with a discontinuity) instead of holding back the ones after it.
+    segment_deadline_min: float = 8.0
+    segment_deadline_factor: float = 2.0
+    max_target_duration: int = 15  # clamp: one bogus EXTINF can't disable stale detection
     max_playlist_bytes: int = 2 * 1024 * 1024
     max_segment_bytes: int = 48 * 1024 * 1024
     bandwidth_cap: int = 0  # 0 = pick the highest-bandwidth variant
     max_catchup_segments: int = 8
     download_concurrency: int = 3
     legacy_retry_seconds: float = 300.0
+    non_ts_threshold: int = 3  # consecutive non-TS segments before a source is incompatible
 
 
 @dataclass
@@ -152,7 +160,9 @@ class SessionHooks:
     headers_for: Callable[[str, str], Dict[str, str]]
     resolve_source: Callable[[str], Optional[SourceSpec]]
     report_failure: Callable[[str, Tuple, str], None]
-    report_incompatible: Callable[[str, Tuple, str], None]
+    # Returns True when another (compatible) source will be tried, so a cold
+    # start doesn't fall back to the legacy proxy while better sources exist.
+    report_incompatible: Callable[[str, Tuple, str], Optional[bool]]
     on_media_info: Optional[Callable[[str, Tuple, bool, Tuple], None]] = None
 
 
@@ -373,9 +383,15 @@ class ChannelSession:
         self.legacy_reason = ""
         self.legacy_since = 0.0
         self.last_access = time.monotonic()
+        # When the last segment was published (drives is_flowing and the
+        # failover catch-up gap). The stale timer has its own start so reporting
+        # a failure doesn't make the channel look like it is flowing again.
         self.last_new_segment_at = time.monotonic()
+        self._stale_timer_start = time.monotonic()
         self.consecutive_failures = 0
         self.consecutive_segment_failures = 0
+        self.consecutive_non_ts = 0
+        self.last_playlist_status: Optional[int] = None
         self.has_audio: Optional[bool] = None
         self.codec_signature: Optional[Tuple] = None
         self.stats: Dict[str, int] = {
@@ -388,9 +404,12 @@ class ChannelSession:
         self._ready = asyncio.Event()
         self._wake = asyncio.Event()
         self._stopped = False
-        self._last_report: Dict[Tuple, float] = {}
+        self._last_report: "OrderedDict[Tuple, float]" = OrderedDict()
         self._keys: "OrderedDict[str, bytes]" = OrderedDict()
         self._switch_gap: Optional[float] = None
+        self._reset_seen_at: Optional[int] = None  # upstream sequence reset awaiting confirmation
+        self._resolved_once = False
+        self._last_poll_error_log: Dict[str, float] = {}
 
     # -- public API ---------------------------------------------------------
 
@@ -423,10 +442,12 @@ class ChannelSession:
         within = self.cfg.idle_timeout if within is None else within
         return self.is_running and time.monotonic() - self.last_access < within
 
+    def _stale_after(self) -> float:
+        return max(3 * max(self.target_duration, 1), self.cfg.stale_min_seconds)
+
     def is_flowing(self) -> bool:
         """True while new segments keep arriving from the current source."""
-        stale_after = max(3 * max(self.target_duration, 1), self.cfg.stale_min_seconds)
-        return self.state == "live" and time.monotonic() - self.last_new_segment_at < stale_after
+        return self.state == "live" and time.monotonic() - self.last_new_segment_at < self._stale_after()
 
     async def wait_ready(self, timeout: float) -> bool:
         if self._ready.is_set():
@@ -504,7 +525,7 @@ class ChannelSession:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # never let one bad poll kill the session
-                    LOGGER.warning("Channel session poll failed channel=%s error=%s", self.channel_id, type(exc).__name__)
+                    self._log_poll_error(exc)
                     self._note_failure(f"poll error {type(exc).__name__}")
                 if self._stopped:
                     break
@@ -519,9 +540,25 @@ class ChannelSession:
                 self._release_memory()
                 self.state = "idle"
 
+    def _log_poll_error(self, exc: BaseException) -> None:
+        """One line per error type per minute (a stuck bug used to log twice a second)."""
+        name = type(exc).__name__
+        now = time.monotonic()
+        if now - self._last_poll_error_log.get(name, -1e9) < 60.0:
+            return
+        self._last_poll_error_log[name] = now
+        LOGGER.warning(
+            "Channel session poll failed channel=%s error=%s detail=%s",
+            self.channel_id, name, str(exc)[:160], exc_info=LOGGER.isEnabledFor(logging.DEBUG),
+        )
+
     def _poll_interval(self) -> float:
         if not self._ready.is_set():
-            return 0.5
+            if not self._resolved_once:
+                return 1.0  # nothing to play yet (placeholder/Multi-View spinning up)
+            if not self.target_duration:
+                return 0.5  # first playlist not parsed yet
+            return max(0.5, min(self.target_duration / 2.0, 2.0))
         if not self.target_duration:
             return 1.0
         return max(1.0, min(self.target_duration / 2.0, 4.0))
@@ -537,13 +574,18 @@ class ChannelSession:
         self.source = None
         self.media_url = None
         self.last_useq = None
+        # A new run means new clients: the sticky target duration can reset.
+        self.target_duration = 0
+        self._reset_seen_at = None
 
     # -- polling ------------------------------------------------------------
 
     async def _poll_once(self) -> None:
         spec = self.hooks.resolve_source(self.channel_id)
         if spec is None:
+            self._resolved_once = False
             return
+        self._resolved_once = True
         if self.source is None or spec.key != self.source.key:
             self._switch_source(spec)
         elif spec != self.source:
@@ -568,7 +610,7 @@ class ChannelSession:
             self._check_stale()
             return
         declared = playlist.target_duration or max(s.duration for s in segments)
-        self.target_duration = max(self.target_duration, int(math.ceil(declared - 1e-6)))
+        self._raise_target_duration(declared)
 
         if self.last_useq is None:
             new = segments[-self._live_edge_count(segments):]
@@ -579,11 +621,20 @@ class ChannelSession:
                     # A lagging CDN edge served an older copy; just wait.
                     self._check_stale()
                     return
+                if self._reset_seen_at is None:
+                    # One far-behind response is more often a stale edge than
+                    # a real encoder restart: wait for a second one before
+                    # jumping (which would replay old content).
+                    self._reset_seen_at = newest
+                    self._check_stale()
+                    return
+                self._reset_seen_at = None
                 LOGGER.info("Upstream media sequence reset channel=%s", self.channel_id)
                 self.normalizer.start_new_epoch()
                 self.pending_discontinuity = True
                 new = segments[-self.cfg.live_edge_segments:]
             else:
+                self._reset_seen_at = None
                 new = [s for s in segments if s.useq > self.last_useq]
                 if len(new) > self.cfg.max_catchup_segments:
                     # Far behind (e.g. after a stall): jump to the live edge.
@@ -634,7 +685,11 @@ class ChannelSession:
         self.pending_discontinuity = bool(self.window)
         self.consecutive_failures = 0
         self.consecutive_segment_failures = 0
-        self.last_new_segment_at = time.monotonic()
+        self.consecutive_non_ts = 0
+        self._reset_seen_at = None
+        # The new source gets a full stale window; last_new_segment_at keeps
+        # the real publish time (is_flowing stays False until it delivers).
+        self._stale_timer_start = time.monotonic()
         self._keys.clear()
 
     async def _load_media_playlist(self) -> Optional[MediaPlaylist]:
@@ -650,6 +705,7 @@ class ChannelSession:
         headers = self.hooks.headers_for(source.referer, source.origin)
         url = self.media_url or source.url
         result = await self.hooks.fetch(url, headers, self.cfg.max_playlist_bytes, self.cfg.playlist_timeout)
+        self.last_playlist_status = result.status if result is not None else None
         if result is None or result.status != 200:
             if self.media_url and result is not None and result.status in (401, 403, 404, 410):
                 self.media_url = None  # variant token expired: re-resolve the master next poll
@@ -674,12 +730,20 @@ class ChannelSession:
             self.media_url = result.url
         return parse_media_playlist(text, result.url)
 
+    def _segment_deadline(self, segment: UpstreamSegment) -> float:
+        return max(self.cfg.segment_deadline_min, self.cfg.segment_deadline_factor * max(segment.duration, 0.0))
+
     async def _ingest(self, new: List[UpstreamSegment]) -> None:
         semaphore = asyncio.Semaphore(self.cfg.download_concurrency)
 
         async def bounded(segment: UpstreamSegment) -> Optional[bytes]:
             async with semaphore:
-                return await self._download(segment)
+                # The deadline covers both download attempts, and starts once a
+                # download slot is free (queueing behind others isn't its fault).
+                try:
+                    return await asyncio.wait_for(self._download(segment), self._segment_deadline(segment))
+                except asyncio.TimeoutError:
+                    return None
 
         downloads = [asyncio.create_task(bounded(segment)) for segment in new]
         try:
@@ -691,18 +755,39 @@ class ChannelSession:
                 if segment.discontinuity:
                     self.normalizer.start_new_epoch()
                     self.pending_discontinuity = bool(self.window)
+                if data is not None and find_ts_start(data) < 0:
+                    # One odd segment (an HTML error page served as 200, an
+                    # ID3-only ad slate) is skipped like a failed download; only
+                    # a run of them makes the source incompatible.
+                    self.consecutive_non_ts += 1
+                    if self.consecutive_non_ts >= self.cfg.non_ts_threshold:
+                        self._incompatible("segments are not MPEG-TS")
+                        return
+                    data = None
+                elif data is not None:
+                    self.consecutive_non_ts = 0
                 if data is None:
                     self.stats["segment_failures"] += 1
                     self.consecutive_segment_failures += 1
                     self.pending_discontinuity = bool(self.window)
                     if self.consecutive_segment_failures >= self.cfg.fail_threshold:
                         self._report_failure("segments failing")
+                        return
+                    if self._is_stale():
+                        # Don't sit through the rest of a failing batch while
+                        # the player drains its buffer: fail over now.
+                        self._report_failure("playlist stale")
+                        return
                     continue
-                if find_ts_start(data) < 0:
-                    self._incompatible("segments are not MPEG-TS")
-                    return
                 result = await asyncio.to_thread(self.normalizer.normalize, data, segment.duration)
-                self._on_media_info(result.has_audio, result.codec_signature)
+                if getattr(result, "discontinuity", False):
+                    # The normalizer saw a timestamp jump inside the source
+                    # (encoder restart without #EXT-X-DISCONTINUITY) and re-based.
+                    self.pending_discontinuity = bool(self.window)
+                if result.normalized:
+                    # Pass-through (unparseable) segments say nothing reliable
+                    # about the source's audio/codecs.
+                    self._on_media_info(result.has_audio, result.codec_signature)
                 self._publish(SessionSegment(
                     seq=self.next_seq,
                     duration=segment.duration,
@@ -724,14 +809,19 @@ class ChannelSession:
             except Exception:  # hooks must not break ingestion
                 LOGGER.debug("on_media_info hook failed channel=%s", self.channel_id)
 
+    def _raise_target_duration(self, seconds: float) -> None:
+        """Sticky (a playlist's target must not shrink) but clamped."""
+        wanted = min(self.cfg.max_target_duration, int(math.ceil(max(seconds, 0.0) - 1e-6)))
+        self.target_duration = max(self.target_duration, wanted)
+
     def _publish(self, segment: SessionSegment) -> None:
         self.next_seq += 1
         self.pending_discontinuity = False
         self.consecutive_segment_failures = 0
-        self.last_new_segment_at = time.monotonic()
+        self.last_new_segment_at = self._stale_timer_start = time.monotonic()
         self.stats["segments"] += 1
         self.stats["bytes"] += len(segment.data)
-        self.target_duration = max(self.target_duration, int(math.ceil(segment.duration - 1e-6)))
+        self._raise_target_duration(segment.duration)
         self.window.append(segment)
         self._window_bytes += len(segment.data)
         self._trim_window()
@@ -753,11 +843,14 @@ class ChannelSession:
             self._window_bytes -= len(removed.data)
             if removed.discontinuity:
                 self.discontinuity_seq += 1
+            removed.removed_at = time.monotonic()
             self.grace[removed.seq] = removed
             self._grace_bytes += len(removed.data)
+        now = time.monotonic()
         while self.grace and (
             len(self.grace) > self.cfg.grace_segments
             or self._window_bytes + self._grace_bytes > self.cfg.max_session_bytes
+            or now - next(iter(self.grace.values())).removed_at > self.cfg.grace_seconds
         ):
             _, dropped = self.grace.popitem(last=False)
             self._grace_bytes -= len(dropped.data)
@@ -821,20 +914,33 @@ class ChannelSession:
         if self.consecutive_failures >= self.cfg.fail_threshold:
             self._report_failure(reason)
 
+    def _is_stale(self) -> bool:
+        return time.monotonic() - max(self.last_new_segment_at, self._stale_timer_start) > self._stale_after()
+
     def _check_stale(self) -> None:
-        stale_after = max(3 * max(self.target_duration, 1), self.cfg.stale_min_seconds)
-        if time.monotonic() - self.last_new_segment_at > stale_after:
+        if self._is_stale():
             self._report_failure("playlist stale")
+
+    def _note_report(self, key: Tuple, now: float) -> bool:
+        """Per-source cooldown; bounded (Multi-View runs add a key per run)."""
+        if now - self._last_report.get(key, -1e9) < self.cfg.failure_report_cooldown:
+            return False
+        self._last_report[key] = now
+        self._last_report.move_to_end(key)
+        while len(self._last_report) > 32:
+            self._last_report.popitem(last=False)
+        return True
 
     def _report_failure(self, reason: str) -> None:
         if self.source is None:
             return
         now = time.monotonic()
         key = self.source.key
-        if now - self._last_report.get(key, 0.0) < self.cfg.failure_report_cooldown:
+        if not self._note_report(key, now):
             return
-        self._last_report[key] = now
-        self.last_new_segment_at = now  # don't re-fire every poll while failover happens
+        if reason == "playlist unavailable" and self.last_playlist_status in (401, 403):
+            reason = "playlist forbidden"  # expired token: main refreshes it
+        self._stale_timer_start = now  # don't re-fire every poll while failover happens
         self.consecutive_failures = 0
         self.stats["failover_requests"] += 1
         LOGGER.warning("Channel session requesting failover channel=%s reason=%s", self.channel_id, reason)
@@ -846,8 +952,14 @@ class ChannelSession:
     def _incompatible(self, reason: str) -> None:
         if self.source is None:
             return
+        key = self.source.key
         if not self.window:
-            # Nothing served yet: let this viewer use the legacy passthrough proxy.
+            # Nothing served yet. Prefer another, compatible source; only use
+            # the legacy passthrough proxy when there is none.
+            if self._report_incompatible(key, reason):
+                LOGGER.info("Channel session skipping incompatible source channel=%s reason=%s", self.channel_id, reason)
+                self.source = None  # re-resolve the (new) active source next poll
+                return
             LOGGER.info("Channel session using legacy proxy channel=%s reason=%s", self.channel_id, reason)
             self.state = "legacy"
             self.legacy_reason = reason
@@ -855,16 +967,17 @@ class ChannelSession:
             self._stopped = True
             self._ready.set()
             return
-        key = self.source.key
-        now = time.monotonic()
-        if now - self._last_report.get(key, 0.0) < self.cfg.failure_report_cooldown:
+        if not self._note_report(key, time.monotonic()):
             return
-        self._last_report[key] = now
         LOGGER.warning("Channel session source incompatible channel=%s reason=%s", self.channel_id, reason)
+        self._report_incompatible(key, reason)
+
+    def _report_incompatible(self, key: Tuple, reason: str) -> bool:
         try:
-            self.hooks.report_incompatible(self.channel_id, key, reason)
+            return bool(self.hooks.report_incompatible(self.channel_id, key, reason))
         except Exception:
             LOGGER.exception("report_incompatible hook failed channel=%s", self.channel_id)
+            return False
 
 
 def _read_text_file(path: str, max_bytes: int) -> Optional[str]:
