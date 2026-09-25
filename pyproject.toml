@@ -1,0 +1,140 @@
+# Repo-root pyproject.toml: tooling config only (ruff, mypy).
+#
+# Deliberately NOT placed at Jellyball/pyproject.toml and deliberately has no
+# [project] table:
+#   - PyInstaller builds via Jellyball/jellyball.spec, invoked by
+#     Jellyball/build-installer.ps1 (which `Set-Location`s into Jellyball/ and
+#     runs `pip install -r requirements-build.txt` + `pyinstaller jellyball.spec`).
+#     A pyproject.toml with a [project] table sitting in that same directory
+#     risks pip/setuptools treating Jellyball/ as an installable package (e.g.
+#     if anything ever runs `pip install .` there); keeping this file out of
+#     Jellyball/ and free of [project] avoids that entirely.
+#   - The Docker build context is `./Jellyball` (see docker-compose.yml /
+#     Dockerfile `COPY . .`), so a root-level pyproject.toml is never copied
+#     into the image - no need to add it to Jellyball/.dockerignore.
+#   - ruff/mypy still work fine run from the repo root with `Jellyball` as an
+#     explicit target (see .github/workflows/ci.yml), or from within Jellyball/
+#     since both tools search upward for pyproject.toml.
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+# Conservative rule set: every code below has ZERO violations against the
+# current Jellyball/ source as of this file's addition (ruff 0.16.9). Nothing
+# in source was changed to make that true - these were chosen because they
+# already pass. See the commented list further down for rules that are close
+# but currently have violations; they're left disabled on purpose.
+select = [
+    "E9",   # E901/E902/E999 - syntax errors, IndentationError, IOError
+    "F63",  # F631-F634 - assert-on-tuple, %-format and comparison misuse
+    "F7",   # F701-F707 - break/continue/return/yield outside proper context
+    "F82",  # F821/F822 - undefined name, undefined name in __all__
+    "F811", # redefinition of unused name from line N
+    "B006", # mutable default argument (e.g. `def f(x=[])`)
+    "B008", # function call in default argument
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection style (`Depends(...)`, `Form(...)`, etc. as a
+# parameter default) is exactly what B008 exists to catch elsewhere, but it's
+# the correct and required pattern for FastAPI route signatures. Without this,
+# B008 flags main.py's `Depends(security)` / `Form(None)` defaults, which are
+# not bugs. This keeps B008 enabled (see `select` above) with zero violations
+# instead of leaving it disabled outright.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Form",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.File",
+]
+
+# --- To enable after a cleanup pass -----------------------------------------
+# Rules below are NOT selected because the current Jellyball/ source has real
+# violations under them. Counts taken by running, from the repo root:
+#   ruff check --select <CODE> --statistics Jellyball
+# against commit a698249 (ruff 0.16.9, this file's target-version/line-length).
+# Do not enable a line until its violations are fixed (or explicitly narrowed
+# with per-line `# noqa: CODE`), or CI will start failing on existing code.
+#
+# A handful of violations (plausible to clean up in one pass):
+#   F401     unused-import                             6
+#   F841     unused-variable                            5
+#   B905     zip-without-explicit-strict                5
+#   E701     multiple-statements-on-one-line-colon      5
+#   E741     ambiguous-variable-name                    2
+#   B904     raise-without-from-inside-except           2
+#   B023     function-uses-loop-variable                2
+#   B007     unused-loop-control-variable                1
+#   C408     unnecessary-collection-call                 1
+#   C414     unnecessary-double-cast-or-process          1
+#   C416     unnecessary-comprehension                   1
+#   C420     unnecessary-dict-comprehension-for-iterable  2
+#   N801     invalid-class-name                          4
+#   N802     invalid-function-name                       2
+#   N806     non-lowercase-variable-in-function           4
+#   N818     error-suffix-on-exception-name               1
+#   SIM102   collapsible-if                               3
+#   SIM103   needless-bool                                3
+#   SIM109   compare-with-tuple                           1
+#   SIM112   uncapitalized-environment-variables          3
+#   SIM115   open-file-with-context-handler                2
+#   SIM117   multiple-with-statements                     1
+#   ERA001   commented-out-code                           1
+#   UP012    unnecessary-encode-utf8                       2
+#   PLW1510  subprocess-run-without-check                  3
+#
+# Larger/systemic (real cleanup or an intentional pattern worth discussing
+# first - e.g. E402's 29 hits are main.py deliberately running startup/env
+# bootstrap code before some imports):
+#   W291     trailing-whitespace                          9
+#   W293     blank-line-with-whitespace                   17
+#   I001     unsorted-imports                              16
+#   SIM105   suppressible-exception                        16
+#   E402     module-import-not-at-top-of-file               29
+#   UP037    quoted-annotation                              7
+#   UP041    timeout-error-alias                            20
+#   UP017    datetime-timezone-utc                          26
+#   UP035    deprecated-import                              30
+#   UP045    non-pep604-annotation-optional                  157
+#   UP006    non-pep585-annotation                           327
+#   ARG005   unused-lambda-argument                          2
+#   ARG002   unused-method-argument                          25
+#   ARG001   unused-function-argument                        51
+#   PLC0415  import-outside-top-level                        48
+#   PLR2004  magic-value-comparison                          79
+#   PLR0124  comparison-with-itself                           1
+#   PLR0911  too-many-return-statements                      11
+#   PLR0912  too-many-branches                               12
+#   PLR0913  too-many-arguments                              10
+#   PLR0915  too-many-statements                             12
+#   PLR0917  too-many-positional-arguments                    8
+#   PLR1711  useless-return                                   1
+#   PLR1714  repeated-equality-comparison                     1
+#   PLR5501  collapsible-else-if                              1
+#   PLW0108  unnecessary-lambda                               6
+#   PLW0603  global-statement                                55
+#   PLW2901  redefined-loop-name                              3
+#
+# Not selected on purpose (subjective/noisy for this codebase, not a
+# violation-count question): E501 line-too-long (293 - default 88-col limit
+# doesn't apply once line-length=120 is set here, but a chunk of lines still
+# run past 120 in main.py; revisit once that's trimmed down).
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = false
+# Lenient on purpose: Jellyball's source has no type annotations to speak of
+# yet, so this section exists as a starting point for opting in gradually. It
+# is intentionally NOT wired into .github/workflows/ci.yml - `mypy Jellyball`
+# currently reports errors (untyped/duck-typed FastAPI + sqlite3 code, a lot
+# of `Any`-shaped dict state) and nothing in source was changed to fix that.
+# Add the CI step once a `mypy Jellyball` run is clean or narrowed with
+# per-module overrides.
+warn_unused_configs = true

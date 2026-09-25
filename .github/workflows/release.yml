@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ffmpeg_bundle_path:
+        description: >-
+          Optional path (on the runner) to an ffmpeg.exe to bundle for
+          Multi-View (sets FFMPEG_BUNDLE_PATH). Leave blank to build without
+          bundling one - Multi-View then requires a separate ffmpeg install
+          at runtime (see README).
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-installer:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # build-installer.ps1 creates its own .venv-build and installs
+      # requirements-build.txt (runtime deps + PyInstaller + pywin32) itself;
+      # this step only needs to make Inno Setup's ISCC.exe available.
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "choco install failed, falling back to winget"
+            winget install --id JRSoftware.InnoSetup --silent --accept-package-agreements --accept-source-agreements
+          }
+
+      - name: Build installer
+        working-directory: Jellyball
+        shell: pwsh
+        env:
+          # Optional: bundle a portable ffmpeg.exe for Multi-View. Blank on a
+          # tag push (no manual input); build-installer.ps1 / jellyball.spec
+          # then fall back to their own default lookup and build without one.
+          FFMPEG_BUNDLE_PATH: ${{ github.event.inputs.ffmpeg_bundle_path }}
+          # ---------------------------------------------------------------
+          # Signing passthrough only - build-installer.ps1 does not sign
+          # anything yet. These are exposed so a signing step (traditional
+          # cert-based signtool via SIGN_CERT_THUMBPRINT, or Azure Trusted
+          # Signing via the AZURE_TRUSTED_SIGNING_*/AZURE_* vars) can be
+          # added to build-installer.ps1 later without touching this
+          # workflow. Any secret left unset in the repo/environment simply
+          # comes through empty, so an unsigned build is unaffected.
+          # ---------------------------------------------------------------
+          SIGN_CERT_THUMBPRINT: ${{ secrets.SIGN_CERT_THUMBPRINT }}
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+          AZURE_TRUSTED_SIGNING_CERT_PROFILE_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE_NAME }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: ./build-installer.ps1
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JellyballSetup
+          path: Jellyball/installer/Output/JellyballSetup-*.exe
+          if-no-files-found: error
+
+      - name: Attach installer to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Jellyball/installer/Output/JellyballSetup-*.exe
+          fail_on_unmatched_files: true
