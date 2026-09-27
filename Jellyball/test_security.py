@@ -12,6 +12,7 @@ from unittest.mock import patch
 import httpx
 
 import main
+import security
 import state
 import config
 
@@ -47,7 +48,7 @@ class TempDbMixin:
 
 class CsrfTests(unittest.TestCase):
     def test_cross_site_write_detection(self):
-        detect = main._is_cross_site_write
+        detect = security._is_cross_site_write
         own = {"host": "127.0.0.1:8000"}
         self.assertTrue(detect("POST", {**own, "origin": "https://evil.example"}, "http"))
         self.assertTrue(detect("POST", {**own, "origin": "null"}, "http"))
@@ -81,7 +82,7 @@ class DashboardAuthTests(unittest.TestCase):
             async with _client(host) as client:
                 return await client.get("/api/ffmpeg-status")
 
-        with patch.object(main, "DASHBOARD_PASSWORD", ""):
+        with patch.object(security, "DASHBOARD_PASSWORD", ""):
             self.assertEqual(asyncio.run(exercise("evil.example:8000")).status_code, 403)
             self.assertNotEqual(asyncio.run(exercise("127.0.0.1:8000")).status_code, 403)
             self.assertNotEqual(asyncio.run(exercise("localhost:8000")).status_code, 403)
@@ -90,46 +91,46 @@ class DashboardAuthTests(unittest.TestCase):
         tmpdir = Path(tempfile.mkdtemp())
         try:
             password_file = tmpdir / "dashboard-password.txt"
-            with patch.object(main, "DASHBOARD_PASSWORD", ""), \
-                    patch.object(main, "DASHBOARD_AUTH_MODE", "open"), \
-                    patch.object(main, "DASHBOARD_PASSWORD_FILE", password_file):
-                main._configure_dashboard_auth("127.0.0.1")
-                self.assertEqual(main.DASHBOARD_PASSWORD, "")
-                self.assertEqual(main.DASHBOARD_AUTH_MODE, "open")
+            with patch.object(security, "DASHBOARD_PASSWORD", ""), \
+                    patch.object(security, "DASHBOARD_AUTH_MODE", "open"), \
+                    patch.object(security, "DASHBOARD_PASSWORD_FILE", password_file):
+                security._configure_dashboard_auth("127.0.0.1")
+                self.assertEqual(security.DASHBOARD_PASSWORD, "")
+                self.assertEqual(security.DASHBOARD_AUTH_MODE, "open")
 
-                main._configure_dashboard_auth("0.0.0.0")
-                generated = main.DASHBOARD_PASSWORD
+                security._configure_dashboard_auth("0.0.0.0")
+                generated = security.DASHBOARD_PASSWORD
                 self.assertGreaterEqual(len(generated), 12)
-                self.assertEqual(main.DASHBOARD_AUTH_MODE, "generated")
+                self.assertEqual(security.DASHBOARD_AUTH_MODE, "generated")
                 self.assertEqual(password_file.read_text(encoding="utf-8").strip(), generated)
 
                 # A restart reuses the saved password instead of rotating it.
-                main.DASHBOARD_PASSWORD = ""
-                main._configure_dashboard_auth("0.0.0.0")
-                self.assertEqual(main.DASHBOARD_PASSWORD, generated)
+                security.DASHBOARD_PASSWORD = ""
+                security._configure_dashboard_auth("0.0.0.0")
+                self.assertEqual(security.DASHBOARD_PASSWORD, generated)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_configured_password_is_never_replaced(self):
-        with patch.object(main, "DASHBOARD_PASSWORD", "hunter2"), \
-                patch.object(main, "DASHBOARD_AUTH_MODE", "configured"):
-            main._configure_dashboard_auth("0.0.0.0")
-            self.assertEqual(main.DASHBOARD_PASSWORD, "hunter2")
+        with patch.object(security, "DASHBOARD_PASSWORD", "hunter2"), \
+                patch.object(security, "DASHBOARD_AUTH_MODE", "configured"):
+            security._configure_dashboard_auth("0.0.0.0")
+            self.assertEqual(security.DASHBOARD_PASSWORD, "hunter2")
 
     def test_repeated_failures_lock_out_the_client(self):
         async def exercise(password):
             async with _client() as client:
                 return await client.get("/api/ffmpeg-status", auth=("admin", password))
 
-        with patch.object(main, "DASHBOARD_PASSWORD", "correct-horse"), \
-                patch.object(main, "DASHBOARD_USERNAME", "admin"), \
-                patch.dict(main._AUTH_FAILURES, clear=True), \
-                patch.dict(main._VERIFIED_CREDENTIALS, clear=True):
-            for _ in range(main.AUTH_FAILURE_LIMIT):
+        with patch.object(security, "DASHBOARD_PASSWORD", "correct-horse"), \
+                patch.object(security, "DASHBOARD_USERNAME", "admin"), \
+                patch.dict(security._AUTH_FAILURES, clear=True), \
+                patch.dict(security._VERIFIED_CREDENTIALS, clear=True):
+            for _ in range(security.AUTH_FAILURE_LIMIT):
                 self.assertEqual(asyncio.run(exercise("wrong")).status_code, 401)
             # Locked: even the right password is refused for a while.
             self.assertEqual(asyncio.run(exercise("correct-horse")).status_code, 429)
-            main._AUTH_FAILURES.clear()
+            security._AUTH_FAILURES.clear()
             self.assertEqual(asyncio.run(exercise("correct-horse")).status_code, 200)
 
 
@@ -150,7 +151,7 @@ class SecretSettingsTests(TempDbMixin, unittest.TestCase):
             async with _client() as client:
                 return await client.get("/?tab=alerts")
 
-        with patch.object(main, "DASHBOARD_PASSWORD", ""):
+        with patch.object(security, "DASHBOARD_PASSWORD", ""):
             response = asyncio.run(exercise())
         self.assertEqual(response.status_code, 200)
         body = response.text
@@ -290,7 +291,7 @@ class DashboardRenderTests(TempDbMixin, unittest.TestCase):
             async with _client() as client:
                 return await client.get("/?tab=channels")
 
-        with patch.object(main, "DASHBOARD_PASSWORD", ""),                 patch.object(main, "get_catalog_entries", return_value=[]):
+        with patch.object(security, "DASHBOARD_PASSWORD", ""),                 patch.object(main, "get_catalog_entries", return_value=[]):
             response = asyncio.run(exercise())
         self.assertEqual(response.status_code, 200)
         body = response.text
@@ -335,7 +336,7 @@ class DashboardRenderTests(TempDbMixin, unittest.TestCase):
             async with _client() as client:
                 return await client.get(f"/?tab={tab}")
 
-        with patch.object(main, "DASHBOARD_PASSWORD", ""), \
+        with patch.object(security, "DASHBOARD_PASSWORD", ""), \
                 patch.object(main, "get_catalog_entries", return_value=[]):
             for tab in ["channels", "metrics", "performance", "playback", "alerts", "logs"]:
                 response = asyncio.run(exercise(tab))
@@ -351,7 +352,7 @@ class DashboardRenderTests(TempDbMixin, unittest.TestCase):
 
         original = main.IDLE_HEALTH_INTERVAL
         try:
-            with patch.object(main, "DASHBOARD_PASSWORD", ""):
+            with patch.object(security, "DASHBOARD_PASSWORD", ""):
                 response = asyncio.run(post({"IDLE_HEALTH_INTERVAL": "45", "SESSION_STALE_SECONDS": "9999"}))
                 self.assertEqual(response.status_code, 303)
                 self.assertEqual(main.IDLE_HEALTH_INTERVAL, 45.0)
@@ -378,7 +379,7 @@ class ObservabilityEndpointTests(unittest.TestCase):
             async with _client() as client:
                 return await client.get("/api/sessions"), await client.get("/metrics"), await client.get("/api/status")
 
-        with patch.object(main, "DASHBOARD_PASSWORD", ""):
+        with patch.object(security, "DASHBOARD_PASSWORD", ""):
             sessions, metrics, status = asyncio.run(exercise())
         self.assertEqual(sessions.status_code, 200)
         self.assertIn("sessions", sessions.json())
@@ -408,7 +409,7 @@ class RelaySigningTests(unittest.TestCase):
                                       "https://site.example.test/", "http://127.0.0.1:8000")
         uri = [line for line in rewritten.splitlines() if line and not line.startswith("#")][0]
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(uri).query)
-        self.assertTrue(main._relay_signature_ok(
+        self.assertTrue(security._relay_signature_ok(
             query["url"][0], query["ref"][0], query.get("org", [""])[0], query["sig"][0]))
 
     def test_unsigned_relay_requests_are_refused(self):

@@ -8,6 +8,7 @@ import httpx
 from starlette.requests import Request
 
 import main
+import security
 import state
 
 
@@ -34,7 +35,7 @@ class LegacyRelayTests(unittest.TestCase):
                         patch.object(main, "PREFETCH_CHUNK_COUNT", 0), \
                         patch.object(main, "_open_upstream_media", side_effect=boom):
                     with self.assertRaises(RuntimeError):
-                        await main.proxy_chunk(_request(), url=url, sig=main._relay_signature(url))
+                        await main.proxy_chunk(_request(), url=url, sig=security._relay_signature(url))
             finally:
                 await client.aclose()
 
@@ -53,7 +54,7 @@ class LegacyRelayTests(unittest.TestCase):
                 with patch.object(state, "SHARED_HTTP_CLIENT", client), \
                         patch.object(main, "PREFETCH_CHUNK_COUNT", 0), \
                         patch.object(main, "validate_http_url_async", side_effect=lambda u, **k: u):
-                    return await main.proxy_chunk(_request(), url=url, sig=main._relay_signature(url))
+                    return await main.proxy_chunk(_request(), url=url, sig=security._relay_signature(url))
             finally:
                 await client.aclose()
 

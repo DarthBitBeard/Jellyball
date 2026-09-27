@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import security
 
 
 class CandidateMergeTests(unittest.TestCase):
@@ -64,18 +65,18 @@ class HealthCheckOriginTests(unittest.IsolatedAsyncioTestCase):
 
 class DashboardPasswordTests(unittest.TestCase):
     def test_plain_password_matches(self):
-        self.assertTrue(main._dashboard_password_matches("secret", "secret"))
-        self.assertFalse(main._dashboard_password_matches("nope", "secret"))
+        self.assertTrue(security._dashboard_password_matches("secret", "secret"))
+        self.assertFalse(security._dashboard_password_matches("nope", "secret"))
 
     def test_non_ascii_password_does_not_raise(self):
-        self.assertTrue(main._dashboard_password_matches("pässwörd", "pässwörd"))
-        self.assertFalse(main._dashboard_password_matches("pässwörd", "password"))
+        self.assertTrue(security._dashboard_password_matches("pässwörd", "pässwörd"))
+        self.assertFalse(security._dashboard_password_matches("pässwörd", "password"))
 
-    @unittest.skipIf(main._bcrypt is None, "bcrypt not installed")
+    @unittest.skipIf(security._bcrypt is None, "bcrypt not installed")
     def test_bcrypt_hash_matches(self):
-        hashed = main._bcrypt.hashpw(b"hunter2", main._bcrypt.gensalt(rounds=4)).decode()
-        self.assertTrue(main._dashboard_password_matches("hunter2", hashed))
-        self.assertFalse(main._dashboard_password_matches("hunter3", hashed))
+        hashed = security._bcrypt.hashpw(b"hunter2", security._bcrypt.gensalt(rounds=4)).decode()
+        self.assertTrue(security._dashboard_password_matches("hunter2", hashed))
+        self.assertFalse(security._dashboard_password_matches("hunter3", hashed))
 
 
 class GuideRefreshDebounceTests(unittest.IsolatedAsyncioTestCase):

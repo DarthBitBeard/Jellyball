@@ -33,6 +33,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import security
 import threading
 import stream_extractor
 
@@ -219,7 +220,7 @@ class ProviderSettingsRouteTests(_TempDbCase, _ProviderOverrideCase):
         _TempDbCase.setUp(self)
         _ProviderOverrideCase.setUp(self)
         main.init_db()
-        self._password_patch = patch.object(main, "DASHBOARD_PASSWORD", "")
+        self._password_patch = patch.object(security, "DASHBOARD_PASSWORD", "")
         self._password_patch.start()
         self._provider = next(
             p for p in main.ACTIVE_PROVIDERS if isinstance(p, main.HtmlAggregatorScraper)

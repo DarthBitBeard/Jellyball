@@ -3,15 +3,12 @@ import config  # noqa: F401
 
 import asyncio
 import hashlib
-import hmac
-import ipaddress
 import json
 import logging
 import math
 import os
 import random
 import re
-import secrets
 import shutil
 import socket
 import sqlite3
@@ -29,7 +26,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 
 import httpx
-from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -38,7 +35,6 @@ from fastapi.responses import (
     Response,
     StreamingResponse,
 )
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from playwright.async_api import async_playwright, Browser, Page, Playwright
@@ -71,6 +67,14 @@ from state import (
     _spawn_background_task,
     PLACEHOLDER_SESSION_ID,
     stream_state,
+)
+import security
+from security import (
+    _configure_dashboard_auth,
+    _relay_signature,
+    _relay_signature_ok,
+    CsrfOriginMiddleware,
+    verify_dashboard_auth,
 )
 from hls_session import FetchResult, SessionConfig, SessionHooks, SessionRegistry, SourceSpec
 from network_safety import bounded_float, bounded_int, validate_http_url, validate_http_url_async
@@ -206,173 +210,6 @@ except ImportError:
             return int(SequenceMatcher(None, t1, t2).ratio() * 100)
     fuzz = FuzzFallback()
 
-# bcrypt is used directly: passlib 1.7.4 is unmaintained and its bcrypt backend
-# self-test fails against bcrypt>=4.1/5.x, which made hashed DASHBOARD_PASSWORD
-# values silently fall back to a plain-text comparison that could never match.
-try:
-    import bcrypt as _bcrypt
-except ImportError:
-    _bcrypt = None
-    if os.getenv("DASHBOARD_PASSWORD", "").startswith(("$2a$", "$2b$", "$2y$")):
-        LOGGER.error("bcrypt is not installed; hashed dashboard passwords cannot be verified")
-
-_BCRYPT_HASH_PREFIXES = ("$2a$", "$2b$", "$2y$")
-# bcrypt verification deliberately costs ~100-300ms, and the dashboard polls
-# several authenticated API routes; remember recent successful logins briefly.
-_VERIFIED_CREDENTIALS: "OrderedDict[str, float]" = OrderedDict()
-_VERIFIED_CREDENTIALS_TTL = 600.0
-_VERIFIED_CREDENTIALS_MAX = 32
-
-
-def _dashboard_password_matches(candidate: str, configured: str) -> bool:
-    if configured.startswith(_BCRYPT_HASH_PREFIXES):
-        if _bcrypt is None:
-            return False
-        try:
-            # bcrypt only uses the first 72 bytes; bcrypt>=5 raises instead of truncating.
-            return _bcrypt.checkpw(candidate.encode("utf-8")[:72], configured.encode("utf-8"))
-        except ValueError:
-            return False
-    return secrets.compare_digest(candidate.encode("utf-8"), configured.encode("utf-8"))
-
-DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "admin")
-DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
-DASHBOARD_PASSWORD_FILE = DATA_DIR / "dashboard-password.txt"
-# "configured" (DASHBOARD_PASSWORD), "generated" (network bind without one), or
-# "open" (no password; only allowed while listening on loopback).
-DASHBOARD_AUTH_MODE = "configured" if DASHBOARD_PASSWORD else "open"
-security = HTTPBasic(auto_error=False)
-
-_LOOPBACK_HOSTNAMES = {"localhost", "127.0.0.1", "::1", "[::1]"}
-
-
-def _is_loopback_host(host: str) -> bool:
-    host = (host or "").strip().lower().strip("[]")
-    if host in _LOOPBACK_HOSTNAMES:
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-def _configure_dashboard_auth(bind_host: str) -> None:
-    """A dashboard with no password may only listen on loopback. Listening on the
-    network (Docker's 0.0.0.0, a LAN bind) without DASHBOARD_PASSWORD gets a
-    random password, generated once and kept in the data directory."""
-    global DASHBOARD_PASSWORD, DASHBOARD_AUTH_MODE
-    if DASHBOARD_PASSWORD or _is_loopback_host(bind_host):
-        return
-    generated = ""
-    try:
-        generated = DASHBOARD_PASSWORD_FILE.read_text(encoding="utf-8").strip()
-    except OSError:
-        pass
-    if not generated:
-        generated = secrets.token_urlsafe(12)
-        try:
-            DASHBOARD_PASSWORD_FILE.write_text(generated + "\n", encoding="utf-8")
-        except OSError as exc:
-            _log_failure("save generated dashboard password", exc)
-        # Logged once, on the run that creates it (docker logs / the console);
-        # later runs only point at the file.
-        LOGGER.warning(
-            "Dashboard listens on %s with no DASHBOARD_PASSWORD: generated one. user=%s password=%s (saved to %s)",
-            bind_host, DASHBOARD_USERNAME, generated, DASHBOARD_PASSWORD_FILE,
-        )
-    else:
-        LOGGER.warning(
-            "Dashboard listens on %s with no DASHBOARD_PASSWORD: using the generated password in %s (user=%s)",
-            bind_host, DASHBOARD_PASSWORD_FILE, DASHBOARD_USERNAME,
-        )
-    DASHBOARD_PASSWORD = generated
-    DASHBOARD_AUTH_MODE = "generated"
-
-
-def _request_host_name(request: Request) -> str:
-    host = request.headers.get("host", "")
-    if host.startswith("["):
-        return host[1:].split("]", 1)[0]
-    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
-
-
-# Failed Basic-auth attempts per client address: (failures, window start, locked until).
-_AUTH_FAILURES: "OrderedDict[str, List[float]]" = OrderedDict()
-AUTH_FAILURE_LIMIT = 8
-AUTH_FAILURE_WINDOW = 300.0
-AUTH_LOCKOUT_SECONDS = 300.0
-
-
-def _auth_client_key(request: Optional[Request]) -> str:
-    client = getattr(request, "client", None) if request is not None else None
-    return getattr(client, "host", "") or "unknown"
-
-
-def _auth_locked_out(client_key: str, now: float) -> bool:
-    entry = _AUTH_FAILURES.get(client_key)
-    return bool(entry and entry[2] > now)
-
-
-def _record_auth_failure(client_key: str, now: float) -> None:
-    entry = _AUTH_FAILURES.get(client_key)
-    if entry is None or now - entry[1] > AUTH_FAILURE_WINDOW:
-        entry = [0.0, now, 0.0]
-    entry[0] += 1
-    if entry[0] >= AUTH_FAILURE_LIMIT:
-        entry[2] = now + AUTH_LOCKOUT_SECONDS
-        LOGGER.warning("Dashboard login locked for %.0fs after %d failures client=%s",
-                       AUTH_LOCKOUT_SECONDS, int(entry[0]), client_key)
-    _AUTH_FAILURES[client_key] = entry
-    _AUTH_FAILURES.move_to_end(client_key)
-    while len(_AUTH_FAILURES) > 256:
-        _AUTH_FAILURES.popitem(last=False)
-
-
-def verify_dashboard_auth(request: Request = None, credentials: Optional[HTTPBasicCredentials] = Depends(security)):
-    if not DASHBOARD_PASSWORD:
-        # Open access is only ever served on a loopback bind. Also require a
-        # loopback Host header, so a DNS-rebinding page (evil.example resolving
-        # to 127.0.0.1) can't drive the dashboard from the user's browser.
-        if request is not None and not _is_loopback_host(_request_host_name(request)) \
-                and _request_host_name(request).lower() != socket.gethostname().lower():
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Dashboard is local-only")
-        return True
-    now = time.monotonic()
-    client_key = _auth_client_key(request)
-    if _auth_locked_out(client_key, now):
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many failed logins")
-    if not credentials:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-
-    # compare_digest on str raises TypeError for non-ASCII input; compare bytes.
-    is_user_ok = secrets.compare_digest(credentials.username.encode("utf-8"), DASHBOARD_USERNAME.encode("utf-8"))
-    cache_key = hashlib.sha256(
-        f"{credentials.username}\0{credentials.password}\0{DASHBOARD_PASSWORD}".encode("utf-8")
-    ).hexdigest()
-    verified_at = _VERIFIED_CREDENTIALS.get(cache_key)
-    if verified_at is not None and now - verified_at < _VERIFIED_CREDENTIALS_TTL:
-        is_pass_ok = True
-    else:
-        is_pass_ok = _dashboard_password_matches(credentials.password, DASHBOARD_PASSWORD)
-        if is_pass_ok and is_user_ok:
-            _VERIFIED_CREDENTIALS[cache_key] = now
-            _VERIFIED_CREDENTIALS.move_to_end(cache_key)
-            while len(_VERIFIED_CREDENTIALS) > _VERIFIED_CREDENTIALS_MAX:
-                _VERIFIED_CREDENTIALS.popitem(last=False)
-
-    if not (is_user_ok and is_pass_ok):
-        _record_auth_failure(client_key, now)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    _AUTH_FAILURES.pop(client_key, None)
-    return True
 
 def _migrate_add_team_columns(conn: sqlite3.Connection) -> None:
     """Migration 1: add columns to `teams` that older releases lacked.
@@ -4133,60 +3970,6 @@ class RequestDiagnosticsMiddleware:
             await response(scope, receive, send)
 
 
-_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-_DEFAULT_PORTS = {"http": "80", "https": "443"}
-
-
-def _normalized_netloc(scheme: str, netloc: str) -> str:
-    netloc = (netloc or "").strip().lower()
-    default_port = _DEFAULT_PORTS.get((scheme or "").lower())
-    if default_port and netloc.endswith(f":{default_port}") and not netloc.endswith("]"):
-        netloc = netloc[: -(len(default_port) + 1)]
-    return netloc
-
-
-def _is_cross_site_write(method: str, headers: Dict[str, str], scheme: str) -> bool:
-    """True for a state-changing request a browser sent from another site.
-
-    Basic-auth credentials are replayed by the browser on cross-site form POSTs,
-    so every dashboard write would otherwise be forgeable from any web page.
-    Browsers always send Origin (or at least Referer) on such requests;
-    non-browser clients (curl, scripts) send neither and aren't a CSRF vector."""
-    if method not in _UNSAFE_METHODS:
-        return False
-    allowed = {
-        _normalized_netloc(scheme, headers.get("host", "")),
-        _normalized_netloc(scheme, headers.get("x-forwarded-host", "").split(",")[0]),
-    } - {""}
-    origin = headers.get("origin")
-    source = origin if origin is not None else headers.get("referer")
-    if source is None:
-        return False
-    if source.strip().lower() == "null":
-        return True
-    parsed = urllib.parse.urlsplit(source)
-    if not parsed.netloc:
-        return True
-    return _normalized_netloc(parsed.scheme, parsed.netloc) not in allowed
-
-
-class CsrfOriginMiddleware:
-    """Pure ASGI: reject cross-site state-changing requests (see _is_cross_site_write)."""
-
-    def __init__(self, asgi_app) -> None:
-        self.app = asgi_app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and scope.get("method") in _UNSAFE_METHODS:
-            headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
-            if _is_cross_site_write(scope["method"], headers, scope.get("scheme", "http")):
-                LOGGER.warning("Rejected cross-site request method=%s path=%s", scope.get("method"), scope.get("path"))
-                response = PlainTextResponse("Cross-site request rejected", status_code=403)
-                await response(scope, receive, send)
-                return
-        await self.app(scope, receive, send)
-
-
 app = FastAPI(title="Jellyfin Sports Proxy - Titan Engine", version=__version__, lifespan=lifespan)
 app.add_middleware(CsrfOriginMiddleware)
 app.add_middleware(RequestDiagnosticsMiddleware)
@@ -4318,40 +4101,6 @@ def _chunk_route_for_url(url: str) -> str:
     if path.endswith((".vtt", ".webvtt")):
         return "/chunk.vtt"
     return "/chunk.ts"
-
-
-def _load_relay_signing_key() -> bytes:
-    """Key for signing legacy relay URLs, kept in the data dir so URLs handed to
-    a player before a restart stay valid after it."""
-    key_file = DATA_DIR / "relay-signing.key"
-    try:
-        key = key_file.read_bytes()
-        if len(key) >= 32:
-            return key[:32]
-    except OSError:
-        pass
-    key = secrets.token_bytes(32)
-    try:
-        key_file.write_bytes(key)
-    except OSError as exc:
-        _log_failure("save relay signing key", exc)
-    return key
-
-
-_RELAY_SIGNING_KEY = _load_relay_signing_key()
-
-
-def _relay_signature(url: str, ref: str = "", org: str = "") -> str:
-    """/substream.m3u8, /chunk* and /resource fetch whatever URL they are given
-    and must stay unauthenticated (Jellyfin's ffmpeg calls them), so they only
-    serve URLs this server wrote into a playlist itself: without a signature
-    they were an open fetch relay for anyone who could reach the port."""
-    message = f"{url}\n{ref or ''}\n{org or ''}".encode("utf-8")
-    return hmac.new(_RELAY_SIGNING_KEY, message, hashlib.sha256).hexdigest()[:32]
-
-
-def _relay_signature_ok(url: str, ref: str, org: str, sig: str) -> bool:
-    return bool(sig) and hmac.compare_digest(str(sig), _relay_signature(url, ref, org))
 
 
 _MAX_STORED_MANIFESTS = 50
@@ -8074,10 +7823,10 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         badge_color = "var(--danger)" if ev_type in ["exhausted", "danger"] else ("var(--warning)" if ev_type == "failover" else "var(--success)")
         events.append({"ts": ts, "team_id": team_id, "prov": prov, "ev_type": ev_type, "details": details, "badge_color": badge_color})
 
-    if DASHBOARD_AUTH_MODE == "open":
+    if security.DASHBOARD_AUTH_MODE == "open":
         auth_badge = {"text": "\U0001f513 Local Open Access", "title": "No DASHBOARD_PASSWORD; only reachable from this computer"}
-    elif DASHBOARD_AUTH_MODE == "generated":
-        auth_badge = {"text": "\U0001f512 Generated Password", "title": f"Generated password in {DASHBOARD_PASSWORD_FILE}"}
+    elif security.DASHBOARD_AUTH_MODE == "generated":
+        auth_badge = {"text": "\U0001f512 Generated Password", "title": f"Generated password in {security.DASHBOARD_PASSWORD_FILE}"}
     else:
         auth_badge = {"text": "\U0001f512 Password Protected", "title": ""}
     webhook_discord_badge = {"text": "Discord Alert On" if notif_cfg["discord_webhook_url"] else "Discord Off"}
@@ -8209,8 +7958,8 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         "webhook_discord_badge": webhook_discord_badge,
         "webhook_telegram_badge": webhook_telegram_badge,
         "channels_empty": not any(data.get('type') != "multiview" for data in stream_state.values()),
-        "auth_mode": DASHBOARD_AUTH_MODE,
-        "dashboard_password_file": str(DASHBOARD_PASSWORD_FILE),
+        "auth_mode": security.DASHBOARD_AUTH_MODE,
+        "dashboard_password_file": str(security.DASHBOARD_PASSWORD_FILE),
         "catalog_source_text": catalog_source_text,
         "catalog_entries_count": len(catalog_entries),
         "active_catalog_count": len(active_catalog_keys),
@@ -9490,9 +9239,9 @@ class TrayApplication:
                 config.PORT = selected_port
 
         self._start_server()
-        if DASHBOARD_AUTH_MODE == "generated":
+        if security.DASHBOARD_AUTH_MODE == "generated":
             self._pending_notices.append(
-                f"Dashboard password generated (user {DASHBOARD_USERNAME}); it is in {DASHBOARD_PASSWORD_FILE}."
+                f"Dashboard password generated (user {security.DASHBOARD_USERNAME}); it is in {security.DASHBOARD_PASSWORD_FILE}."
             )
         LOGGER.info("Jellyball %s web GUI available at http://127.0.0.1:%s", __version__, config.PORT)
         threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{config.PORT}/")).start()
