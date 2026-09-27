@@ -4290,6 +4290,7 @@ async def lifespan(app: FastAPI):
     # Ensure tracked prefetchers and other background work are stopped too.
     await _cancel_background_tasks()
     await _METRIC_WRITER.stop()
+    close_all_db_connections()
     _STARTUP_BUFFER_TASKS.clear()
     shutil.rmtree(MULTIVIEW_OUTPUT_ROOT, ignore_errors=True)
     shutil.rmtree(PLACEHOLDER_OUTPUT_DIR, ignore_errors=True)
@@ -9390,14 +9391,14 @@ async def update_provider_domains(request: Request, auth: bool = Depends(verify_
             continue
         validated = _validate_upstream_url(raw_value)
         if not validated:
-            return RedirectResponse(url="/?tab=settings&status=providers_invalid", status_code=303)
+            return RedirectResponse(url="/?tab=alerts&status=providers_invalid", status_code=303)
         updates.append((provider, validated.rstrip("/")))
 
     for provider, value in updates:
         await set_setting_async(_provider_url_setting_key(provider.name), value)
         _set_provider_url_override(provider, value)
 
-    return RedirectResponse(url="/?tab=settings&status=providers_saved", status_code=303)
+    return RedirectResponse(url="/?tab=alerts&status=providers_saved", status_code=303)
 
 
 def _create_tray_image():
