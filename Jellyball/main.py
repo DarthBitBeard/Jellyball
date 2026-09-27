@@ -3851,6 +3851,7 @@ async def lifespan(app: FastAPI):
     _load_tunable_overrides()
     global SHOW_OFFSEASON_CHANNELS
     SHOW_OFFSEASON_CHANNELS = get_setting("show_offseason_channels", "0") == "1"
+    _spawn_background_task(update_check_loop(), "update check")
     stream_state.clear()
     _TEAM_SCRAPE_TASKS.clear()
     _SCRAPE_IN_FLIGHT.clear()
@@ -7039,6 +7040,18 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
     notif_cfg = await get_notification_config()
     jellyfin_cfg = await get_jellyfin_config()
     provider_rotation_enabled = await get_setting_async("provider_rotation_mode", "0") == "1"
+    update_check_enabled = await get_setting_async("update_check_enabled", "0") == "1"
+    update_banner = ""
+    if update_check_enabled and _update_available():
+        release_link = (
+            f' <a href="{_html(_UPDATE_STATE["url"])}" target="_blank" rel="noopener noreferrer">Release notes</a>'
+            if _UPDATE_STATE.get("url") else ""
+        )
+        update_banner = (
+            f'<div class="card" role="status" style="border-color: var(--success);">'
+            f'⬆️ Jellyball {_html(_UPDATE_STATE["latest"])} is available (you are running {_html(__version__)}).'
+            f'{release_link}</div>'
+        )
     catalog_entries = await get_catalog_entries()
     active_catalog_keys = {
         data.get("catalog_key")
@@ -7473,12 +7486,13 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         <div class="container">
             <header>
                 <div class="header-controls">
-                    <button type="button" class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle Dark/Light Mode">🌙</button>
+                    <button type="button" class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle Dark/Light Mode" aria-label="Toggle dark or light mode">🌙</button>
                 </div>
                 <h1>Jellyball Sports Manager</h1>
                 <p>Multi-Aggregator Scraper & Jellyfin Live TV Gateway</p>
                 <div class="status-badges">{auth_badge} {jellyfin_badge} {webhook_discord_badge} {webhook_telegram_badge}</div>
             </header>
+            {update_banner}
             <div class="tabs-nav">
                 <button type="button" class="tab-btn {'active' if tab == 'channels' else ''}" id="btn-channels" onclick="switchTab('channels')">📺 Channels & Streams</button>
                 <button type="button" class="tab-btn {'active' if tab == 'metrics' else ''}" id="btn-metrics" onclick="switchTab('metrics')">📊 Stability Metrics</button>
@@ -7601,6 +7615,15 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                     <form action="/settings/advanced" method="post" style="display: flex; flex-direction: column; gap: 1.25rem;">
                         {_advanced_settings_html()}
                         <button type="submit" style="width: auto; align-self: flex-start;">💾 Save Advanced Settings</button>
+                    </form>
+                </div>
+                <div class="card">
+                    <h3>Update Check</h3>
+                    <p class="hint-text">Running Jellyball {_html(__version__)}. When enabled, Jellyball asks GitHub twice a day whether a newer release exists and shows a notice here. Nothing else is sent.</p>
+                    <form action="/settings/update-check" method="post" style="display: flex; align-items: center; gap: 0.75rem;">
+                        <input type="checkbox" name="enabled" value="true" id="update-toggle" {'checked' if update_check_enabled else ''} style="width: auto; cursor: pointer;">
+                        <label for="update-toggle" style="cursor: pointer;">Check for new versions</label>
+                        <button type="submit" style="width: auto; margin-left: auto;">💾 Save</button>
                     </form>
                 </div>
                 <div class="card">
@@ -8921,6 +8944,74 @@ async def test_stream(team_id: str, auth: bool = Depends(verify_dashboard_auth))
 @app.post("/settings/provider-rotation")
 async def set_provider_rotation(enabled: bool = Form(False), auth: bool = Depends(verify_dashboard_auth)):
     await set_setting_async("provider_rotation_mode", "1" if enabled else "0")
+    return RedirectResponse(url="/?tab=playback&status=saved", status_code=303)
+
+
+UPDATE_CHECK_URL = os.getenv(
+    "UPDATE_CHECK_URL", "https://api.github.com/repos/DarthBitBeard/Jellyball/releases/latest"
+)
+UPDATE_CHECK_INTERVAL = 12 * 3600.0
+_UPDATE_STATE: Dict[str, object] = {"latest": "", "url": "", "checked_at": 0.0}
+
+
+def _version_tuple(value: str) -> Tuple[int, ...]:
+    numbers = re.findall(r"\d+", str(value or "").split("-", 1)[0])
+    return tuple(int(n) for n in numbers[:3]) or (0,)
+
+
+def _update_available() -> bool:
+    latest = str(_UPDATE_STATE.get("latest") or "")
+    return bool(latest) and _version_tuple(latest) > _version_tuple(__version__)
+
+
+async def check_for_update() -> None:
+    """One request to GitHub Releases (opt-in: Settings > Update check)."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            response = await client.get(
+                UPDATE_CHECK_URL,
+                headers={"Accept": "application/vnd.github+json", "User-Agent": f"Jellyball/{__version__}"},
+            )
+        if response.status_code != 200:
+            return
+        release = response.json()
+        tag = str(release.get("tag_name") or "").lstrip("vV")
+        html_url = str(release.get("html_url") or "")
+        if tag and not release.get("draft") and not release.get("prerelease"):
+            _UPDATE_STATE.update({
+                "latest": tag,
+                "url": html_url if html_url.startswith("https://github.com/") else "",
+                "checked_at": time.time(),
+            })
+            if _update_available():
+                LOGGER.info("Jellyball %s is available (running %s)", tag, __version__)
+    except Exception as exc:
+        _log_failure("check for updates", exc, logging.INFO)
+
+
+async def update_check_loop() -> None:
+    await asyncio.sleep(random.uniform(30.0, 120.0))
+    while True:
+        if await get_setting_async("update_check_enabled", "0") == "1":
+            await check_for_update()
+        await asyncio.sleep(UPDATE_CHECK_INTERVAL)
+
+
+@app.get("/api/version")
+async def api_version(auth: bool = Depends(verify_dashboard_auth)):
+    return {
+        "version": __version__,
+        "latest": _UPDATE_STATE.get("latest") or None,
+        "update_available": _update_available(),
+        "release_url": _UPDATE_STATE.get("url") or None,
+    }
+
+
+@app.post("/settings/update-check")
+async def set_update_check(enabled: bool = Form(False), auth: bool = Depends(verify_dashboard_auth)):
+    await set_setting_async("update_check_enabled", "1" if enabled else "0")
+    if enabled:
+        _spawn_background_task(check_for_update(), "check for updates")
     return RedirectResponse(url="/?tab=playback&status=saved", status_code=303)
 
 
