@@ -386,15 +386,11 @@ Webhook delivery retries up to twice (honoring `Retry-After`, capped at
 | `STREAM_STARTUP_TIMEOUT` | `20` | Wait this long for a channel to start before "No Signal" (s) | Adv |
 | `STARTUP_PLACEHOLDER_SECONDS` | `30` | How long "No Signal" is shown for a slow start (s) | Adv |
 | `STREAM_MAX_BANDWIDTH` | `0` (unlimited) | Per-client bandwidth cap, bits/second | |
-
-The following are **dashboard-only** Advanced Settings (Channel sessions
-group) — they configure the shared session engine and have no process
-environment variable read at startup, only a saved dashboard override:
-`SESSION_LIVE_EDGE_SEGMENTS` (default `3`, buffer segments at tune-in),
-`SESSION_WINDOW_SECONDS` (default `30`, playlist window length),
-`SESSION_STALE_SECONDS` (default `15`, no-new-segment failover),
-`SESSION_FAIL_THRESHOLD` (default `3`, fetch failures before failover),
-`SESSION_SEGMENT_TIMEOUT` (default `15`, per-segment download timeout).
+| `SESSION_LIVE_EDGE_SEGMENTS` | `3` | Segments of buffer handed to a player at tune-in | Adv |
+| `SESSION_WINDOW_SECONDS` | `30` | Length of the proxy-built playlist window (s) | Adv |
+| `SESSION_STALE_SECONDS` | `15` | Fail over when no new segment arrives for at least this long (s) | Adv |
+| `SESSION_FAIL_THRESHOLD` | `3` | Consecutive fetch failures before failover | Adv |
+| `SESSION_SEGMENT_TIMEOUT` | `15` | Per-segment download timeout (s) | Adv |
 
 ### Multi-View
 
