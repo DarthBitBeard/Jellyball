@@ -47,6 +47,20 @@ from main import (
     _mark_scrape_started,
     _scrape_lifecycle_defaults,
     api_status,
+    _build_xstack_filter,
+    _build_multiview_ffmpeg_args,
+    _multiview_bufsize,
+    _multiview_member_validation,
+    _wait_for_first_segment,
+    _multiview_backoff_seconds,
+    _multiview_cooldown_remaining,
+    _multiview_error_from_log,
+    _build_placeholder_ffmpeg_args,
+    generate_m3u,
+    generate_xmltv,
+    _resolve_schedule_status,
+)
+from legacy_proxy import (
     LRUChunkCache,
     _chunk_route_for_url,
     _ensure_startup_buffer,
@@ -60,18 +74,6 @@ from main import (
     _register_manifest_segments,
     _get_next_manifest_chunks,
     prefetch_next_chunks,
-    _build_xstack_filter,
-    _build_multiview_ffmpeg_args,
-    _multiview_bufsize,
-    _multiview_member_validation,
-    _wait_for_first_segment,
-    _multiview_backoff_seconds,
-    _multiview_cooldown_remaining,
-    _multiview_error_from_log,
-    _build_placeholder_ffmpeg_args,
-    generate_m3u,
-    generate_xmltv,
-    _resolve_schedule_status,
 )
 from catalog import _resolve_espn_team, xmltv_ts
 from state import stream_state
@@ -86,6 +88,7 @@ import state
 import security
 import db
 import scrapers
+import legacy_proxy
 
 
 class JellyballChangesTests(unittest.TestCase):
@@ -331,15 +334,15 @@ class JellyballChangesTests(unittest.TestCase):
         import main
 
         async def exercise():
-            original_seconds = main.STREAM_STARTUP_BUFFER_SECONDS
-            original_warm = main._warm_startup_buffer
+            original_seconds = legacy_proxy.STREAM_STARTUP_BUFFER_SECONDS
+            original_warm = legacy_proxy._warm_startup_buffer
             try:
-                main.STREAM_STARTUP_BUFFER_SECONDS = 15.0
+                legacy_proxy.STREAM_STARTUP_BUFFER_SECONDS = 15.0
 
                 async def slow_warm(*args, **kwargs):
                     await asyncio.sleep(0.2)
 
-                main._warm_startup_buffer = slow_warm
+                legacy_proxy._warm_startup_buffer = slow_warm
                 started = asyncio.get_running_loop().time()
                 await _ensure_startup_buffer(
                     "startup-test",
@@ -349,9 +352,9 @@ class JellyballChangesTests(unittest.TestCase):
                 )
                 return asyncio.get_running_loop().time() - started
             finally:
-                main.STREAM_STARTUP_BUFFER_SECONDS = original_seconds
-                main._warm_startup_buffer = original_warm
-                task = main._STARTUP_BUFFER_TASKS.pop("startup-test", None)
+                legacy_proxy.STREAM_STARTUP_BUFFER_SECONDS = original_seconds
+                legacy_proxy._warm_startup_buffer = original_warm
+                task = legacy_proxy._STARTUP_BUFFER_TASKS.pop("startup-test", None)
                 if task and not task.done():
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
@@ -390,7 +393,7 @@ class JellyballChangesTests(unittest.TestCase):
         async def exercise():
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
             try:
-                with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(main, "STREAM_STARTUP_BUFFER_SECONDS", 0):
+                with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(legacy_proxy, "STREAM_STARTUP_BUFFER_SECONDS", 0):
                     response = await proxy_substream(
                         request_for("/substream.m3u8"),
                         url=manifest_url,
@@ -683,7 +686,7 @@ class JellyballChangesTests(unittest.TestCase):
         async def exercise():
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
             try:
-                with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(main, "PREFETCH_CHUNK_COUNT", 0):
+                with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(legacy_proxy, "PREFETCH_CHUNK_COUNT", 0):
                     await prefetch_next_chunks(
                         "https://4169it.7odxv0l067ka.net:8443/live/3165856830.ts"
                     )
@@ -717,7 +720,7 @@ class JellyballChangesTests(unittest.TestCase):
         async def exercise():
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
             try:
-                with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(main, "PREFETCH_CHUNK_COUNT", 2):
+                with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(legacy_proxy, "PREFETCH_CHUNK_COUNT", 2):
                     await prefetch_next_chunks(
                         "https://4169it.7odxv0l067ka.net:8443/live/3165856830.ts",
                         referer=manifest_url,
