@@ -10153,6 +10153,8 @@ class TrayApplication:
 
         self.server = None
         self.server_thread = None
+        self.host = "127.0.0.1"
+        self._pending_notices: List[str] = []
         self.icon = pystray.Icon(
             "jellyball",
             _create_tray_image(),
@@ -10190,14 +10192,46 @@ class TrayApplication:
             env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
             if _PLAYWRIGHT_PATH_SET_BY_APP:
                 env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
-            subprocess.Popen(command, close_fds=True, env=env, creationflags=_child_process_creationflags())
-            self.icon.stop()
+            child = subprocess.Popen(command, close_fds=True, env=env, creationflags=_child_process_creationflags())
+            # Only hand over once the new instance answers; if it dies (e.g. a
+            # broken .env edit), keep this tray alive and bring the server back.
+            deadline = time.monotonic() + 45.0
+            while time.monotonic() < deadline:
+                if _existing_jellyball_instance(PORT):
+                    self.icon.stop()
+                    return
+                if child.poll() is not None:
+                    break
+                time.sleep(1.0)
+            LOGGER.error("Restarted Jellyball did not come up (exit=%s); keeping this instance", child.poll())
+            if child.poll() is None:
+                child.terminate()
+            self._notify("Restart failed - Jellyball kept running the previous instance. See jellyball.log.")
+            self._start_server()
 
         threading.Thread(target=relaunch, name="jellyball-restart", daemon=True).start()
+
+    def _notify(self, message: str) -> None:
+        try:
+            self.icon.notify(message, "Jellyball")
+        except Exception as exc:  # not every tray backend supports notifications
+            _log_failure("tray notification", exc, logging.DEBUG)
+
+    def _on_icon_ready(self, icon) -> None:
+        icon.visible = True
+        for message in self._pending_notices:
+            self._notify(message)
+        self._pending_notices.clear()
+
+    def _start_server(self) -> None:
+        self.server = build_server(self.host, PORT)
+        self.server_thread = threading.Thread(target=self.server.run, name="jellyball-server", daemon=True)
+        self.server_thread.start()
 
     def run(self):
         global PORT
         host = os.getenv("JELLYBALL_HOST", "127.0.0.1").strip() or "127.0.0.1"
+        self.host = host
         if not _port_is_free(host, PORT):
             if _existing_jellyball_instance(PORT):
                 # The Windows service (or another tray instance) already runs
@@ -10212,19 +10246,21 @@ class TrayApplication:
                     "(Jellyfin tuner URLs pointing at %s will not work until it is free)",
                     PORT, selected_port, PORT,
                 )
+                self._pending_notices.append(
+                    f"Port {PORT} is in use, so Jellyball is on port {selected_port} for now. "
+                    f"Jellyfin URLs using port {PORT} won't work until it's free."
+                )
                 PORT = selected_port
 
-        self.server = build_server(host, PORT)
-        self.server_thread = threading.Thread(
-            target=self.server.run,
-            name="jellyball-server",
-            daemon=True,
-        )
-        self.server_thread.start()
+        self._start_server()
+        if DASHBOARD_AUTH_MODE == "generated":
+            self._pending_notices.append(
+                f"Dashboard password generated (user {DASHBOARD_USERNAME}); it is in {DASHBOARD_PASSWORD_FILE}."
+            )
         LOGGER.info("Jellyball %s web GUI available at http://127.0.0.1:%s", __version__, PORT)
         threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}/")).start()
         try:
-            self.icon.run()
+            self.icon.run(setup=self._on_icon_ready)
         finally:
             self.server.should_exit = True
             self.server_thread.join(timeout=15)

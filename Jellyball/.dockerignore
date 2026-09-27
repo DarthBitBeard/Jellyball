@@ -18,5 +18,10 @@ test_*.py
 build-*.ps1
 installer/
 .venv/
+.venv-build/
+.venv*/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
 venv/
 data/
