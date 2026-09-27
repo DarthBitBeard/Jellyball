@@ -5831,21 +5831,6 @@ async def _stop_multiview_process(
     return True
 
 
-async def _read_hls_playlist_snapshot(path: Path) -> Optional[bytes]:
-    """Read an HLS .m3u8 playlist as one atomic in-memory snapshot instead of via
-    FileResponse. FileResponse stats the file for Content-Length and then streams it
-    from disk in a separate step; ffmpeg rewrites this exact file in place on every
-    segment rotation, so if it truncates/rewrites between the stat and the stream,
-    the declared Content-Length no longer matches what's actually sent and h11 aborts
-    the connection ("Too little data for declared Content-Length"). A single
-    read_bytes() call can't observe a torn/partial state that way — segment files
-    aren't affected since ffmpeg writes each one once as a discrete completed file."""
-    try:
-        return await asyncio.to_thread(path.read_bytes)
-    except OSError:
-        return None
-
-
 async def _wait_for_first_segment(
     out_dir: Path,
     process: "asyncio.subprocess.Process",
@@ -6918,50 +6903,6 @@ async def _ensure_placeholder_running() -> bool:
         return False
 
 
-async def _serve_placeholder_stream(request: Request):
-    ready = await _ensure_placeholder_running()
-    if not ready:
-        return Response(status_code=404, content="Stream unavailable")
-    if _PLACEHOLDER_STATE:
-        _PLACEHOLDER_STATE["last_access"] = time.monotonic()
-    host = request.headers.get("host") or f"127.0.0.1:{PORT}"
-    return RedirectResponse(url=f"http://{host}/placeholder/index.m3u8")
-
-
-_PLACEHOLDER_SEGMENT_NAME_RE = re.compile(r"^seg_\d{5,}\.ts$")
-
-
-@app.get("/placeholder/index.m3u8")
-async def serve_placeholder_playlist():
-    if not _PLACEHOLDER_STATE or _PLACEHOLDER_STATE["process"].returncode is not None or _PLACEHOLDER_STATE.get("exited"):
-        raise HTTPException(status_code=503, detail="Placeholder stream is not running")
-    playlist_path = _PLACEHOLDER_STATE["output_dir"] / "index.m3u8"
-    playlist_bytes = await _read_hls_playlist_snapshot(playlist_path)
-    if playlist_bytes is None:
-        raise HTTPException(status_code=503, detail="Placeholder stream is starting")
-    return Response(
-        content=playlist_bytes,
-        media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"},
-    )
-
-
-@app.get("/placeholder/{segment_name}")
-async def serve_placeholder_segment(segment_name: str):
-    if not _PLACEHOLDER_SEGMENT_NAME_RE.match(segment_name):
-        raise HTTPException(status_code=404, detail="Segment not found")
-    if not _PLACEHOLDER_STATE:
-        raise HTTPException(status_code=404, detail="Segment not found")
-    segment_path = _PLACEHOLDER_STATE["output_dir"] / segment_name
-    if not segment_path.is_file():
-        raise HTTPException(status_code=404, detail="Segment not found")
-    return FileResponse(
-        segment_path,
-        media_type="video/mp2t",
-        headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"},
-    )
-
-
 # --- CHANNEL SESSIONS (proxy-built continuous playlists; see hls_session.py) ---
 
 SESSION_IDLE_SECONDS = bounded_float(os.getenv("SESSION_IDLE_SECONDS", "60"), 60.0, 10.0, 3600.0)
@@ -7234,7 +7175,8 @@ async def _legacy_proxy_stream(team_id: str, request: Request, provider: str = "
     if not data:
         return Response(status_code=404, content="Stream unavailable")
     if not data.get("candidates"):
-        return await _serve_placeholder_stream(request)
+        # No Signal comes from the placeholder channel session now.
+        return RedirectResponse(url=f"/stream/{PLACEHOLDER_SESSION_ID}.m3u8", status_code=307)
     active_idx = data.get("active_index", 0)
     if active_idx >= len(data["candidates"]):
         active_idx = 0

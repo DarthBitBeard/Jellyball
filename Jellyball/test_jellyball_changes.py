@@ -61,7 +61,6 @@ from main import (
     _multiview_bufsize,
     _multiview_member_validation,
     _wait_for_first_segment,
-    _read_hls_playlist_snapshot,
     _multiview_backoff_seconds,
     _multiview_cooldown_remaining,
     _multiview_error_from_log,
@@ -1002,20 +1001,6 @@ class JellyballChangesTests(unittest.TestCase):
             previous_start="stale-start", previous_stop="stale-stop",
         )
         self.assertEqual((start_str, stop_str, status), ("stale-start", "stale-stop", "lookup_failed"))
-
-    def test_read_hls_playlist_snapshot_returns_full_bytes(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "index.m3u8"
-            content = b"#EXTM3U\n#EXTINF:4.0,\nseg_00000.ts\n"
-            path.write_bytes(content)
-            result = asyncio.run(_read_hls_playlist_snapshot(path))
-        self.assertEqual(result, content)
-
-    def test_read_hls_playlist_snapshot_returns_none_when_missing(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            missing = Path(tmpdir) / "does-not-exist.m3u8"
-            result = asyncio.run(_read_hls_playlist_snapshot(missing))
-        self.assertIsNone(result)
 
     def test_wait_for_first_segment_detects_ready_playlist(self):
         with tempfile.TemporaryDirectory() as tmpdir:
