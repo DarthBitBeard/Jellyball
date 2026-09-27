@@ -4137,6 +4137,9 @@ async def lifespan(app: FastAPI):
     _install_loop_exception_filter()
     init_db()
     _METRIC_WRITER.start()
+    # Before wiping the run dirs: their pid files identify ffmpeg left running
+    # by a crashed previous instance (and those would keep the files locked).
+    _kill_orphaned_ffmpeg()
     shutil.rmtree(MULTIVIEW_OUTPUT_ROOT, ignore_errors=True)
     MULTIVIEW_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(PLACEHOLDER_OUTPUT_DIR, ignore_errors=True)
@@ -4265,6 +4268,8 @@ async def lifespan(app: FastAPI):
     schedule_task = asyncio.create_task(enforce_scheduled_disables(), name="scheduled disable enforcement")
     multiview_idle_task = asyncio.create_task(multiview_idle_monitor(), name="multiview idle monitor")
     multiview_watchdog_task = asyncio.create_task(multiview_watchdog(), name="multiview watchdog")
+    # Tracked background task: _cancel_background_tasks() stops it at shutdown.
+    _spawn_background_task(multiview_output_sweeper(), "multiview output sweep")
     yield
 
     monitor_task.cancel()
@@ -4896,7 +4901,50 @@ MULTIVIEW_STARTUP_TIMEOUT_SECONDS = bounded_float(os.getenv("MULTIVIEW_STARTUP_T
 # exhaust NVENC/QSV session limits or the host's CPU. Cap concurrent transcodes.
 MAX_CONCURRENT_MULTIVIEW = bounded_int(os.getenv("MAX_CONCURRENT_MULTIVIEW", "3"), 3, 1, 32)
 MULTIVIEW_OUTPUT_ROOT = DATA_DIR / "multiview"
-MULTIVIEW_FPS = 30
+
+
+def _env_choice(name: str, default: str, allowed) -> str:
+    """A string setting limited to known values: an unknown ffmpeg preset or
+    tune would make every single Multi-View spawn fail."""
+    value = (os.getenv(name) or "").strip().lower()
+    if not value:
+        return default
+    if value not in allowed:
+        LOGGER.warning("Ignoring %s=%r (expected one of %s); using %r", name, value, ", ".join(sorted(allowed)), default)
+        return default
+    return value
+
+
+# Encoder tuning. The GOP is FPS x segment length and keyframes are forced on
+# the segment grid (see _multiview_video_encoder_args), so any combination
+# keeps every per-audio output cutting at the same instants.
+MULTIVIEW_FPS = bounded_int(os.getenv("MULTIVIEW_FPS", "30"), 30, 10, 60)
+MULTIVIEW_HLS_LIST_SIZE = bounded_int(os.getenv("MULTIVIEW_HLS_LIST_SIZE", "8"), 8, 3, 30)
+MULTIVIEW_NVENC_PRESET = _env_choice(
+    "MULTIVIEW_NVENC_PRESET", "p4",
+    {"p1", "p2", "p3", "p4", "p5", "p6", "p7", "default", "slow", "medium", "fast", "hp", "hq", "bd", "ll", "llhq", "llhp"},
+)
+MULTIVIEW_NVENC_TUNE = _env_choice("MULTIVIEW_NVENC_TUNE", "ll", {"hq", "ll", "ull", "lossless"})
+# After a GPU encoder failure new runs are software-encoded for this long,
+# then the GPU is tried again (the failure is often transient: every NVENC
+# session taken by Jellyfin's own transcodes, a driver update, ...).
+NVENC_FALLBACK_SECONDS = bounded_float(os.getenv("NVENC_FALLBACK_SECONDS", "600"), 600.0, 30.0, 86400.0)
+# Spawn-failure backoff (and the step/cap of the restart backoff below).
+MULTIVIEW_BACKOFF_BASE_SECONDS = bounded_float(os.getenv("MULTIVIEW_BACKOFF_BASE_SECONDS", "15"), 15.0, 1.0, 600.0)
+MULTIVIEW_BACKOFF_MAX_SECONDS = max(
+    MULTIVIEW_BACKOFF_BASE_SECONDS,
+    bounded_float(os.getenv("MULTIVIEW_BACKOFF_MAX_SECONDS", "300"), 300.0, 1.0, 3600.0),
+)
+# Watchdog/view-failure restarts: the first MULTIVIEW_RESTART_BURST inside a
+# rolling window are immediate; each further one waits exponentially longer.
+MULTIVIEW_RESTART_WINDOW_SECONDS = bounded_float(os.getenv("MULTIVIEW_RESTART_WINDOW_SECONDS", "600"), 600.0, 60.0, 86400.0)
+MULTIVIEW_RESTART_BURST = bounded_int(os.getenv("MULTIVIEW_RESTART_BURST", "2"), 2, 0, 20)
+# A refused start (concurrency cap reached / ffmpeg unavailable) is retried
+# after a short delay that doubles per consecutive refusal, up to a minute.
+MULTIVIEW_REFUSAL_BACKOFF_SECONDS = bounded_float(os.getenv("MULTIVIEW_REFUSAL_BACKOFF_SECONDS", "5"), 5.0, 1.0, 300.0)
+MULTIVIEW_REFUSAL_BACKOFF_MAX_SECONDS = max(60.0, MULTIVIEW_REFUSAL_BACKOFF_SECONDS)
+# How often leftover run directories (~100MB of segments each) are swept.
+MULTIVIEW_SWEEP_INTERVAL = bounded_float(os.getenv("MULTIVIEW_SWEEP_INTERVAL", "600"), 600.0, 60.0, 86400.0)
 
 MULTIVIEW_LAYOUTS = {
     "side_by_side_2": {"count": 2, "pane_w": 960, "pane_h": 1080, "xstack": "0_0|w0_0"},
@@ -4907,7 +4955,6 @@ FFMPEG_AVAILABLE = False
 FFMPEG_VERSION_INFO = ""
 
 _MULTIVIEW_PROCESSES: Dict[str, dict] = {}
-_MULTIVIEW_LOCKS: Dict[str, asyncio.Lock] = {}
 # Tracks recent spawn failures per channel so a client that keeps retrying a
 # permanently-broken Multi-View (e.g. one member currently has no live
 # candidates, so ffmpeg's -i for it 404s and the whole process aborts) can't
@@ -4916,20 +4963,68 @@ _MULTIVIEW_LOCKS: Dict[str, asyncio.Lock] = {}
 # schedule regardless of what we return, so this backoff is the only thing
 # standing between "one dead input" and continuous CPU/GPU churn.
 _MULTIVIEW_FAILURES: Dict[str, dict] = {}
-MULTIVIEW_BACKOFF_BASE_SECONDS = 15.0
-MULTIVIEW_BACKOFF_MAX_SECONDS = 300.0
+# Short "don't start before" holds on top of the failure backoff, for refused
+# starts and backed-off restarts: {"until": monotonic, "kind": str, "reason": str}.
+_MULTIVIEW_HOLDS: Dict[str, dict] = {}
+# Consecutive refused starts per channel (sizes the refusal hold).
+_MULTIVIEW_REFUSALS: Dict[str, int] = {}
+# Rolling restart history: {"times": deque of monotonic, "last_alert": Optional[float]}.
+# Unlike _MULTIVIEW_FAILURES it survives successful spawns, so a run that
+# starts fine and then stalls every minute still backs off.
+_MULTIVIEW_RESTARTS: Dict[str, dict] = {}
+# Multi-Views an admin stopped (monotonic time of the Stop). While set, nothing
+# auto-starts the grid and its viewers get the "No Signal" placeholder.
+# Cleared by an explicit play: the next NEW viewer session (a playlist or
+# segment request for this Multi-View while none of its view sessions is
+# running, i.e. a fresh tune) or POST /multiview/{id}/start. A viewer who was
+# already watching when Stop was pressed keeps getting No Signal until their
+# session idles out (SESSION_IDLE_SECONDS after they stop pulling), so the
+# player that happened to be open can't silently undo the Stop.
+_MULTIVIEW_MANUAL_STOPS: Dict[str, float] = {}
+# Channels holding a concurrency slot while their spawn warms members and waits
+# for first segments. Reserved before the (up to 20s) warm-up, so simultaneous
+# starts can't all pass MAX_CONCURRENT_MULTIVIEW; released when the spawn ends
+# (a successful run keeps the slot through its _MULTIVIEW_PROCESSES entry).
+_MULTIVIEW_SLOT_RESERVATIONS: Set[str] = set()
+# Run directories created by a spawn but not registered yet (the sweep skips them).
+_MULTIVIEW_PENDING_RUN_DIRS: Set[Path] = set()
+_MULTIVIEW_RUN_COUNTER = 0
+# At most one start task per channel; this (not a lock) serializes spawns.
+_MULTIVIEW_START_TASKS: Dict[str, asyncio.Task] = {}
+_MULTIVIEW_LAST_VIEWER: Dict[str, float] = {}
 
 
 def _multiview_backoff_seconds(failure_count: int) -> float:
     return min(MULTIVIEW_BACKOFF_MAX_SECONDS, MULTIVIEW_BACKOFF_BASE_SECONDS * (2 ** max(0, failure_count - 1)))
 
 
-def _multiview_cooldown_remaining(channel_id: str) -> float:
-    record = _MULTIVIEW_FAILURES.get(channel_id)
-    if not record:
+def _multiview_hold_remaining(channel_id: str) -> float:
+    hold = _MULTIVIEW_HOLDS.get(channel_id)
+    if not hold:
         return 0.0
-    elapsed = time.monotonic() - record["last_failure"]
-    return max(0.0, _multiview_backoff_seconds(record["count"]) - elapsed)
+    remaining = hold["until"] - time.monotonic()
+    if remaining <= 0:
+        _MULTIVIEW_HOLDS.pop(channel_id, None)
+        return 0.0
+    return remaining
+
+
+def _multiview_cooldown_remaining(channel_id: str) -> float:
+    """Seconds before this Multi-View may be started again (failure backoff,
+    refusal hold or restart backoff, whichever ends last)."""
+    record = _MULTIVIEW_FAILURES.get(channel_id)
+    failure_remaining = 0.0
+    if record:
+        elapsed = time.monotonic() - record["last_failure"]
+        failure_remaining = max(0.0, _multiview_backoff_seconds(record["count"]) - elapsed)
+    return max(failure_remaining, _multiview_hold_remaining(channel_id))
+
+
+def _set_multiview_hold(channel_id: str, seconds: float, kind: str, reason: str) -> None:
+    until = time.monotonic() + seconds
+    current = _MULTIVIEW_HOLDS.get(channel_id)
+    if current is None or current["until"] < until:
+        _MULTIVIEW_HOLDS[channel_id] = {"until": until, "kind": kind, "reason": reason}
 
 
 def _record_multiview_failure(channel_id: str, error: str) -> None:
@@ -4941,6 +5036,78 @@ def _record_multiview_failure(channel_id: str, error: str) -> None:
 
 def _clear_multiview_failure(channel_id: str) -> None:
     _MULTIVIEW_FAILURES.pop(channel_id, None)
+
+
+def _record_multiview_refusal(channel_id: str, reason: str) -> float:
+    """A start refused before anything was launched. Viewers get the
+    placeholder meanwhile; nothing retries the spawn until the hold expires,
+    so this logs once per hold instead of on every 0.5s session poll."""
+    count = _MULTIVIEW_REFUSALS.get(channel_id, 0) + 1
+    _MULTIVIEW_REFUSALS[channel_id] = count
+    delay = min(MULTIVIEW_REFUSAL_BACKOFF_MAX_SECONDS, MULTIVIEW_REFUSAL_BACKOFF_SECONDS * (2 ** (count - 1)))
+    _set_multiview_hold(channel_id, delay, "refused", reason)
+    LOGGER.warning(
+        "Refusing to start multiview channel=%s: %s; next attempt in %.0fs (viewers see No Signal)",
+        channel_id, reason, delay,
+    )
+    return delay
+
+
+def _multiview_restart_delay(restart_count: int) -> float:
+    """Hold before the Nth restart inside the rolling window may start."""
+    excess = restart_count - MULTIVIEW_RESTART_BURST
+    if excess <= 0:
+        return 0.0
+    return min(MULTIVIEW_BACKOFF_MAX_SECONDS, MULTIVIEW_BACKOFF_BASE_SECONDS * (2 ** (excess - 1)))
+
+
+def _recent_multiview_restarts(channel_id: str, now: Optional[float] = None) -> int:
+    record = _MULTIVIEW_RESTARTS.get(channel_id)
+    if not record:
+        return 0
+    now = time.monotonic() if now is None else now
+    times = record["times"]
+    while times and now - times[0] > MULTIVIEW_RESTART_WINDOW_SECONDS:
+        times.popleft()
+    return len(times)
+
+
+def _note_multiview_restart(channel_id: str, reason: str) -> Tuple[int, float]:
+    """Count a restart in the rolling window; returns (restarts in window, hold
+    before the next start). Sends one alert when the backoff kicks in, then at
+    most one per window while it stays engaged."""
+    now = time.monotonic()
+    record = _MULTIVIEW_RESTARTS.setdefault(channel_id, {"times": deque(), "last_alert": None})
+    _recent_multiview_restarts(channel_id, now)
+    record["times"].append(now)
+    count = len(record["times"])
+    delay = _multiview_restart_delay(count)
+    if delay > 0:
+        _set_multiview_hold(channel_id, delay, "restart", reason)
+        last_alert = record["last_alert"]
+        if last_alert is None or now - last_alert >= MULTIVIEW_RESTART_WINDOW_SECONDS:
+            record["last_alert"] = now
+            name = (stream_state.get(channel_id) or {}).get("name", channel_id)
+            _spawn_background_task(
+                send_alert(
+                    "⚠️ Multi-View Unstable",
+                    f"**{name}** restarted {count} times in {MULTIVIEW_RESTART_WINDOW_SECONDS / 60:.0f} min "
+                    f"(last: {reason}). Restarts now back off; next start in {delay:.0f}s.",
+                    "warning",
+                ),
+                f"send multiview restart alert channel={channel_id}",
+            )
+    return count, delay
+
+
+def _forget_multiview_channel(channel_id: str) -> None:
+    """Drop every per-channel Multi-View bookkeeping entry (channel removed)."""
+    for mapping in (
+        _MULTIVIEW_FAILURES, _MULTIVIEW_HOLDS, _MULTIVIEW_REFUSALS, _MULTIVIEW_RESTARTS,
+        _MULTIVIEW_MANUAL_STOPS, _MULTIVIEW_LAST_VIEWER, _MULTIVIEW_START_TASKS,
+    ):
+        mapping.pop(channel_id, None)
+    _MULTIVIEW_SLOT_RESERVATIONS.discard(channel_id)
 
 
 def _multiview_error_from_log(log_lines) -> str:
@@ -4955,27 +5122,40 @@ def _multiview_error_from_log(log_lines) -> str:
     return "ffmpeg exited unexpectedly"
 
 
-def _multiview_lock(channel_id: str) -> asyncio.Lock:
-    lock = _MULTIVIEW_LOCKS.get(channel_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _MULTIVIEW_LOCKS[channel_id] = lock
-    return lock
+async def _probe_ffmpeg_version(path: str, timeout: float = 5.0) -> Tuple[Optional[int], str]:
+    """Run `<path> -version`; returns (exit code, first output line). A binary
+    that hangs (e.g. on an unreachable network path) is killed on timeout
+    instead of being left running for the life of the service."""
+    process = await asyncio.create_subprocess_exec(
+        path, "-version",
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        creationflags=_child_process_creationflags(),
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
+        raise
+    first_line = stdout.decode(errors="replace").splitlines()[0] if stdout else ""
+    return process.returncode, first_line
 
 
 async def _check_ffmpeg_available() -> None:
     """Probe FFMPEG_PATH once at startup so failures surface as a clear log/dashboard warning."""
     global FFMPEG_AVAILABLE, FFMPEG_VERSION_INFO
     try:
-        process = await asyncio.create_subprocess_exec(
-            FFMPEG_PATH, "-version",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            creationflags=_child_process_creationflags(),
-        )
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=5.0)
-        FFMPEG_AVAILABLE = process.returncode == 0
-        FFMPEG_VERSION_INFO = stdout.decode(errors="replace").splitlines()[0] if stdout else ""
+        returncode, FFMPEG_VERSION_INFO = await _probe_ffmpeg_version(FFMPEG_PATH)
+        FFMPEG_AVAILABLE = returncode == 0
     except (FileNotFoundError, OSError, asyncio.TimeoutError) as exc:
         FFMPEG_AVAILABLE = False
         FFMPEG_VERSION_INFO = ""
@@ -4989,17 +5169,11 @@ async def _check_multiview_ffmpeg() -> None:
     global MULTIVIEW_FFMPEG_PATH, MULTIVIEW_FFMPEG_VERSION_INFO
     if MULTIVIEW_FFMPEG_PATH != FFMPEG_PATH:
         try:
-            process = await asyncio.create_subprocess_exec(
-                MULTIVIEW_FFMPEG_PATH, "-version",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-                creationflags=_child_process_creationflags(),
-            )
-            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=5.0)
-            if process.returncode == 0 and stdout:
-                MULTIVIEW_FFMPEG_VERSION_INFO = stdout.decode(errors="replace").splitlines()[0]
+            returncode, first_line = await _probe_ffmpeg_version(MULTIVIEW_FFMPEG_PATH)
+            if returncode == 0 and first_line:
+                MULTIVIEW_FFMPEG_VERSION_INFO = first_line
             else:
-                raise OSError(f"exit code {process.returncode}")
+                raise OSError(f"exit code {returncode}")
         except (FileNotFoundError, OSError, asyncio.TimeoutError) as exc:
             _log_failure(f"probe Multi-View ffmpeg {MULTIVIEW_FFMPEG_PATH!r}; using {FFMPEG_PATH!r}", exc)
             MULTIVIEW_FFMPEG_PATH = FFMPEG_PATH
@@ -5043,7 +5217,7 @@ def _multiview_video_encoder_args(encoder: Optional[str] = None) -> List[str]:
     ]
     if encoder == "nvenc":
         return [
-            "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr",
+            "-c:v", "h264_nvenc", "-preset", MULTIVIEW_NVENC_PRESET, "-tune", MULTIVIEW_NVENC_TUNE, "-rc", "cbr",
             *common_rate_args,
             "-forced-idr", "1",
         ]
@@ -5109,7 +5283,7 @@ def _multiview_tee_outputs(member_count: int) -> str:
             f"select=\\'v:0,a:{idx}\\'",
             "onfail=ignore",
             f"hls_time={MULTIVIEW_SEGMENT_SECONDS}",
-            "hls_list_size=8",
+            f"hls_list_size={MULTIVIEW_HLS_LIST_SIZE}",
             "hls_flags=delete_segments+independent_segments",
             "hls_segment_type=mpegts",
             f"hls_segment_filename=a{idx}/seg_%06d.ts",
@@ -5138,38 +5312,60 @@ def _build_multiview_ffmpeg_args(
     channel_id: str,
     data: dict,
     out_dir: Path,
-    audio_presence: Optional[List[bool]] = None,
+    audio_presence: Optional[List[Optional[bool]]] = None,
     encoder: Optional[str] = None,
+    *,
+    hw_decode: Optional[bool] = None,
+    input_ids: Optional[List[str]] = None,
 ) -> List[str]:
     """Pure command-builder (no I/O) so it can be unit tested without spawning ffmpeg.
 
     Inputs are the members' channel sessions, which never 502, follow failover,
     and are normalized (fixed PIDs, continuous timestamps), so one member's
     provider switching no longer freezes its pane or the whole grid. The run
-    writes one HLS output per member audio under a{N}/ (relative to cwd=out_dir)."""
+    writes one HLS output per member audio under a{N}/ (relative to cwd=out_dir).
+
+    `audio_presence[i]` must be True for member i's audio to be mapped: None
+    (unknown) gets the silent track like False, because mapping a missing
+    N:a:0 makes ffmpeg fail the whole run. `input_ids[i]` is the channel
+    session that feeds pane i (default: the member itself; the placeholder for
+    a member that wasn't ready in time). `hw_decode` (default: encoder is
+    nvenc) adds -hwaccel cuda per input."""
     member_team_ids: List[str] = data["member_team_ids"]
     layout = data.get("layout", "grid_2x2")
     encoder = (encoder or MULTIVIEW_HWACCEL).lower()
-    audio_presence = list(audio_presence) if audio_presence else [True] * len(member_team_ids)
+    if hw_decode is None:
+        hw_decode = encoder == "nvenc"
+    audio_presence = (
+        [has_audio is True for has_audio in audio_presence] if audio_presence else [True] * len(member_team_ids)
+    )
+    sources = list(input_ids) if input_ids else list(member_team_ids)
 
     loglevel = os.getenv("MULTIVIEW_FFMPEG_LOGLEVEL", "warning").strip() or "warning"
     args: List[str] = ["-y", "-hide_banner", "-loglevel", loglevel]
     # Progress lines only when debugging with a verbose level.
     args += ["-stats", "-stats_period", "5"] if loglevel in ("info", "verbose", "debug") else ["-nostats"]
-    for team_id in member_team_ids:
-        if encoder == "nvenc":
+    for source_id in sources:
+        if hw_decode:
             # Decode on the GPU as well (frames are downloaded for the CPU
-            # scale/pad/xstack filters); ffmpeg falls back to software decoding
-            # per stream if NVDEC can't handle one.
+            # scale/pad/xstack filters). ffmpeg falls back to software per
+            # stream when NVDEC can't handle a codec/profile, but a CUDA
+            # *device* failure (no/broken driver) is fatal for the whole run;
+            # _start_multiview_run then retries without -hwaccel.
             args += ["-hwaccel", "cuda"]
         args += [
+            # Our own normalized sessions (one program, fixed PIDs): a short
+            # probe is plenty, and it opens each input much faster than the
+            # 5MB/5s default when four members open one after another.
+            "-probesize", "1000000",
+            "-analyzeduration", "1000000",
             "-reconnect", "1",
             "-reconnect_streamed", "1",
             "-reconnect_on_network_error", "1",
             "-reconnect_delay_max", "5",
             "-rw_timeout", "15000000",
             "-thread_queue_size", "1024",
-            "-i", _multiview_input_url(team_id),
+            "-i", _multiview_input_url(source_id),
         ]
 
     filter_graph = ";".join(part for part in (
@@ -5200,6 +5396,16 @@ def _child_process_creationflags() -> int:
     return 0
 
 
+def _ffmpeg_creationflags() -> int:
+    """Multi-View / placeholder ffmpeg: no console window, and below-normal
+    priority so a CPU (libx264) fallback encode can't starve Jellyfin's own
+    transcodes or this server's request handling."""
+    flags = _child_process_creationflags()
+    if sys.platform == "win32":
+        flags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+    return flags
+
+
 def _multiview_popen_kwargs(out_dir: Path) -> dict:
     kwargs = {
         "cwd": str(out_dir),
@@ -5208,7 +5414,7 @@ def _multiview_popen_kwargs(out_dir: Path) -> dict:
         "stderr": asyncio.subprocess.STDOUT,
     }
     if sys.platform == "win32":
-        kwargs["creationflags"] = _child_process_creationflags()
+        kwargs["creationflags"] = _ffmpeg_creationflags()
     return kwargs
 
 
@@ -5251,20 +5457,20 @@ async def _watch_multiview_process(channel_id: str, process: "asyncio.subprocess
             LOGGER.warning("multiview ffmpeg exited unexpectedly channel=%s code=%s\n%s", channel_id, returncode, log_tail)
 
 
-_WINDOWS_CLEANUP_JOB_HANDLE = None
+class _Win32ProcessApi:
+    """The kernel32 calls used for ffmpeg process control, with explicit
+    prototypes. Without restype=HANDLE ctypes returns a C int, which truncates
+    64-bit handles; a private WinDLL instance keeps these prototypes from
+    clashing with any other ctypes user of kernel32."""
 
+    PROCESS_TERMINATE = 0x0001
+    PROCESS_SET_QUOTA = 0x0100
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    SYNCHRONIZE = 0x00100000
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 
-def _get_windows_cleanup_job():
-    """Lazily create one Windows Job Object with KILL_ON_JOB_CLOSE for the lifetime
-    of this process. Any ffmpeg child assigned to it is terminated by Windows itself
-    if this process dies — including an ungraceful crash or Task Manager 'End Task'
-    where our own lifespan shutdown / _stop_*_process cleanup never gets to run."""
-    global _WINDOWS_CLEANUP_JOB_HANDLE
-    if sys.platform != "win32":
-        return None
-    if _WINDOWS_CLEANUP_JOB_HANDLE is not None:
-        return _WINDOWS_CLEANUP_JOB_HANDLE
-    try:
+    def __init__(self) -> None:
         import ctypes
         from ctypes import wintypes
 
@@ -5297,87 +5503,323 @@ def _get_windows_cleanup_job():
                 ("PeakJobMemoryUsed", ctypes.c_size_t),
             ]
 
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
-        JobObjectExtendedLimitInformation = 9
+        self.ctypes = ctypes
+        self.wintypes = wintypes
+        self.extended_limit_info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        HANDLE, BOOL, DWORD, UINT = wintypes.HANDLE, wintypes.BOOL, wintypes.DWORD, wintypes.UINT
+        PFILETIME = ctypes.POINTER(wintypes.FILETIME)
+        prototypes = {
+            "CreateJobObjectW": (HANDLE, [wintypes.LPVOID, wintypes.LPCWSTR]),
+            "SetInformationJobObject": (BOOL, [HANDLE, ctypes.c_int, wintypes.LPVOID, DWORD]),
+            "AssignProcessToJobObject": (BOOL, [HANDLE, HANDLE]),
+            "TerminateJobObject": (BOOL, [HANDLE, UINT]),
+            "OpenProcess": (HANDLE, [DWORD, BOOL, DWORD]),
+            "TerminateProcess": (BOOL, [HANDLE, UINT]),
+            "GetProcessTimes": (BOOL, [HANDLE, PFILETIME, PFILETIME, PFILETIME, PFILETIME]),
+            "WaitForSingleObject": (DWORD, [HANDLE, DWORD]),
+            "CloseHandle": (BOOL, [HANDLE]),
+        }
+        for name, (restype, argtypes) in prototypes.items():
+            function = getattr(k32, name)
+            function.restype = restype
+            function.argtypes = argtypes
+        self.k32 = k32
 
-        kernel32 = ctypes.windll.kernel32
-        h_job = kernel32.CreateJobObjectW(None, None)
+    def close(self, handle) -> None:
+        if handle:
+            self.k32.CloseHandle(handle)
+
+    def create_kill_on_close_job(self):
+        h_job = self.k32.CreateJobObjectW(None, None)
         if not h_job:
             return None
-        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not kernel32.SetInformationJobObject(
-            h_job, JobObjectExtendedLimitInformation, ctypes.byref(info), ctypes.sizeof(info)
+        info = self.extended_limit_info()
+        info.BasicLimitInformation.LimitFlags = self.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self.k32.SetInformationJobObject(
+            h_job, self.JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            self.ctypes.byref(info), self.ctypes.sizeof(info),
         ):
-            kernel32.CloseHandle(h_job)
+            self.close(h_job)
             return None
-        _WINDOWS_CLEANUP_JOB_HANDLE = h_job
         return h_job
+
+    def assign_pid(self, h_job, pid: int) -> bool:
+        h_process = self.k32.OpenProcess(self.PROCESS_TERMINATE | self.PROCESS_SET_QUOTA, False, pid)
+        if not h_process:
+            return False
+        try:
+            return bool(self.k32.AssignProcessToJobObject(h_job, h_process))
+        finally:
+            self.close(h_process)
+
+    def terminate_job(self, h_job) -> bool:
+        return bool(self.k32.TerminateJobObject(h_job, 1))
+
+    def _creation_time(self, h_process) -> Optional[int]:
+        times = [self.wintypes.FILETIME() for _ in range(4)]
+        if not self.k32.GetProcessTimes(h_process, *(self.ctypes.byref(t) for t in times)):
+            return None
+        return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+
+    def process_creation_time(self, pid: int) -> Optional[int]:
+        h_process = self.k32.OpenProcess(self.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h_process:
+            return None
+        try:
+            return self._creation_time(h_process)
+        finally:
+            self.close(h_process)
+
+    def terminate_pid_if_created_at(self, pid: int, created: int, wait_ms: int = 3000) -> bool:
+        """Kill `pid` only if it is still the process created at `created`
+        (a FILETIME): a bare pid may have been reused by anything since."""
+        access = self.PROCESS_TERMINATE | self.PROCESS_QUERY_LIMITED_INFORMATION | self.SYNCHRONIZE
+        h_process = self.k32.OpenProcess(access, False, pid)
+        if not h_process:
+            return False
+        try:
+            if self._creation_time(h_process) != created:
+                return False
+            if not self.k32.TerminateProcess(h_process, 1):
+                return False
+            self.k32.WaitForSingleObject(h_process, wait_ms)
+            return True
+        finally:
+            self.close(h_process)
+
+
+_WIN32_PROCESS_API = None  # None = not loaded yet, False = unavailable
+
+
+def _win32_process_api() -> Optional[_Win32ProcessApi]:
+    global _WIN32_PROCESS_API
+    if sys.platform != "win32":
+        return None
+    if _WIN32_PROCESS_API is None:
+        try:
+            _WIN32_PROCESS_API = _Win32ProcessApi()
+        except Exception as exc:
+            _log_failure("load kernel32 process API", exc)
+            _WIN32_PROCESS_API = False
+    return _WIN32_PROCESS_API or None
+
+
+_WINDOWS_CLEANUP_JOB_HANDLE = None
+
+
+def _get_windows_cleanup_job():
+    """Lazily create one Windows Job Object with KILL_ON_JOB_CLOSE for the lifetime
+    of this process. Any ffmpeg child assigned to it is terminated by Windows itself
+    if this process dies — including an ungraceful crash or Task Manager 'End Task'
+    where our own lifespan shutdown / _stop_*_process cleanup never gets to run.
+    Only a fallback now: each run normally gets its own job (_create_run_job)."""
+    global _WINDOWS_CLEANUP_JOB_HANDLE
+    if _WINDOWS_CLEANUP_JOB_HANDLE is not None:
+        return _WINDOWS_CLEANUP_JOB_HANDLE
+    api = _win32_process_api()
+    if api is None:
+        return None
+    try:
+        _WINDOWS_CLEANUP_JOB_HANDLE = api.create_kill_on_close_job()
     except Exception as exc:
         _log_failure("create Windows job object for child-process cleanup", exc)
         return None
+    return _WINDOWS_CLEANUP_JOB_HANDLE
 
 
 def _assign_child_to_cleanup_job(pid: int) -> None:
     """Best-effort; a failure here just means we fall back to explicit stop-on-shutdown
     cleanup (already in place) instead of Windows guaranteeing it on an ungraceful exit."""
-    if sys.platform != "win32":
-        return
+    api = _win32_process_api()
     h_job = _get_windows_cleanup_job()
-    if not h_job:
+    if api is None or not h_job:
         return
     try:
-        import ctypes
-        PROCESS_TERMINATE = 0x0001
-        PROCESS_SET_QUOTA = 0x0100
-        kernel32 = ctypes.windll.kernel32
-        h_process = kernel32.OpenProcess(PROCESS_TERMINATE | PROCESS_SET_QUOTA, False, pid)
-        if not h_process:
-            return
-        try:
-            kernel32.AssignProcessToJobObject(h_job, h_process)
-        finally:
-            kernel32.CloseHandle(h_process)
+        api.assign_pid(h_job, pid)
     except Exception as exc:
         _log_failure(f"assign pid={pid} to cleanup job object", exc)
 
 
-async def _stop_multiview_process(channel_id: str, *, term_timeout: float = 5.0, kill_timeout: float = 3.0) -> None:
-    entry = _MULTIVIEW_PROCESSES.pop(channel_id, None)
-    if not entry:
+def _create_run_job(pid: int):
+    """Put one ffmpeg run in its own Job Object (KILL_ON_JOB_CLOSE). Stopping
+    the run is then TerminateJobObject, which acts on the process objects in
+    the job and can never hit an unrelated process that reused the pid; and
+    Windows still kills the run if Jellyball dies without cleaning up (the job
+    handle closes with us). Returns the job handle, or None off Windows or if
+    no job could be made (then the shared cleanup job gives crash safety)."""
+    api = _win32_process_api()
+    if api is None:
+        return None
+    h_job = None
+    try:
+        h_job = api.create_kill_on_close_job()
+        if h_job and api.assign_pid(h_job, pid):
+            return h_job
+    except Exception as exc:
+        _log_failure(f"create job object for ffmpeg pid={pid}", exc)
+    if h_job:
+        api.close(h_job)
+    _assign_child_to_cleanup_job(pid)
+    return None
+
+
+RUN_PID_FILE = "ffmpeg.pid"
+
+
+def _write_run_pid_file(run_dir: Path, pid: int) -> None:
+    """Record pid + creation time in the run dir so the next startup can kill
+    this ffmpeg if Jellyball died without stopping it (and its job didn't take
+    it down). Windows only: the creation time is what proves a live pid is
+    still our ffmpeg rather than a reused pid."""
+    api = _win32_process_api()
+    if api is None:
         return
+    try:
+        created = api.process_creation_time(pid)
+        if created is not None:
+            (run_dir / RUN_PID_FILE).write_text(json.dumps({"pid": pid, "created": created}), encoding="utf-8")
+    except Exception as exc:
+        _log_failure(f"write ffmpeg pid file pid={pid}", exc)
+
+
+def _kill_orphaned_ffmpeg() -> int:
+    """Startup: kill ffmpeg runs a crashed previous instance left behind (pid
+    and creation time must both match its pid file). Returns how many were
+    killed. No-op off Windows."""
+    api = _win32_process_api()
+    if api is None:
+        return 0
+    pid_files: List[Path] = []
+    for root, pattern in ((MULTIVIEW_OUTPUT_ROOT, f"*/run*/{RUN_PID_FILE}"), (PLACEHOLDER_OUTPUT_DIR, f"run*/{RUN_PID_FILE}")):
+        try:
+            pid_files += list(root.glob(pattern))
+        except OSError:
+            continue
+    killed = 0
+    for pid_file in pid_files:
+        try:
+            record = json.loads(pid_file.read_text(encoding="utf-8"))
+            pid, created = int(record["pid"]), int(record["created"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        try:
+            if api.terminate_pid_if_created_at(pid, created):
+                killed += 1
+                LOGGER.warning("Killed orphaned ffmpeg pid=%d left by a previous run (%s)", pid, pid_file.parent)
+        except Exception as exc:
+            _log_failure(f"kill orphaned ffmpeg pid={pid}", exc)
+    return killed
+
+
+async def _taskkill_tree(pid: int, label: str) -> None:
+    try:
+        kill_proc = await asyncio.create_subprocess_exec(
+            "taskkill", "/F", "/T", "/PID", str(pid),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            creationflags=_child_process_creationflags(),
+        )
+        await asyncio.wait_for(kill_proc.wait(), timeout=10.0)
+    except (OSError, asyncio.TimeoutError) as exc:
+        _log_failure(f"taskkill ffmpeg {label}", exc, logging.ERROR)
+
+
+async def _terminate_ffmpeg(entry: dict, label: str, *, term_timeout: float = 5.0, kill_timeout: float = 3.0) -> None:
+    """Stop one Multi-View/placeholder ffmpeg run.
+
+    Windows: TerminateJobObject on the run's own job. It doesn't depend on
+    process.returncode (asyncio's Proactor loop has been seen reporting a
+    heavily-piped ffmpeg as exited while it was still encoding) and, unlike
+    `taskkill /PID`, can't kill an unrelated process that reused the pid.
+    Without a job: TerminateProcess through our own process handle (also
+    immune to pid reuse), and taskkill only as a last resort while asyncio
+    still considers the process alive."""
     process: asyncio.subprocess.Process = entry["process"]
-    if sys.platform == "win32":
-        # Do not trust process.returncode here: under a heavy piped-stdout
-        # ffmpeg process, asyncio's ProactorEventLoop has been observed to
-        # report a process as already exited while the real ffmpeg.exe is
-        # still alive and encoding, which would silently skip termination
-        # entirely and leak the process. taskkill acts on the OS process
-        # table directly regardless of what asyncio believes, and killing an
-        # already-dead PID is a harmless no-op.
-        try:
-            kill_proc = await asyncio.create_subprocess_exec(
-                "taskkill", "/F", "/T", "/PID", str(process.pid),
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-                creationflags=_child_process_creationflags(),
-            )
-            await kill_proc.wait()
-        except OSError as exc:
-            _log_failure(f"taskkill ffmpeg multiview={channel_id}", exc, logging.ERROR)
-        try:
-            await asyncio.wait_for(process.wait(), timeout=kill_timeout)
-        except asyncio.TimeoutError:
-            pass
-    elif process.returncode is None:
-        try:
-            process.terminate()
-            await asyncio.wait_for(process.wait(), timeout=term_timeout)
-        except (asyncio.TimeoutError, ProcessLookupError):
+    job = entry.pop("job", None)
+    try:
+        if sys.platform == "win32":
+            api = _win32_process_api()
+            terminated = False
+            if job and api is not None:
+                try:
+                    terminated = api.terminate_job(job)
+                except Exception as exc:
+                    _log_failure(f"terminate job ffmpeg {label}", exc)
+            if not terminated and process.returncode is None:
+                try:
+                    process.kill()
+                except (ProcessLookupError, OSError):
+                    pass
             try:
-                process.kill()
                 await asyncio.wait_for(process.wait(), timeout=kill_timeout)
-            except (asyncio.TimeoutError, ProcessLookupError) as exc:
-                _log_failure(f"kill ffmpeg multiview={channel_id}", exc, logging.ERROR)
+            except asyncio.TimeoutError:
+                if process.returncode is None:
+                    await _taskkill_tree(process.pid, label)
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=kill_timeout)
+                    except asyncio.TimeoutError:
+                        LOGGER.error("ffmpeg %s pid=%s did not exit after kill", label, process.pid)
+        elif process.returncode is None:
+            try:
+                process.terminate()
+                await asyncio.wait_for(process.wait(), timeout=term_timeout)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                try:
+                    process.kill()
+                    await asyncio.wait_for(process.wait(), timeout=kill_timeout)
+                except (asyncio.TimeoutError, ProcessLookupError) as exc:
+                    _log_failure(f"kill ffmpeg {label}", exc, logging.ERROR)
+    finally:
+        if job:
+            api = _win32_process_api()
+            if api is not None:
+                api.close(job)
+
+
+def _rmtree_with_retries(path: Path, attempts: int = 5, delay: float = 1.0) -> bool:
+    """Blocking (run it in a thread). Windows keeps a just-killed process's
+    files locked for a moment, so one rmtree right after the kill used to
+    leave the whole run directory (~100MB of segments) behind."""
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return True
+        except OSError:
+            if not path.exists():
+                return True
+            if attempt + 1 < attempts:
+                time.sleep(delay)
+    return not path.exists()
+
+
+def _remove_tree_later(path: Path, label: str) -> None:
+    """Delete a run directory off the event loop, retrying while files are locked."""
+    _spawn_background_task(asyncio.to_thread(_rmtree_with_retries, path), f"remove {label} output dir")
+
+
+def _prepare_run_dir(run_dir: Path, audio_outputs: int) -> None:
+    """Blocking: a fresh, empty run directory (plus a{N}/ per Multi-View audio output)."""
+    if run_dir.exists():
+        shutil.rmtree(run_dir, ignore_errors=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for idx in range(audio_outputs):
+        (run_dir / f"a{idx}").mkdir(parents=True, exist_ok=True)
+
+
+async def _stop_multiview_process(
+    channel_id: str,
+    *,
+    run_id: Optional[int] = None,
+    term_timeout: float = 5.0,
+    kill_timeout: float = 3.0,
+) -> bool:
+    """Stop the channel's current run (only if it is `run_id`, when given, so a
+    caller holding a stale snapshot can't kill a newer run). True if stopped."""
+    entry = _MULTIVIEW_PROCESSES.get(channel_id)
+    if not entry or (run_id is not None and entry.get("run_id") != run_id):
+        return False
+    _MULTIVIEW_PROCESSES.pop(channel_id, None)
+    await _terminate_ffmpeg(entry, f"multiview={channel_id}", term_timeout=term_timeout, kill_timeout=kill_timeout)
     for task_key in ("watch_task", "log_task"):
         task = entry.get(task_key)
         if task and not task.done():
@@ -5385,7 +5827,8 @@ async def _stop_multiview_process(channel_id: str, *, term_timeout: float = 5.0,
     tasks = [entry.get(key) for key in ("watch_task", "log_task") if entry.get(key)]
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-    shutil.rmtree(entry["output_dir"], ignore_errors=True)
+    _remove_tree_later(entry["output_dir"], f"multiview={channel_id}")
+    return True
 
 
 async def _read_hls_playlist_snapshot(path: Path) -> Optional[bytes]:
@@ -5427,38 +5870,124 @@ async def _wait_for_first_segment(
     return False
 
 
+def _multiview_entry_alive(entry: dict) -> bool:
+    return entry["process"].returncode is None and not entry.get("exited")
+
+
 def _running_multiview_count(exclude: str = "") -> int:
-    return sum(
-        1
-        for cid, entry in _MULTIVIEW_PROCESSES.items()
-        if cid != exclude and entry["process"].returncode is None and not entry.get("exited")
-    )
+    """Concurrency slots in use: live runs plus spawns that reserved a slot
+    and are still warming up or waiting for first segments."""
+    in_use = {cid for cid, entry in _MULTIVIEW_PROCESSES.items() if _multiview_entry_alive(entry)}
+    in_use |= _MULTIVIEW_SLOT_RESERVATIONS
+    in_use.discard(exclude)
+    return len(in_use)
 
 
 MULTIVIEW_MEMBER_WARM_TIMEOUT = bounded_float(os.getenv("MULTIVIEW_MEMBER_WARM_TIMEOUT", "20"), 20.0, 3.0, 120.0)
 MULTIVIEW_WATCHDOG_INTERVAL = bounded_float(os.getenv("MULTIVIEW_WATCHDOG_INTERVAL", "3"), 3.0, 1.0, 60.0)
 MULTIVIEW_AUDIO_CHANNELS = os.getenv("MULTIVIEW_AUDIO_CHANNELS", "1").strip().lower() not in ("0", "false", "no")
-NVENC_FALLBACK_SECONDS = 3600.0
+# Extra wait for the placeholder session when a member has to be replaced by it.
+MULTIVIEW_STANDIN_WAIT_SECONDS = 10.0
 PLACEHOLDER_SESSION_ID = "__placeholder__"
-_NVENC_FAILED_AT = 0.0
-_MULTIVIEW_RUN_COUNTER = 0
-_MULTIVIEW_START_TASKS: Dict[str, asyncio.Task] = {}
-_MULTIVIEW_LAST_VIEWER: Dict[str, float] = {}
-_NVENC_ERROR_MARKERS = (
-    "nvenc", "no capable devices", "openencodesessionex", "cuda", "cannot load nvcuda",
-    "driver does not support", "no nvenc capable",
+# MPEG-TS stream_type ffmpeg writes for AAC (ADTS): the generated silent track.
+_MULTIVIEW_SILENCE_AUDIO_TYPE = 0x0F
+# Monotonic time of the last GPU encoder / CUDA device failure (None = none yet).
+_HW_ENCODER_FAILED_AT: Optional[float] = None
+_CUDA_DECODE_FAILED_AT: Optional[float] = None
+# Encoder-specific failure wording, matched against the message part of a
+# failed run's log lines. Deliberately no bare "cuda": NVDEC's per-stream
+# software fallback ("Failed setup for format cuda") mentions it too, and
+# leaves the GPU encoder perfectly usable.
+_HW_ENCODER_MARKERS = {
+    "nvenc": (
+        "h264_nvenc", "hevc_nvenc", "openencodesessionex", "nvenc", "no capable devices found",
+        "cannot load nvcuda", "cannot load libcuda", "nvenc api version",
+        "driver does not support the required nvenc api version",
+    ),
+    "qsv": (
+        "h264_qsv", "hevc_qsv", "qsv", "mfx session", "libmfx", "libvpl", "device creation failed",
+    ),
+}
+_HW_ENCODER_NAMES = {"nvenc": ("h264_nvenc", "hevc_nvenc"), "qsv": ("h264_qsv", "hevc_qsv")}
+# CUDA *device* setup failures (no/broken NVIDIA driver). Unlike the per-stream
+# NVDEC fallback these are fatal for every input opened with -hwaccel cuda
+# (ffmpeg 9: "Hardware device setup failed for decoder" aborts the run), so a
+# retry must drop -hwaccel.
+_CUDA_INIT_FAILURE_MARKERS = (
+    "cannot load nvcuda", "cannot load libcuda", "could not dynamically load cuda",
+    "device creation failed", "no device available for decoder", "hardware device setup failed",
+    "cuinit",
 )
+_FFMPEG_LOG_CONTEXT_RE = re.compile(r"^\s*\[([^\]]*)\]\s*")
 
 
-def _multiview_encoder_choice() -> str:
-    if MULTIVIEW_HWACCEL == "nvenc" and time.monotonic() - _NVENC_FAILED_AT < NVENC_FALLBACK_SECONDS and _NVENC_FAILED_AT:
-        return "none"
-    return MULTIVIEW_HWACCEL
+def _ffmpeg_log_parts(line: str) -> Tuple[List[str], str]:
+    """'[vost#0:0/h264_nvenc @ 0x1] [enc:h264_nvenc @ 0x2] Error ...' ->
+    (['vost#0:0/h264_nvenc', 'enc:h264_nvenc'], 'error ...'), lowercased."""
+    contexts: List[str] = []
+    rest = line
+    while True:
+        match = _FFMPEG_LOG_CONTEXT_RE.match(rest)
+        if not match:
+            break
+        contexts.append(match.group(1).split(" @ ")[0].strip().lower())
+        rest = rest[match.end():]
+    return contexts, rest.strip().lower()
 
 
-def _looks_like_hw_encoder_failure(log_lines) -> bool:
-    text = "\n".join(log_lines).lower()
-    return any(marker in text for marker in _NVENC_ERROR_MARKERS)
+def _is_ffmpeg_stream_info(message: str) -> bool:
+    # Stream mapping / description / metadata lines name the encoder even when
+    # it works ("Stream #0:0 -> #0:0 (h264 (native) -> h264 (h264_nvenc))").
+    return message.startswith(("stream #", "stream mapping", "encoder")) or " -> " in message
+
+
+def _looks_like_hw_encoder_failure(log_lines, encoder: str = "nvenc") -> bool:
+    """True when a failed run's log blames the GPU *encoder* (NVENC or QSV)."""
+    encoder = (encoder or "").lower()
+    markers = _HW_ENCODER_MARKERS.get(encoder)
+    if not markers:
+        return False
+    names = _HW_ENCODER_NAMES[encoder]
+    for line in log_lines:
+        contexts, message = _ffmpeg_log_parts(str(line))
+        if not message or _is_ffmpeg_stream_info(message):
+            continue
+        if any(marker in message for marker in markers):
+            return True
+        # Anything the encoder itself logged on a failed run ("[h264_nvenc @ ..] InitializeEncoder failed").
+        if any(context in names for context in contexts):
+            return True
+        # fftools' wrapper around it ("[enc:h264_nvenc @ ..] Error while opening encoder").
+        if ("error while opening encoder" in message or "could not open encoder" in message) and any(
+            context.endswith(names) for context in contexts
+        ):
+            return True
+    return False
+
+
+def _looks_like_cuda_init_failure(log_lines) -> bool:
+    for line in log_lines:
+        _, message = _ffmpeg_log_parts(str(line))
+        if any(marker in message for marker in _CUDA_INIT_FAILURE_MARKERS):
+            return True
+    return False
+
+
+def _multiview_encoder_plan(now: Optional[float] = None) -> Tuple[str, bool]:
+    """(encoder, use -hwaccel cuda) for the next run. Within
+    NVENC_FALLBACK_SECONDS of a GPU encoder failure new runs use libx264, then
+    the GPU is tried again. CUDA decoding stays on in that fallback unless the
+    CUDA device itself failed."""
+    now = time.monotonic() if now is None else now
+    encoder = MULTIVIEW_HWACCEL
+    if (
+        encoder in _HW_ENCODER_MARKERS
+        and _HW_ENCODER_FAILED_AT is not None
+        and now - _HW_ENCODER_FAILED_AT < NVENC_FALLBACK_SECONDS
+    ):
+        encoder = "none"
+    cuda_broken = _CUDA_DECODE_FAILED_AT is not None and now - _CUDA_DECODE_FAILED_AT < NVENC_FALLBACK_SECONDS
+    return encoder, MULTIVIEW_HWACCEL == "nvenc" and not cuda_broken
 
 
 def _multiview_audio_index(data: dict) -> int:
@@ -5472,144 +6001,302 @@ def _multiview_member_label(team_id: str) -> str:
     return str(member.get("name") or team_id) if member else f"{team_id} (removed)"
 
 
-async def _warm_multiview_members(member_team_ids: List[str]) -> List[bool]:
+from typing import NamedTuple  # noqa: E402 (kept local to the Multi-View section)
+
+
+class _MultiviewInput(NamedTuple):
+    team_id: str                # the configured member
+    session_id: str             # channel session ffmpeg reads for this pane
+    has_audio: bool             # known to carry audio (else: silent track)
+    audio_type: Optional[int]   # MPEG-TS stream_type of that audio, if known
+    standin: bool               # an existing member replaced by the placeholder for this run
+
+
+async def _warm_multiview_members(member_team_ids: List[str]) -> List[_MultiviewInput]:
     """Start every member's channel session in parallel and wait for each to
     have a playable window before ffmpeg opens them one after another (four
-    cold members used to blow the startup timeout). Returns audio presence per
-    member, as reported by each session's TS normalizer."""
-    sessions = []
-    for team_id in member_team_ids:
-        session_id = team_id if team_id in stream_state else PLACEHOLDER_SESSION_ID
-        session = SESSIONS.get(session_id)
-        session.touch()
-        sessions.append(session)
-    await asyncio.gather(
-        *(session.wait_ready(MULTIVIEW_MEMBER_WARM_TIMEOUT) for session in sessions),
-        return_exceptions=True,
-    )
-    return [session.has_audio is not False for session in sessions]
+    cold members used to blow the startup timeout).
 
+    A member still not ready after MULTIVIEW_MEMBER_WARM_TIMEOUT is fed from
+    the "No Signal" placeholder session for this run instead: its own
+    /stream/x.m3u8 would answer 503, ffmpeg's -i would fail, and one slow
+    member would push the whole grid into failure backoff. The placeholder is
+    only warmed once some member is still pending halfway through the wait,
+    and the watchdog swaps the real member in once it is live."""
+    session_ids = [team_id if team_id in stream_state else PLACEHOLDER_SESSION_ID for team_id in member_team_ids]
+    waits: Dict[str, asyncio.Future] = {}
+    for session_id in session_ids:
+        if session_id not in waits:
+            session = SESSIONS.get(session_id)
+            session.touch()
+            waits[session_id] = asyncio.ensure_future(session.wait_ready(MULTIVIEW_MEMBER_WARM_TIMEOUT))
+    try:
+        _, pending = await asyncio.wait(list(waits.values()), timeout=MULTIVIEW_MEMBER_WARM_TIMEOUT / 2)
+        if pending and PLACEHOLDER_SESSION_ID not in waits:
+            SESSIONS.get(PLACEHOLDER_SESSION_ID).touch()
+        await asyncio.gather(*waits.values(), return_exceptions=True)
+    finally:
+        for wait in waits.values():
+            if not wait.done():
+                wait.cancel()
 
-async def _spawn_multiview(channel_id: str, data: dict) -> Tuple[bool, str]:
-    """Start ffmpeg for a multiview channel if it isn't already running.
-    Returns (True, "") once every per-audio output has a first segment, or
-    (False, detail) on refusal/failure - `detail` is only meaningful when no entry
-    has been recorded in _MULTIVIEW_FAILURES (the caller prefers that dict's
-    message when one exists, e.g. after a real ffmpeg failure)."""
-    global _MULTIVIEW_RUN_COUNTER, _NVENC_FAILED_AT
-    async with _multiview_lock(channel_id):
-        entry = _MULTIVIEW_PROCESSES.get(channel_id)
-        if entry and entry["process"].returncode is None and not entry.get("exited"):
-            return True, ""
+    def is_ready(session_id: str) -> bool:
+        wait = waits.get(session_id)
+        return bool(wait and wait.done() and not wait.cancelled() and wait.exception() is None and wait.result())
 
-        if not FFMPEG_AVAILABLE:
-            LOGGER.warning("Refusing to start multiview channel=%s: ffmpeg unavailable", channel_id)
-            return False, "Multi-View stream failed to start: ffmpeg is unavailable"
+    standins = {
+        index for index, session_id in enumerate(session_ids)
+        if session_id != PLACEHOLDER_SESSION_ID and not is_ready(session_id)
+    }
+    placeholder_ready = is_ready(PLACEHOLDER_SESSION_ID)
+    if (standins or PLACEHOLDER_SESSION_ID in waits) and not placeholder_ready:
+        placeholder = SESSIONS.get(PLACEHOLDER_SESSION_ID)
+        placeholder.touch()
+        placeholder_ready = await placeholder.wait_ready(MULTIVIEW_STANDIN_WAIT_SECONDS)
 
-        cooldown = _multiview_cooldown_remaining(channel_id)
-        if cooldown > 0:
-            LOGGER.info("Skipping multiview spawn channel=%s: %.0fs left in failure backoff", channel_id, cooldown)
-            return False, ""
-
-        running_count = _running_multiview_count(exclude=channel_id)
-        if running_count >= MAX_CONCURRENT_MULTIVIEW:
+    inputs: List[_MultiviewInput] = []
+    for index, (team_id, session_id) in enumerate(zip(member_team_ids, session_ids)):
+        standin = index in standins
+        if standin:
             LOGGER.warning(
-                "Refusing to start multiview channel=%s: %d/%d concurrent Multi-View streams already running",
-                channel_id, running_count, MAX_CONCURRENT_MULTIVIEW,
+                "Multi-View member %s not ready after %.0fs; its pane shows No Signal for this run",
+                team_id, MULTIVIEW_MEMBER_WARM_TIMEOUT,
             )
-            return False, (
-                f"Multi-View stream failed to start: {MAX_CONCURRENT_MULTIVIEW} concurrent Multi-View "
-                "channel(s) are already running. Stop one first, or raise MAX_CONCURRENT_MULTIVIEW."
+            session_id = PLACEHOLDER_SESSION_ID
+        ready = placeholder_ready if session_id == PLACEHOLDER_SESSION_ID else True
+        session = SESSIONS.peek(session_id)
+        # Unknown audio (None) counts as none: -map N:a:0 on an input without
+        # audio fails the whole run, the silent track never does.
+        has_audio = bool(ready and session is not None and session.has_audio is True)
+        signature = session.codec_signature if has_audio and session is not None else None
+        audio_type = signature[1] if signature and len(signature) > 1 else None
+        inputs.append(_MultiviewInput(team_id, session_id, has_audio, audio_type, standin))
+    return inputs
+
+
+def _multiview_spawn_wanted(channel_id: str, data: dict) -> bool:
+    """Re-checked after every await of a spawn: the channel may have been
+    removed/replaced, or stopped from the dashboard, in the meantime."""
+    return stream_state.get(channel_id) is data and channel_id not in _MULTIVIEW_MANUAL_STOPS
+
+
+async def _spawn_multiview(channel_id: str, data: dict) -> None:
+    """Start ffmpeg for a Multi-View channel unless it's already running.
+
+    Only ever runs as the channel's _MULTIVIEW_START_TASKS entry (see
+    _request_multiview_start), which serializes starts per channel; Stop and
+    Remove cancel that task. Outcomes are recorded, not returned: failures in
+    _MULTIVIEW_FAILURES (backoff), refusals as a short hold, success as a
+    ready _MULTIVIEW_PROCESSES entry."""
+    entry = _MULTIVIEW_PROCESSES.get(channel_id)
+    if entry and _multiview_entry_alive(entry):
+        return
+    if not _multiview_spawn_wanted(channel_id, data) or _multiview_cooldown_remaining(channel_id) > 0:
+        return
+    if not FFMPEG_AVAILABLE:
+        _record_multiview_refusal(channel_id, "ffmpeg is unavailable")
+        return
+    in_use = _running_multiview_count(exclude=channel_id)
+    if in_use >= MAX_CONCURRENT_MULTIVIEW:
+        _record_multiview_refusal(
+            channel_id,
+            f"{in_use}/{MAX_CONCURRENT_MULTIVIEW} concurrent Multi-View streams already running "
+            "(stop one, or raise MAX_CONCURRENT_MULTIVIEW)",
+        )
+        return
+    _MULTIVIEW_REFUSALS.pop(channel_id, None)
+    _MULTIVIEW_SLOT_RESERVATIONS.add(channel_id)
+    try:
+        await _start_multiview_run(channel_id, data)
+    finally:
+        _MULTIVIEW_SLOT_RESERVATIONS.discard(channel_id)
+
+
+async def _start_multiview_run(channel_id: str, data: dict) -> None:
+    global _MULTIVIEW_RUN_COUNTER, _HW_ENCODER_FAILED_AT, _CUDA_DECODE_FAILED_AT
+    inputs = await _warm_multiview_members(list(data["member_team_ids"]))
+    if not _multiview_spawn_wanted(channel_id, data):
+        LOGGER.info("Multi-View channel=%s was removed or stopped while warming up; not starting", channel_id)
+        return
+    stale = _MULTIVIEW_PROCESSES.get(channel_id)
+    if stale is not None:  # a dead run the idle monitor hasn't reaped yet
+        await _stop_multiview_process(channel_id, run_id=stale.get("run_id"))
+
+    encoder, hw_decode = _multiview_encoder_plan()
+    error = "ffmpeg exited unexpectedly"
+    for _attempt in range(3):
+        _MULTIVIEW_RUN_COUNTER += 1
+        outcome, lines = await _launch_multiview_run(channel_id, data, _MULTIVIEW_RUN_COUNTER, inputs, encoder, hw_decode)
+        if outcome != "failed":
+            return
+        error = _multiview_error_from_log(lines) if lines else "ffmpeg exited unexpectedly"
+        if encoder in _HW_ENCODER_MARKERS and _looks_like_hw_encoder_failure(lines, encoder):
+            # GPU encoder unavailable (driver, session limit shared with
+            # Jellyfin's own transcodes, ...): retry this same spawn with
+            # libx264 right away, and keep new runs on it for a while.
+            cuda_broken = hw_decode and _looks_like_cuda_init_failure(lines)
+            _HW_ENCODER_FAILED_AT = time.monotonic()
+            if cuda_broken:
+                _CUDA_DECODE_FAILED_AT = _HW_ENCODER_FAILED_AT
+            hw_decode = hw_decode and not cuda_broken
+            LOGGER.warning(
+                "%s unavailable for multiview channel=%s (%s); retrying with libx264%s, GPU re-tried in %.0fs",
+                encoder.upper(), channel_id, error, " + CUDA decoding" if hw_decode else "", NVENC_FALLBACK_SECONDS,
             )
+            encoder = "none"
+            continue
+        if hw_decode and _looks_like_cuda_init_failure(lines):
+            _CUDA_DECODE_FAILED_AT = time.monotonic()
+            hw_decode = False
+            LOGGER.warning("CUDA decoding unavailable for multiview channel=%s (%s); retrying with software decoding", channel_id, error)
+            continue
+        break
+    _record_multiview_failure(channel_id, error)
+    LOGGER.error("multiview channel=%s failed to produce first segments in time: %s", channel_id, error)
 
-        members = list(data["member_team_ids"])
-        audio_presence = await _warm_multiview_members(members)
 
-        for attempt in range(2):
-            encoder = _multiview_encoder_choice()
-            _MULTIVIEW_RUN_COUNTER += 1
-            run_id = _MULTIVIEW_RUN_COUNTER
-            run_dir = MULTIVIEW_OUTPUT_ROOT / channel_id / f"run{run_id}"
-            shutil.rmtree(run_dir, ignore_errors=True)
-            for idx in range(len(members)):
-                (run_dir / f"a{idx}").mkdir(parents=True, exist_ok=True)
+async def _launch_multiview_run(
+    channel_id: str,
+    data: dict,
+    run_id: int,
+    inputs: List[_MultiviewInput],
+    encoder: str,
+    hw_decode: bool,
+) -> Tuple[str, List[str]]:
+    """One ffmpeg attempt: ("ready" | "failed" | "aborted", log lines of a failed run)."""
+    run_dir = MULTIVIEW_OUTPUT_ROOT / channel_id / f"run{run_id}"
+    _MULTIVIEW_PENDING_RUN_DIRS.add(run_dir)
+    try:
+        await asyncio.to_thread(_prepare_run_dir, run_dir, len(inputs))
+        if not _multiview_spawn_wanted(channel_id, data):
+            _remove_tree_later(run_dir, f"multiview={channel_id}")
+            return "aborted", []
+        args = _build_multiview_ffmpeg_args(
+            channel_id, data, run_dir, [item.has_audio for item in inputs], encoder,
+            hw_decode=hw_decode, input_ids=[item.session_id for item in inputs],
+        )
+        try:
+            process = await asyncio.create_subprocess_exec(MULTIVIEW_FFMPEG_PATH, *args, **_multiview_popen_kwargs(run_dir))
+        except (FileNotFoundError, OSError) as exc:
+            _log_failure(f"spawn ffmpeg multiview={channel_id}", exc, logging.ERROR)
+            _remove_tree_later(run_dir, f"multiview={channel_id}")
+            return "failed", ["could not launch ffmpeg"]
+        job = _create_run_job(process.pid)
+        _write_run_pid_file(run_dir, process.pid)
 
-            args = _build_multiview_ffmpeg_args(channel_id, data, run_dir, audio_presence, encoder)
-            try:
-                process = await asyncio.create_subprocess_exec(MULTIVIEW_FFMPEG_PATH, *args, **_multiview_popen_kwargs(run_dir))
-            except (FileNotFoundError, OSError) as exc:
-                _log_failure(f"spawn ffmpeg multiview={channel_id}", exc, logging.ERROR)
-                shutil.rmtree(run_dir, ignore_errors=True)
-                return False, "Multi-View stream failed to start: could not launch ffmpeg"
-            _assign_child_to_cleanup_job(process.pid)
-
-            log_lines: "deque[str]" = deque(maxlen=200)
-            watch_task = _spawn_background_task(
-                _watch_multiview_process(channel_id, process),
-                f"watch multiview ffmpeg={channel_id}",
-            )
-            log_task = _spawn_background_task(
-                _drain_multiview_log(channel_id, process, log_lines),
-                f"drain multiview ffmpeg log={channel_id}",
-            )
-            now = time.monotonic()
-            _MULTIVIEW_PROCESSES[channel_id] = {
-                "process": process,
-                "output_dir": run_dir,
-                "run_id": run_id,
-                "audio_count": len(members),
-                "encoder": encoder,
-                "ready": False,
-                "started_at": now,
-                "last_access": max(now, _MULTIVIEW_LAST_VIEWER.get(channel_id, 0.0)),
-                "exited": False,
-                "exit_code": None,
-                "watch_task": watch_task,
-                "log_task": log_task,
-                "log_lines": log_lines,
-            }
-
+        log_lines: "deque[str]" = deque(maxlen=200)
+        watch_task = _spawn_background_task(
+            _watch_multiview_process(channel_id, process),
+            f"watch multiview ffmpeg={channel_id}",
+        )
+        log_task = _spawn_background_task(
+            _drain_multiview_log(channel_id, process, log_lines),
+            f"drain multiview ffmpeg log={channel_id}",
+        )
+        now = time.monotonic()
+        entry = {
+            "process": process,
+            "job": job,
+            "output_dir": run_dir,
+            "run_id": run_id,
+            "audio_count": len(inputs),
+            # Output a{N} carries member N's own (stream-copied) audio codec,
+            # or the generated AAC silence; part of the views' source key.
+            "audio_types": [item.audio_type if item.has_audio else _MULTIVIEW_SILENCE_AUDIO_TYPE for item in inputs],
+            "standins": [item.team_id for item in inputs if item.standin],
+            "encoder": encoder,
+            "hw_decode": hw_decode,
+            "ready": False,
+            "started_at": now,
+            "last_access": max(now, _MULTIVIEW_LAST_VIEWER.get(channel_id, 0.0)),
+            "exited": False,
+            "exit_code": None,
+            "watch_task": watch_task,
+            "log_task": log_task,
+            "log_lines": log_lines,
+        }
+        _MULTIVIEW_PROCESSES[channel_id] = entry
+        try:
             results = await asyncio.gather(*(
                 _wait_for_first_segment(run_dir / f"a{idx}", process, MULTIVIEW_STARTUP_TIMEOUT_SECONDS)
-                for idx in range(len(members))
+                for idx in range(len(inputs))
             ))
-            if all(results):
-                _MULTIVIEW_PROCESSES[channel_id]["ready"] = True
-                _clear_multiview_failure(channel_id)
-                LOGGER.info("Multi-View running channel=%s run=%d encoder=%s", channel_id, run_id, encoder)
-                for session_id in _multiview_view_session_ids(channel_id):
-                    SESSIONS.poke(session_id)
-                return True, ""
-
-            failed_entry = _MULTIVIEW_PROCESSES.get(channel_id)
-            lines = list(failed_entry.get("log_lines", [])) if failed_entry else []
-            error = _multiview_error_from_log(lines) if lines else "ffmpeg exited unexpectedly"
-            await _stop_multiview_process(channel_id)
-            if encoder == "nvenc" and attempt == 0 and _looks_like_hw_encoder_failure(lines):
-                # GPU unavailable (driver, session limit shared with Jellyfin's own
-                # transcodes, ...): fall back to software encoding for a while
-                # instead of failing into backoff.
-                _NVENC_FAILED_AT = time.monotonic()
-                LOGGER.warning("NVENC unavailable for multiview channel=%s (%s); retrying with libx264", channel_id, error)
-                continue
-            _record_multiview_failure(channel_id, error)
-            LOGGER.error("multiview channel=%s failed to produce first segments in time: %s", channel_id, error)
-            return False, ""
-        return False, ""
+        except asyncio.CancelledError:
+            # Stop/Remove cancelled this spawn: never leave its ffmpeg behind.
+            await _stop_multiview_process(channel_id, run_id=run_id)
+            raise
+        if not _multiview_spawn_wanted(channel_id, data) or _MULTIVIEW_PROCESSES.get(channel_id) is not entry:
+            # Stopped/removed meanwhile, or the run was already taken down
+            # elsewhere (then this stop is a no-op): not a failure to back off.
+            await _stop_multiview_process(channel_id, run_id=run_id)
+            return "aborted", []
+        if all(results):
+            entry["ready"] = True
+            _clear_multiview_failure(channel_id)
+            LOGGER.info(
+                "Multi-View running channel=%s run=%d encoder=%s%s",
+                channel_id, run_id, encoder, " (CUDA decoding)" if hw_decode else "",
+            )
+            for session_id in _multiview_view_session_ids(channel_id):
+                SESSIONS.poke(session_id)
+            return "ready", []
+        lines = list(log_lines)
+        await _stop_multiview_process(channel_id, run_id=run_id)
+        return "failed", lines
+    finally:
+        _MULTIVIEW_PENDING_RUN_DIRS.discard(run_dir)
 
 
 def _request_multiview_start(channel_id: str) -> None:
     data = stream_state.get(channel_id)
     if not data or data.get("type") != "multiview":
         return
+    if channel_id in _MULTIVIEW_MANUAL_STOPS:
+        return
     task = _MULTIVIEW_START_TASKS.get(channel_id)
     if task is not None and not task.done():
         return
     if _multiview_cooldown_remaining(channel_id) > 0:
         return
-    _MULTIVIEW_START_TASKS[channel_id] = _spawn_background_task(
-        _spawn_multiview(channel_id, data), f"start multiview channel={channel_id}"
-    )
+    task = _spawn_background_task(_spawn_multiview(channel_id, data), f"start multiview channel={channel_id}")
+    _MULTIVIEW_START_TASKS[channel_id] = task
+
+    def _forget(done: asyncio.Task, cid: str = channel_id) -> None:
+        if _MULTIVIEW_START_TASKS.get(cid) is done:
+            _MULTIVIEW_START_TASKS.pop(cid, None)
+
+    task.add_done_callback(_forget)
+
+
+def _multiview_start_in_progress(channel_id: str) -> bool:
+    task = _MULTIVIEW_START_TASKS.get(channel_id)
+    return task is not None and not task.done()
+
+
+async def _cancel_multiview_start(channel_id: str) -> bool:
+    """Cancel and await an in-progress spawn (which stops any ffmpeg it had
+    already launched). True if one was running."""
+    task = _MULTIVIEW_START_TASKS.pop(channel_id, None)
+    if task is None or task.done():
+        return False
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    return True
+
+
+async def _stop_multiview_manually(channel_id: str) -> None:
+    """Dashboard Stop: stop the grid and keep it stopped (see _MULTIVIEW_MANUAL_STOPS)."""
+    _MULTIVIEW_MANUAL_STOPS[channel_id] = time.monotonic()
+    await _cancel_multiview_start(channel_id)
+    await _stop_multiview_process(channel_id)
+    LOGGER.info("Multi-View channel=%s stopped from the dashboard; it stays stopped until a new viewer tunes in", channel_id)
+    for session_id in _multiview_view_session_ids(channel_id):
+        SESSIONS.poke(session_id)
+
+
+def _clear_multiview_manual_stop(channel_id: str, why: str) -> None:
+    if _MULTIVIEW_MANUAL_STOPS.pop(channel_id, None) is not None:
+        LOGGER.info("Multi-View channel=%s may start again (%s)", channel_id, why)
 
 
 def _multiview_view_session_ids(channel_id: str) -> List[str]:
@@ -5631,34 +6318,63 @@ def _multiview_view_for_session(session_id: str) -> Optional[Tuple[str, Optional
     return None
 
 
+def _multiview_output_audio_tag(entry: dict, index: int) -> str:
+    """Source-key component for Multi-View output a{index}: its audio codec
+    (MPEG-TS stream_type) when known, else the output index itself."""
+    audio_types = entry.get("audio_types") or []
+    audio_type = audio_types[index] if 0 <= index < len(audio_types) else None
+    return f"audio:{audio_type:#04x}" if isinstance(audio_type, int) else f"audio:a{index}"
+
+
 def _resolve_multiview_view_source(channel_id: str, audio_index: Optional[int]) -> Optional[SourceSpec]:
     data = stream_state.get(channel_id)
     if not data or data.get("type") != "multiview":
         return None
+    if channel_id in _MULTIVIEW_MANUAL_STOPS:
+        return _placeholder_source()
     entry = _MULTIVIEW_PROCESSES.get(channel_id)
-    if entry and entry.get("ready") and entry["process"].returncode is None and not entry.get("exited"):
+    if entry and entry.get("ready") and _multiview_entry_alive(entry):
         members = data.get("member_team_ids") or []
         index = _multiview_audio_index(data) if audio_index is None else audio_index
         index = max(0, min(index, entry["audio_count"] - 1))
         label = _multiview_member_label(members[index]) if index < len(members) else f"audio {index}"
-        # Same key for every audio output of one run: switching the main
-        # channel's audio is just a URL change and continues seamlessly (all
-        # outputs share segment numbers and timestamps). A new run (restart)
-        # is a new key -> discontinuity, re-based timestamps.
+        # One key per (run, audio codec). All outputs of a run share segment
+        # numbers and video timestamps, so switching the main channel's audio
+        # to an output whose audio has the same codec is just a URL change
+        # and continues seamlessly. Member audio is stream-copied, though, so
+        # each output carries its own member's codec: switching to a different
+        # one (say AAC -> AC-3) gets a new key, i.e. a new normalizer epoch and
+        # a discontinuity, so the player re-probes instead of hitting a PMT
+        # change mid-stream. When a codec isn't known the key uses the output
+        # index, making every switch to/from it a clean discontinuity. A new
+        # run (restart) is always a new key.
         return SourceSpec(
-            key=("multiview", channel_id, entry["run_id"]),
+            key=("multiview", channel_id, entry["run_id"], _multiview_output_audio_tag(entry, index)),
             url=str(entry["output_dir"] / f"a{index}" / "index.m3u8"),
             local=True,
             label=f"Multi-View {label}",
         )
     _request_multiview_start(channel_id)
     if _multiview_cooldown_remaining(channel_id) > 0 or not FFMPEG_AVAILABLE:
+        # Backoff, refusal (concurrency cap) or no ffmpeg: No Signal, not a 503.
         return _placeholder_source()
     return None  # starting: the session waits (and keeps its current window)
 
 
+def _multiview_view_sessions_running(channel_id: str) -> bool:
+    for session_id in _multiview_view_session_ids(channel_id):
+        session = SESSIONS.peek(session_id)
+        if session is not None and session.is_running:
+            return True
+    return False
+
+
 def _touch_multiview_viewer(channel_id: str) -> None:
     now = time.monotonic()
+    if channel_id in _MULTIVIEW_MANUAL_STOPS and not _multiview_view_sessions_running(channel_id):
+        # No view session is running, so this request starts a new one: a
+        # fresh tune after the Stop counts as an explicit play.
+        _clear_multiview_manual_stop(channel_id, "new viewer tuned in")
     _MULTIVIEW_LAST_VIEWER[channel_id] = now
     entry = _MULTIVIEW_PROCESSES.get(channel_id)
     if entry:
@@ -5667,36 +6383,135 @@ def _touch_multiview_viewer(channel_id: str) -> None:
 
 def _on_multiview_view_failure(session_id: str, source_key: tuple, reason: str) -> None:
     view = _multiview_view_for_session(session_id)
-    if view is None or len(source_key) != 3 or source_key[0] != "multiview":
+    if view is None or len(source_key) < 3 or source_key[0] != "multiview":
         return
     channel_id = view[0]
+    run_id = source_key[2]
     entry = _MULTIVIEW_PROCESSES.get(channel_id)
-    if entry and entry.get("run_id") == source_key[2]:
+    if entry and entry.get("run_id") == run_id:
         _spawn_background_task(
-            _restart_multiview(channel_id, f"view reported {reason}"),
+            _restart_multiview(channel_id, f"view reported {reason}", run_id=run_id),
             f"restart multiview channel={channel_id}",
         )
 
 
-async def _restart_multiview(channel_id: str, reason: str) -> None:
+async def _restart_multiview(
+    channel_id: str,
+    reason: str,
+    run_id: Optional[int] = None,
+    *,
+    count_toward_backoff: bool = True,
+) -> bool:
+    """Restart a Multi-View. With `run_id` it only acts if that run is still
+    the current one: the watchdog and the view sessions work from snapshots,
+    and a restart that already replaced run N with N+1 must not be followed
+    by a second one killing N+1. Without `run_id` (a config change, e.g. a
+    member was removed) it also cancels a spawn in progress so the new run
+    picks up the change. Restarts are counted in a rolling window and backed
+    off (see _note_multiview_restart). True if a restart happened."""
     entry = _MULTIVIEW_PROCESSES.get(channel_id)
-    if entry is None or entry.get("restarting"):
-        return
-    entry["restarting"] = True
-    LOGGER.warning("Restarting multiview channel=%s reason=%s", channel_id, reason)
-    await _stop_multiview_process(channel_id)
-    _request_multiview_start(channel_id)
+    if run_id is not None:
+        if entry is None or entry.get("run_id") != run_id:
+            LOGGER.info(
+                "Ignoring restart of stale multiview run channel=%s run=%s current=%s reason=%s",
+                channel_id, run_id, entry.get("run_id") if entry else None, reason,
+            )
+            return False
+    else:
+        cancelled = await _cancel_multiview_start(channel_id)
+        entry = _MULTIVIEW_PROCESSES.get(channel_id)
+        if entry is None and not cancelled:
+            return False
+    if entry is not None and entry.get("restarting"):
+        return False
+    if entry is not None:
+        entry["restarting"] = True
+    count, delay = _note_multiview_restart(channel_id, reason) if count_toward_backoff else (0, 0.0)
+    if delay > 0:
+        LOGGER.warning(
+            "Restarting multiview channel=%s run=%s reason=%s; %d restarts in %.0f min, next start held %.0fs",
+            channel_id, entry.get("run_id") if entry else None, reason, count,
+            MULTIVIEW_RESTART_WINDOW_SECONDS / 60, delay,
+        )
+    else:
+        LOGGER.warning(
+            "Restarting multiview channel=%s run=%s reason=%s",
+            channel_id, entry.get("run_id") if entry else None, reason,
+        )
+    if entry is not None:
+        await _stop_multiview_process(channel_id, run_id=entry["run_id"])
+    _request_multiview_start(channel_id)  # no-op while held; the next viewer poll starts it
+    return True
 
 
 def _newest_segment_age(output_dir: Path) -> Optional[float]:
+    """Seconds since this output last produced a segment, or None if it has
+    no playlist either (broken output).
+
+    ffmpeg's delete_segments removes old files constantly, so a file can
+    vanish between the glob and its stat: that one file is skipped rather
+    than the whole output being reported stalled (which restarted healthy
+    grids). An output with no segment file visible falls back to its
+    playlist's age, so it only counts as stalled once the playlist is stale."""
     newest = None
     try:
-        for path in output_dir.glob("seg_*.ts"):
-            mtime = path.stat().st_mtime
-            newest = mtime if newest is None or mtime > newest else newest
+        paths = list(output_dir.glob("seg_*.ts"))
     except OSError:
-        return None
-    return None if newest is None else max(0.0, time.time() - newest)
+        paths = []
+    for path in paths:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        newest = mtime if newest is None or mtime > newest else newest
+    if newest is None:
+        try:
+            newest = (output_dir / "index.m3u8").stat().st_mtime
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return 0.0  # can't tell right now (e.g. a sharing violation): not evidence of a stall
+    return max(0.0, time.time() - newest)
+
+
+async def _swap_in_ready_members(channel_id: str, entry: dict) -> None:
+    """A pane showing the stand-in placeholder gets its real member back once
+    that member is live: keep its session warm meanwhile and restart the run
+    when it flows, as long as that restart wouldn't be backed off."""
+    live = []
+    for team_id in entry.get("standins") or []:
+        if team_id not in stream_state:
+            continue
+        session = SESSIONS.get(team_id)
+        session.touch()
+        source = session.source
+        if session.is_flowing() and source is not None and not _is_placeholder_key(source.key):
+            live.append(team_id)
+    if live and _multiview_restart_delay(_recent_multiview_restarts(channel_id) + 1) == 0:
+        await _restart_multiview(channel_id, f"member(s) {live} live now", run_id=entry["run_id"])
+
+
+async def _multiview_watchdog_pass(stall_after: float) -> None:
+    now = time.monotonic()
+    for channel_id, entry in list(_MULTIVIEW_PROCESSES.items()):
+        if not entry.get("ready") or entry.get("restarting"):
+            continue
+        run_id = entry["run_id"]
+        watched = now - entry.get("last_access", 0.0) < MULTIVIEW_IDLE_TIMEOUT_SECONDS
+        if not _multiview_entry_alive(entry):
+            if watched:
+                await _restart_multiview(channel_id, f"ffmpeg exited code={entry.get('exit_code')}", run_id=run_id)
+            continue
+        if now - entry["started_at"] < MULTIVIEW_STARTUP_TIMEOUT_SECONDS:
+            continue
+        ages = await asyncio.to_thread(
+            lambda e=entry: [_newest_segment_age(e["output_dir"] / f"a{i}") for i in range(e["audio_count"])]
+        )
+        stalled = [i for i, age in enumerate(ages) if age is None or age > stall_after]
+        if stalled:
+            await _restart_multiview(channel_id, f"output stalled audio={stalled}", run_id=run_id)
+        elif watched and entry.get("standins"):
+            await _swap_in_ready_members(channel_id, entry)
 
 
 async def multiview_watchdog() -> None:
@@ -5707,23 +6522,7 @@ async def multiview_watchdog() -> None:
     while True:
         await asyncio.sleep(MULTIVIEW_WATCHDOG_INTERVAL)
         try:
-            now = time.monotonic()
-            for channel_id, entry in list(_MULTIVIEW_PROCESSES.items()):
-                if not entry.get("ready") or entry.get("restarting"):
-                    continue
-                watched = now - entry.get("last_access", 0.0) < MULTIVIEW_IDLE_TIMEOUT_SECONDS
-                if entry["process"].returncode is not None or entry.get("exited"):
-                    if watched:
-                        await _restart_multiview(channel_id, f"ffmpeg exited code={entry.get('exit_code')}")
-                    continue
-                if now - entry["started_at"] < MULTIVIEW_STARTUP_TIMEOUT_SECONDS:
-                    continue
-                ages = await asyncio.to_thread(
-                    lambda e=entry: [_newest_segment_age(e["output_dir"] / f"a{i}") for i in range(e["audio_count"])]
-                )
-                stalled = [i for i, age in enumerate(ages) if age is None or age > stall_after]
-                if stalled:
-                    await _restart_multiview(channel_id, f"output stalled audio={stalled}")
+            await _multiview_watchdog_pass(stall_after)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -5737,13 +6536,13 @@ async def multiview_idle_monitor() -> None:
             for channel_id, entry in list(_MULTIVIEW_PROCESSES.items()):
                 if entry.get("restarting"):
                     continue
-                if entry["process"].returncode is not None or entry.get("exited"):
+                if not _multiview_entry_alive(entry):
                     if now - entry.get("last_access", 0.0) >= MULTIVIEW_IDLE_TIMEOUT_SECONDS:
                         LOGGER.warning("Reaping dead multiview ffmpeg channel=%s code=%s", channel_id, entry.get("exit_code"))
-                        await _stop_multiview_process(channel_id)
+                        await _stop_multiview_process(channel_id, run_id=entry.get("run_id"))
                 elif now - entry.get("last_access", now) > MULTIVIEW_IDLE_TIMEOUT_SECONDS:
                     LOGGER.info("Stopping idle multiview ffmpeg channel=%s", channel_id)
-                    await _stop_multiview_process(channel_id)
+                    await _stop_multiview_process(channel_id, run_id=entry.get("run_id"))
 
             # The placeholder runs on demand: channel sessions (re)start it when a
             # channel has nothing live, and it stops after a stretch of disuse.
@@ -5756,6 +6555,71 @@ async def multiview_idle_monitor() -> None:
         except Exception as exc:
             _log_failure("multiview idle monitor", exc)
         await asyncio.sleep(MULTIVIEW_IDLE_CHECK_INTERVAL)
+
+
+def _sweep_output_dirs_sync(live_dirs: Set[Path], min_age: float) -> List[Path]:
+    """Blocking. Delete Multi-View run dirs (<root>/<channel>/runN) and
+    placeholder run dirs that no live run owns, plus channel dirs left empty.
+    Dirs younger than `min_age` seconds are kept: a spawn may have just
+    created one it hasn't registered yet."""
+    removed: List[Path] = []
+    now = time.time()
+    live_parents = {path.parent for path in live_dirs}
+
+    def stale(path: Path) -> bool:
+        if path in live_dirs:
+            return False
+        try:
+            return path.is_dir() and now - path.stat().st_mtime >= min_age
+        except OSError:
+            return False
+
+    def children(path: Path) -> List[Path]:
+        try:
+            return list(path.iterdir())
+        except OSError:
+            return []
+
+    for channel_dir in children(MULTIVIEW_OUTPUT_ROOT):
+        if not channel_dir.is_dir():
+            continue
+        for run_dir in children(channel_dir):
+            if stale(run_dir) and _rmtree_with_retries(run_dir, attempts=2, delay=0.5):
+                removed.append(run_dir)
+        if channel_dir not in live_parents and not children(channel_dir):
+            try:
+                channel_dir.rmdir()
+                removed.append(channel_dir)
+            except OSError:
+                pass
+    for run_dir in children(PLACEHOLDER_OUTPUT_DIR):
+        if stale(run_dir) and _rmtree_with_retries(run_dir, attempts=2, delay=0.5):
+            removed.append(run_dir)
+    return removed
+
+
+async def _sweep_output_dirs(min_age: float = 60.0) -> List[Path]:
+    live: Set[Path] = {entry["output_dir"] for entry in _MULTIVIEW_PROCESSES.values()}
+    live |= _MULTIVIEW_PENDING_RUN_DIRS | _PLACEHOLDER_PENDING_DIRS
+    if _PLACEHOLDER_STATE:
+        live.add(_PLACEHOLDER_STATE["output_dir"])
+    removed = await asyncio.to_thread(_sweep_output_dirs_sync, live, min_age)
+    if removed:
+        LOGGER.info("Removed %d leftover Multi-View/placeholder output dir(s)", len(removed))
+    return removed
+
+
+async def multiview_output_sweeper() -> None:
+    """Periodic safety net for run directories a stop couldn't delete (files
+    still locked after all retries, a crash mid-stop, ...)."""
+    while True:
+        await asyncio.sleep(MULTIVIEW_SWEEP_INTERVAL)
+        try:
+            await _sweep_output_dirs()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log_failure("sweep multiview output dirs", exc)
 
 
 def _multiview_member_validation(member_team_ids: List[str]) -> Optional[str]:
@@ -5835,11 +6699,56 @@ PLACEHOLDER_STARTUP_TIMEOUT_SECONDS = 20.0
 PLACEHOLDER_IDLE_SECONDS = bounded_float(os.getenv("PLACEHOLDER_IDLE_SECONDS", "900"), 900.0, 60.0, 86400.0)
 _PLACEHOLDER_STATE: Optional[dict] = None
 _PLACEHOLDER_LOCK = asyncio.Lock()
+# Bumped per placeholder ffmpeg start: names its run dir and is part of its
+# source key, so channel sessions treat a restarted placeholder (segment
+# numbers back at 0) as a new source instead of a lagging edge.
+_PLACEHOLDER_RUN_COUNTER = 0
+# Last spawn failure(s): {"count", "last_failure", "last_error"}. The next start
+# waits _multiview_backoff_seconds(count), so a broken placeholder ffmpeg is
+# no longer respawned (and logged as an ERROR) on every session poll.
+_PLACEHOLDER_FAILURE: Optional[dict] = None
+# Turned off once drawtext failed with this ffmpeg build (no libfreetype, no
+# usable font): later starts render the logo without the caption.
+_PLACEHOLDER_DRAWTEXT_OK = True
+_PLACEHOLDER_PENDING_DIRS: Set[Path] = set()
+_DRAWTEXT_FAILURE_MARKERS = (
+    "drawtext", "fontconfig", "freetype", "fontfile", "font file", "could not load font", "cannot find a valid font",
+)
 
 
-def _build_placeholder_ffmpeg_args(out_dir: Path) -> List[str]:
-    """Pure command-builder for the shared "No Signal" loop (no I/O, unit-testable)."""
+def _ffmpeg_filter_path(path: Path) -> str:
+    """A path for a single-quoted filter option value: forward slashes, and
+    the drive colon escaped (ffmpeg splits filter options on ':')."""
+    return str(path).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
+
+
+def _placeholder_font_option() -> str:
+    """drawtext font selection. Bundled Windows ffmpeg builds usually have no
+    fontconfig configuration, so font='Sans' fails or falls back unpredictably
+    there: point at a real Windows font file instead."""
+    if sys.platform == "win32":
+        fonts_dir = Path(os.environ.get("WINDIR") or os.environ.get("SystemRoot") or r"C:\Windows") / "Fonts"
+        for name in ("segoeui.ttf", "arial.ttf", "tahoma.ttf", "verdana.ttf"):
+            candidate = fonts_dir / name
+            if candidate.is_file():
+                return f"fontfile='{_ffmpeg_filter_path(candidate)}':"
+        return ""
+    return "font='Sans':"
+
+
+def _build_placeholder_ffmpeg_args(out_dir: Path, drawtext: bool = True) -> List[str]:
+    """Pure command-builder for the shared "No Signal" loop (no I/O besides
+    locating a font, unit-testable)."""
     logo_path = _resource_path("assets/jellyball-logo.png")
+    video_filter = (
+        "scale=1920:1080:force_original_aspect_ratio=decrease,"
+        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2"
+    )
+    if drawtext:
+        video_filter += (
+            f",drawtext={_placeholder_font_option()}text='No Signal':fontcolor=white:fontsize=64:"
+            "box=1:boxcolor=black@0.5:boxborderw=16:x=(w-text_w)/2:y=h-200"
+        )
     # -re paces both inputs at real time: without it ffmpeg encoded this loop as
     # fast as the CPU allowed (pinning a core and racing segments far ahead of
     # the wall clock). 1080p30 with 2s segments so a channel that starts on the
@@ -5851,12 +6760,7 @@ def _build_placeholder_ffmpeg_args(out_dir: Path) -> List[str]:
         "-hide_banner", "-nostats", "-loglevel", "warning",
         "-re", "-loop", "1", "-framerate", "30", "-i", str(logo_path),
         "-re", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-        "-vf", (
-            "scale=1920:1080:force_original_aspect_ratio=decrease,"
-            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
-            "drawtext=text='No Signal':font='Sans':fontcolor=white:fontsize=64:"
-            "box=1:boxcolor=black@0.5:boxborderw=16:x=(w-text_w)/2:y=h-200"
-        ),
+        "-vf", video_filter,
         "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
         "-b:v", "1M", "-maxrate", "1M", "-bufsize", "2M",
         "-g", "60", "-keyint_min", "60", "-sc_threshold", "0", "-pix_fmt", "yuv420p",
@@ -5869,6 +6773,29 @@ def _build_placeholder_ffmpeg_args(out_dir: Path) -> List[str]:
         "-hls_segment_filename", "seg_%05d.ts",
         "index.m3u8",
     ]
+
+
+def _looks_like_drawtext_failure(log_lines) -> bool:
+    text = "\n".join(str(line) for line in log_lines).lower()
+    return any(marker in text for marker in _DRAWTEXT_FAILURE_MARKERS)
+
+
+def _placeholder_cooldown_remaining() -> float:
+    record = _PLACEHOLDER_FAILURE
+    if not record:
+        return 0.0
+    elapsed = time.monotonic() - record["last_failure"]
+    return max(0.0, _multiview_backoff_seconds(record["count"]) - elapsed)
+
+
+def _record_placeholder_failure(error: str) -> float:
+    global _PLACEHOLDER_FAILURE
+    record = _PLACEHOLDER_FAILURE or {"count": 0, "last_failure": 0.0, "last_error": ""}
+    record["count"] += 1
+    record["last_failure"] = time.monotonic()
+    record["last_error"] = error
+    _PLACEHOLDER_FAILURE = record
+    return _multiview_backoff_seconds(record["count"])
 
 
 async def _drain_placeholder_log(process: "asyncio.subprocess.Process", log_lines: "deque[str]") -> None:
@@ -5889,52 +6816,27 @@ async def _stop_placeholder_process() -> None:
     state, _PLACEHOLDER_STATE = _PLACEHOLDER_STATE, None
     if not state:
         return
-    process: asyncio.subprocess.Process = state["process"]
-    if sys.platform == "win32":
-        try:
-            kill_proc = await asyncio.create_subprocess_exec(
-                "taskkill", "/F", "/T", "/PID", str(process.pid),
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-                creationflags=_child_process_creationflags(),
-            )
-            await kill_proc.wait()
-        except OSError as exc:
-            _log_failure("taskkill placeholder ffmpeg", exc, logging.ERROR)
-        try:
-            await asyncio.wait_for(process.wait(), timeout=3.0)
-        except asyncio.TimeoutError:
-            pass
-    elif process.returncode is None:
-        try:
-            process.terminate()
-            await asyncio.wait_for(process.wait(), timeout=5.0)
-        except (asyncio.TimeoutError, ProcessLookupError):
-            try:
-                process.kill()
-                await asyncio.wait_for(process.wait(), timeout=3.0)
-            except (asyncio.TimeoutError, ProcessLookupError) as exc:
-                _log_failure("kill placeholder ffmpeg", exc, logging.ERROR)
-    for task_key in ("watch_task", "log_task"):
-        task = state.get(task_key)
-        if task and not task.done():
+    await _terminate_ffmpeg(state, "placeholder", term_timeout=5.0, kill_timeout=3.0)
+    tasks = [state.get(key) for key in ("watch_task", "log_task") if state.get(key)]
+    for task in tasks:
+        if not task.done():
             task.cancel()
-    shutil.rmtree(state["output_dir"], ignore_errors=True)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _remove_tree_later(state["output_dir"], "placeholder")
 
 
-async def _ensure_placeholder_running() -> bool:
-    """Start the shared placeholder stream if it isn't already running. Idempotent."""
-    global _PLACEHOLDER_STATE
-    async with _PLACEHOLDER_LOCK:
-        if _PLACEHOLDER_STATE and _PLACEHOLDER_STATE["process"].returncode is None and not _PLACEHOLDER_STATE.get("exited"):
-            return True
-        if not FFMPEG_AVAILABLE:
-            return False
-
-        out_dir = PLACEHOLDER_OUTPUT_DIR
-        shutil.rmtree(out_dir, ignore_errors=True)
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        args = _build_placeholder_ffmpeg_args(out_dir)
+async def _launch_placeholder_run(drawtext: bool) -> Tuple[bool, List[str]]:
+    """One placeholder ffmpeg attempt (caller holds _PLACEHOLDER_LOCK):
+    (ready, log lines of a failed attempt)."""
+    global _PLACEHOLDER_STATE, _PLACEHOLDER_RUN_COUNTER
+    _PLACEHOLDER_RUN_COUNTER += 1
+    run_id = _PLACEHOLDER_RUN_COUNTER
+    out_dir = PLACEHOLDER_OUTPUT_DIR / f"run{run_id}"
+    _PLACEHOLDER_PENDING_DIRS.add(out_dir)
+    try:
+        await asyncio.to_thread(_prepare_run_dir, out_dir, 0)
+        args = _build_placeholder_ffmpeg_args(out_dir, drawtext=drawtext)
         try:
             process = await asyncio.create_subprocess_exec(
                 FFMPEG_PATH, *args,
@@ -5942,18 +6844,22 @@ async def _ensure_placeholder_running() -> bool:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                creationflags=_child_process_creationflags(),
+                creationflags=_ffmpeg_creationflags(),
             )
         except (FileNotFoundError, OSError) as exc:
             _log_failure("spawn placeholder ffmpeg", exc, logging.ERROR)
-            return False
-        _assign_child_to_cleanup_job(process.pid)
+            _remove_tree_later(out_dir, "placeholder")
+            return False, ["could not launch ffmpeg"]
+        job = _create_run_job(process.pid)
+        _write_run_pid_file(out_dir, process.pid)
 
         log_lines: "deque[str]" = deque(maxlen=200)
         watch_task = _spawn_background_task(_watch_placeholder_process(process), "watch placeholder ffmpeg")
         log_task = _spawn_background_task(_drain_placeholder_log(process, log_lines), "drain placeholder ffmpeg log")
-        _PLACEHOLDER_STATE = {
+        state = {
             "process": process,
+            "job": job,
+            "run_id": run_id,
             "output_dir": out_dir,
             "exited": False,
             "watch_task": watch_task,
@@ -5962,16 +6868,54 @@ async def _ensure_placeholder_running() -> bool:
             "ready": False,
             "last_access": time.monotonic(),
         }
-
-        ready = await _wait_for_first_segment(out_dir, process, PLACEHOLDER_STARTUP_TIMEOUT_SECONDS)
-        if not ready:
-            error = _multiview_error_from_log(log_lines)
-            LOGGER.error("placeholder ffmpeg failed to produce a first segment: %s", error)
+        _PLACEHOLDER_STATE = state
+        try:
+            ready = await _wait_for_first_segment(out_dir, process, PLACEHOLDER_STARTUP_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            if _PLACEHOLDER_STATE is state:
+                await _stop_placeholder_process()
+            raise
+        if ready and _PLACEHOLDER_STATE is state:
+            state["ready"] = True
+            return True, []
+        lines = list(log_lines)
+        if _PLACEHOLDER_STATE is state:
             await _stop_placeholder_process()
+        return False, lines
+    finally:
+        _PLACEHOLDER_PENDING_DIRS.discard(out_dir)
+
+
+async def _ensure_placeholder_running() -> bool:
+    """Start the shared placeholder stream if it isn't already running. Idempotent;
+    after a failed start it declines (returns False) until the backoff expires."""
+    global _PLACEHOLDER_FAILURE, _PLACEHOLDER_DRAWTEXT_OK
+    async with _PLACEHOLDER_LOCK:
+        if _PLACEHOLDER_STATE and _PLACEHOLDER_STATE["process"].returncode is None and not _PLACEHOLDER_STATE.get("exited"):
+            return True
+        if not FFMPEG_AVAILABLE or _placeholder_cooldown_remaining() > 0:
             return False
-        if _PLACEHOLDER_STATE and _PLACEHOLDER_STATE["process"] is process:
-            _PLACEHOLDER_STATE["ready"] = True
-        return True
+        if _PLACEHOLDER_STATE is not None:  # a dead run: reap it before starting over
+            await _stop_placeholder_process()
+
+        lines: List[str] = []
+        for _attempt in range(2):
+            ready, lines = await _launch_placeholder_run(_PLACEHOLDER_DRAWTEXT_OK)
+            if ready:
+                _PLACEHOLDER_FAILURE = None
+                return True
+            if _PLACEHOLDER_DRAWTEXT_OK and _looks_like_drawtext_failure(lines):
+                _PLACEHOLDER_DRAWTEXT_OK = False
+                LOGGER.warning(
+                    "placeholder ffmpeg: drawtext failed (%s); retrying without the 'No Signal' caption",
+                    _multiview_error_from_log(lines),
+                )
+                continue
+            break
+        error = _multiview_error_from_log(lines)
+        retry_in = _record_placeholder_failure(error)
+        LOGGER.error("placeholder ffmpeg failed to produce a first segment: %s (retrying in %.0fs)", error, retry_in)
+        return False
 
 
 async def _serve_placeholder_stream(request: Request):
@@ -6027,6 +6971,8 @@ STREAM_STARTUP_TIMEOUT = bounded_float(os.getenv("STREAM_STARTUP_TIMEOUT", "20")
 # 503: Jellyfin's ffmpeg does not retry a failed first open.
 STARTUP_PLACEHOLDER_SECONDS = bounded_float(os.getenv("STARTUP_PLACEHOLDER_SECONDS", "30"), 30.0, 5.0, 600.0)
 STREAM_MAX_BANDWIDTH = bounded_int(os.getenv("STREAM_MAX_BANDWIDTH", "0"), 0, 0, 1_000_000_000)
+# Prefix of every placeholder source key: the actual key is
+# PLACEHOLDER_SOURCE_KEY + (placeholder run id,). Test with _is_placeholder_key().
 PLACEHOLDER_SOURCE_KEY = ("placeholder",)
 HLS_MEDIA_TYPE = "application/vnd.apple.mpegurl"
 _PLACEHOLDER_START_TASK: Optional[asyncio.Task] = None
@@ -6059,10 +7005,19 @@ async def _session_fetch(url: str, headers: Dict[str, str], max_bytes: int, time
 
 def _request_placeholder_start() -> None:
     global _PLACEHOLDER_START_TASK
-    if not FFMPEG_AVAILABLE:
+    if not FFMPEG_AVAILABLE or _placeholder_cooldown_remaining() > 0:
         return
     if _PLACEHOLDER_START_TASK is None or _PLACEHOLDER_START_TASK.done():
         _PLACEHOLDER_START_TASK = _spawn_background_task(_ensure_placeholder_running(), "start placeholder stream")
+
+
+def _placeholder_source_key(run_id: int) -> tuple:
+    return PLACEHOLDER_SOURCE_KEY + (run_id,)
+
+
+def _is_placeholder_key(key) -> bool:
+    """True for any placeholder source key, whatever placeholder run it names."""
+    return bool(key) and tuple(key)[:len(PLACEHOLDER_SOURCE_KEY)] == PLACEHOLDER_SOURCE_KEY
 
 
 def _placeholder_source() -> Optional[SourceSpec]:
@@ -6070,7 +7025,10 @@ def _placeholder_source() -> Optional[SourceSpec]:
     if state and state.get("ready") and state["process"].returncode is None and not state.get("exited"):
         state["last_access"] = time.monotonic()
         return SourceSpec(
-            key=PLACEHOLDER_SOURCE_KEY,
+            # Per placeholder run: a restarted placeholder ffmpeg numbers its
+            # segments from 0 again, which under one constant key looked like
+            # a lagging edge; a new key is a clean source switch instead.
+            key=_placeholder_source_key(state.get("run_id", 0)),
             url=str(state["output_dir"] / "index.m3u8"),
             local=True,
             label="No Signal",
@@ -8656,13 +9614,17 @@ async def _remove_channel(channel_id: str) -> None:
     """Single removal path for every kind of channel: stops its scrape loop or
     Multi-View ffmpeg, closes its channel sessions, and deletes its DB row."""
     data = stream_state.get(channel_id)
+    _LAST_PLAYBACK_EVENT.pop(channel_id, None)
     if data is not None and data.get("type") == "multiview":
         view_sessions = _multiview_view_session_ids(channel_id)
-        await _stop_multiview_process(channel_id)
-        _clear_multiview_failure(channel_id)
-        _MULTIVIEW_LOCKS.pop(channel_id, None)
-        _MULTIVIEW_LAST_VIEWER.pop(channel_id, None)
+        # Out of stream_state first: a spawn already past its warm-up re-checks
+        # this after every await and gives up instead of launching ffmpeg for
+        # a deleted channel; then cancel it (it stops anything it launched).
         stream_state.pop(channel_id, None)
+        await _cancel_multiview_start(channel_id)
+        await _stop_multiview_process(channel_id)
+        _forget_multiview_channel(channel_id)
+        _remove_tree_later(MULTIVIEW_OUTPUT_ROOT / channel_id, f"multiview={channel_id}")
         await delete_multiview_channel_async(channel_id)
         for session_id in view_sessions:
             await SESSIONS.close(session_id)
@@ -8677,12 +9639,13 @@ async def _remove_channel(channel_id: str) -> None:
         if other.get("type") == "multiview" and channel_id in (other.get("member_team_ids") or [])
     ]
     for multiview_id in dependents:
-        # The removed member's pane now shows "No Signal"; restart any running
-        # run so it picks up the placeholder input.
+        # The removed member's pane now shows "No Signal"; restart a running
+        # (or starting) run so it picks up the placeholder input. A config
+        # change, so it doesn't count toward the restart backoff.
         LOGGER.warning("Channel %s removed but used by Multi-View %s; its pane will show No Signal", channel_id, multiview_id)
-        if multiview_id in _MULTIVIEW_PROCESSES:
+        if multiview_id in _MULTIVIEW_PROCESSES or _multiview_start_in_progress(multiview_id):
             _spawn_background_task(
-                _restart_multiview(multiview_id, f"member {channel_id} removed"),
+                _restart_multiview(multiview_id, f"member {channel_id} removed", count_toward_backoff=False),
                 f"restart multiview channel={multiview_id}",
             )
 
@@ -8720,7 +9683,7 @@ async def create_multiview(
         # (leaving its old ffmpeg running against the old members).
         raise HTTPException(status_code=409, detail="A channel with that name already exists")
     active_audio_team_id = members[0]
-    _clear_multiview_failure(channel_id)
+    _forget_multiview_channel(channel_id)
     await save_multiview_channel_async(channel_id, name, layout, members, active_audio_team_id)
     stream_state[channel_id] = {
         "name": name, "query": "", "type": "multiview",
@@ -8751,7 +9714,23 @@ async def remove_multiview(channel_id: str, auth: bool = Depends(verify_dashboar
 async def stop_multiview(channel_id: str, auth: bool = Depends(verify_dashboard_auth)):
     data = stream_state.get(channel_id)
     if data and data.get("type") == "multiview":
-        await _stop_multiview_process(channel_id)
+        # Cancels a spawn in progress too, and keeps the grid stopped (viewers
+        # get No Signal) until a new viewer tunes in or /start is posted.
+        await _stop_multiview_manually(channel_id)
+    return RedirectResponse(url="/?tab=channels", status_code=303)
+
+
+@app.post("/multiview/{channel_id}/start")
+async def start_multiview(channel_id: str, auth: bool = Depends(verify_dashboard_auth)):
+    """Explicit start: clears a manual stop and any backoff, then starts the
+    grid now (the idle monitor stops it again if nobody watches)."""
+    data = stream_state.get(channel_id)
+    if data and data.get("type") == "multiview":
+        _clear_multiview_manual_stop(channel_id, "explicit start")
+        for mapping in (_MULTIVIEW_FAILURES, _MULTIVIEW_HOLDS, _MULTIVIEW_REFUSALS):
+            mapping.pop(channel_id, None)
+        _MULTIVIEW_LAST_VIEWER[channel_id] = time.monotonic()
+        _request_multiview_start(channel_id)
     return RedirectResponse(url="/?tab=channels", status_code=303)
 
 
@@ -8771,9 +9750,11 @@ async def set_multiview_audio(
         channel_id, data["name"], data["layout"], data["member_team_ids"], active_audio_team_id,
         data.get("tvg_id", ""), data.get("group_title", ""), data.get("logo_url", ""),
     )
-    # Every member's audio is already encoded into its own output, so switching
-    # the main channel's audio is just pointing its session at another output:
-    # no ffmpeg restart, no interruption (it takes effect at the next segment).
+    # Every member's audio is already in its own output (stream-copied), so
+    # switching the main channel's audio is just pointing its session at
+    # another output: no ffmpeg restart. The view's source key carries the
+    # output's audio codec (see _resolve_multiview_view_source): same codec
+    # continues seamlessly, a different codec becomes a clean discontinuity.
     SESSIONS.poke(channel_id)
     return RedirectResponse(url="/?tab=channels", status_code=303)
 
