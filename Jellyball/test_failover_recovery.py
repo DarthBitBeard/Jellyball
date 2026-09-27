@@ -230,7 +230,7 @@ class ProviderTimeoutTests(unittest.TestCase):
                 scrapers._track_provider_response_time_sync("Slow", 10000, True)
                 self.assertEqual(scrapers._dynamic_provider_timeout_sync("Slow"), 30.0)
                 self.assertEqual(scrapers._dynamic_provider_timeout_sync("Unknown"), scrapers.PROVIDER_TIMEOUT_DEFAULT)
-                closer = getattr(main, "close_all_db_connections", None)
+                closer = getattr(db, "close_all_db_connections", None)
                 if closer:
                     closer()
         finally:

@@ -46,7 +46,6 @@ from config import (
     _validate_upstream_url,
     _xml_attr,
     _xml_text,
-    BUNDLE_DIR,
     DATA_DIR,
     LOG_FILE,
     LOGGER,
@@ -134,6 +133,33 @@ from legacy_proxy import (
     CHUNK_CACHE,
     HLS_MEDIA_TYPE,
     PREFETCH_CONCURRENCY,
+)
+import ffmpeg_proc
+from ffmpeg_proc import (
+    _check_ffmpeg_available,
+    _child_process_creationflags,
+    _create_run_job,
+    _drain_multiview_log,
+    _ffmpeg_creationflags,
+    _multiview_backoff_seconds,
+    _multiview_error_from_log,
+    _prepare_run_dir,
+    _remove_tree_later,
+    _rmtree_with_retries,
+    _terminate_ffmpeg,
+    _wait_for_first_segment,
+    _win32_process_api,
+    _write_run_pid_file,
+    FFMPEG_PATH,
+    RUN_PID_FILE,
+)
+import placeholder
+from placeholder import (
+    _ensure_placeholder_running,
+    _placeholder_cooldown_remaining,
+    _PLACEHOLDER_PENDING_DIRS,
+    _stop_placeholder_process,
+    PLACEHOLDER_IDLE_SECONDS,
 )
 from hls_session import FetchResult, SessionConfig, SessionHooks, SessionRegistry, SourceSpec
 from network_safety import bounded_float, bounded_int
@@ -1110,7 +1136,7 @@ async def lifespan(app: FastAPI):
     _kill_orphaned_ffmpeg()
     shutil.rmtree(MULTIVIEW_OUTPUT_ROOT, ignore_errors=True)
     MULTIVIEW_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-    shutil.rmtree(PLACEHOLDER_OUTPUT_DIR, ignore_errors=True)
+    shutil.rmtree(placeholder.PLACEHOLDER_OUTPUT_DIR, ignore_errors=True)
     # Advanced settings saved from the dashboard override the env defaults.
     _load_tunable_overrides()
     catalog.SHOW_OFFSEASON_CHANNELS = get_setting("show_offseason_channels", "0") == "1"
@@ -1265,7 +1291,7 @@ async def lifespan(app: FastAPI):
     close_all_db_connections()
     _STARTUP_BUFFER_TASKS.clear()
     shutil.rmtree(MULTIVIEW_OUTPUT_ROOT, ignore_errors=True)
-    shutil.rmtree(PLACEHOLDER_OUTPUT_DIR, ignore_errors=True)
+    shutil.rmtree(placeholder.PLACEHOLDER_OUTPUT_DIR, ignore_errors=True)
         
     if scrapers.SHARED_BROWSER:
         try:
@@ -1368,48 +1394,6 @@ async def healthz():
     return {"status": "ok", "app": "jellyball", "version": __version__}
 
 
-# --- MULTI-VIEW (FFmpeg grid compositing) ---
-
-def _default_ffmpeg_path() -> str:
-    """Prefer a bundled ffmpeg binary in the packaged executable; otherwise
-    fall back to a plain "ffmpeg" lookup on PATH (dev runs, Docker, or a
-    build that didn't have one available to bundle)."""
-    if getattr(sys, "frozen", False):
-        bundled_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
-        bundled_path = BUNDLE_DIR / "ffmpeg_bin" / bundled_name
-        if bundled_path.is_file():
-            return str(bundled_path)
-    return "ffmpeg"
-
-
-FFMPEG_PATH = os.getenv("FFMPEG_PATH") or _default_ffmpeg_path()
-
-
-def _jellyfin_ffmpeg_path() -> Optional[str]:
-    """Jellyfin's own ffmpeg build, when Jellyball runs on the Jellyfin server."""
-    candidates: List[Path] = []
-    if sys.platform == "win32":
-        for root in (os.getenv("ProgramW6432"), os.getenv("ProgramFiles"), r"C:\Program Files"):
-            if root:
-                candidates.append(Path(root) / "Jellyfin" / "Server" / "ffmpeg.exe")
-    else:
-        candidates += [Path("/usr/lib/jellyfin-ffmpeg/ffmpeg"), Path("/usr/share/jellyfin-ffmpeg/ffmpeg")]
-    for candidate in candidates:
-        if candidate.is_file():
-            return str(candidate)
-    return None
-
-
-# Multi-View's encoder must match the GPU driver. The bundled ffmpeg is a very
-# recent build (its NVENC needs NVIDIA driver 610+); on a Jellyfin server the
-# Jellyfin ffmpeg is built for whatever driver Jellyfin's own hardware
-# transcoding already uses, so prefer it unless a path is configured.
-MULTIVIEW_FFMPEG_PATH = (
-    os.getenv("MULTIVIEW_FFMPEG_PATH")
-    or (None if os.getenv("FFMPEG_PATH") else _jellyfin_ffmpeg_path())
-    or FFMPEG_PATH
-)
-MULTIVIEW_FFMPEG_VERSION_INFO = ""
 MULTIVIEW_HWACCEL = os.getenv("MULTIVIEW_HWACCEL", "nvenc").strip().lower()
 MULTIVIEW_BITRATE = os.getenv("MULTIVIEW_BITRATE", "6M")
 MULTIVIEW_SEGMENT_SECONDS = bounded_int(os.getenv("MULTIVIEW_SEGMENT_SECONDS", "4"), 4, 1, 15)
@@ -1449,12 +1433,7 @@ MULTIVIEW_NVENC_TUNE = _env_choice("MULTIVIEW_NVENC_TUNE", "ll", {"hq", "ll", "u
 # then the GPU is tried again (the failure is often transient: every NVENC
 # session taken by Jellyfin's own transcodes, a driver update, ...).
 NVENC_FALLBACK_SECONDS = bounded_float(os.getenv("NVENC_FALLBACK_SECONDS", "600"), 600.0, 30.0, 86400.0)
-# Spawn-failure backoff (and the step/cap of the restart backoff below).
-MULTIVIEW_BACKOFF_BASE_SECONDS = bounded_float(os.getenv("MULTIVIEW_BACKOFF_BASE_SECONDS", "15"), 15.0, 1.0, 600.0)
-MULTIVIEW_BACKOFF_MAX_SECONDS = max(
-    MULTIVIEW_BACKOFF_BASE_SECONDS,
-    bounded_float(os.getenv("MULTIVIEW_BACKOFF_MAX_SECONDS", "300"), 300.0, 1.0, 3600.0),
-)
+
 # Watchdog/view-failure restarts: the first MULTIVIEW_RESTART_BURST inside a
 # rolling window are immediate; each further one waits exponentially longer.
 MULTIVIEW_RESTART_WINDOW_SECONDS = bounded_float(os.getenv("MULTIVIEW_RESTART_WINDOW_SECONDS", "600"), 600.0, 60.0, 86400.0)
@@ -1470,9 +1449,6 @@ MULTIVIEW_LAYOUTS = {
     "side_by_side_2": {"count": 2, "pane_w": 960, "pane_h": 1080, "xstack": "0_0|w0_0"},
     "grid_2x2": {"count": 4, "pane_w": 960, "pane_h": 540, "xstack": "0_0|w0_0|0_h0|w0_h0"},
 }
-
-FFMPEG_AVAILABLE = False
-FFMPEG_VERSION_INFO = ""
 
 _MULTIVIEW_PROCESSES: Dict[str, dict] = {}
 # Tracks recent spawn failures per channel so a client that keeps retrying a
@@ -1512,10 +1488,6 @@ _MULTIVIEW_RUN_COUNTER = 0
 # At most one start task per channel; this (not a lock) serializes spawns.
 _MULTIVIEW_START_TASKS: Dict[str, asyncio.Task] = {}
 _MULTIVIEW_LAST_VIEWER: Dict[str, float] = {}
-
-
-def _multiview_backoff_seconds(failure_count: int) -> float:
-    return min(MULTIVIEW_BACKOFF_MAX_SECONDS, MULTIVIEW_BACKOFF_BASE_SECONDS * (2 ** max(0, failure_count - 1)))
 
 
 def _multiview_hold_remaining(channel_id: str) -> float:
@@ -1578,7 +1550,7 @@ def _multiview_restart_delay(restart_count: int) -> float:
     excess = restart_count - MULTIVIEW_RESTART_BURST
     if excess <= 0:
         return 0.0
-    return min(MULTIVIEW_BACKOFF_MAX_SECONDS, MULTIVIEW_BACKOFF_BASE_SECONDS * (2 ** (excess - 1)))
+    return min(ffmpeg_proc.MULTIVIEW_BACKOFF_MAX_SECONDS, ffmpeg_proc.MULTIVIEW_BACKOFF_BASE_SECONDS * (2 ** (excess - 1)))
 
 
 def _recent_multiview_restarts(channel_id: str, now: Optional[float] = None) -> int:
@@ -1628,79 +1600,6 @@ def _forget_multiview_channel(channel_id: str) -> None:
     ):
         mapping.pop(channel_id, None)
     _MULTIVIEW_SLOT_RESERVATIONS.discard(channel_id)
-
-
-def _multiview_error_from_log(log_lines) -> str:
-    """Pull the most useful line out of ffmpeg's log for a human-readable failure reason."""
-    lines = list(log_lines)
-    for line in reversed(lines):
-        if "Error opening input" in line or "error while opening" in line.lower():
-            return line.strip()
-    for line in reversed(lines):
-        if line.strip():
-            return line.strip()
-    return "ffmpeg exited unexpectedly"
-
-
-async def _probe_ffmpeg_version(path: str, timeout: float = 5.0) -> Tuple[Optional[int], str]:
-    """Run `<path> -version`; returns (exit code, first output line). A binary
-    that hangs (e.g. on an unreachable network path) is killed on timeout
-    instead of being left running for the life of the service."""
-    process = await asyncio.create_subprocess_exec(
-        path, "-version",
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-        creationflags=_child_process_creationflags(),
-    )
-    try:
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        if process.returncode is None:
-            try:
-                process.kill()
-            except (ProcessLookupError, OSError):
-                pass
-            try:
-                await asyncio.wait_for(process.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                pass
-        raise
-    first_line = stdout.decode(errors="replace").splitlines()[0] if stdout else ""
-    return process.returncode, first_line
-
-
-async def _check_ffmpeg_available() -> None:
-    """Probe FFMPEG_PATH once at startup so failures surface as a clear log/dashboard warning."""
-    global FFMPEG_AVAILABLE, FFMPEG_VERSION_INFO
-    try:
-        returncode, FFMPEG_VERSION_INFO = await _probe_ffmpeg_version(FFMPEG_PATH)
-        FFMPEG_AVAILABLE = returncode == 0
-    except (FileNotFoundError, OSError, asyncio.TimeoutError) as exc:
-        FFMPEG_AVAILABLE = False
-        FFMPEG_VERSION_INFO = ""
-        _log_failure("locate ffmpeg for multiview", exc, logging.WARNING)
-    if not FFMPEG_AVAILABLE:
-        LOGGER.warning("ffmpeg not found at FFMPEG_PATH=%r; Multi-View channels unavailable", FFMPEG_PATH)
-    await _check_multiview_ffmpeg()
-
-
-async def _check_multiview_ffmpeg() -> None:
-    global MULTIVIEW_FFMPEG_PATH, MULTIVIEW_FFMPEG_VERSION_INFO
-    if MULTIVIEW_FFMPEG_PATH != FFMPEG_PATH:
-        try:
-            returncode, first_line = await _probe_ffmpeg_version(MULTIVIEW_FFMPEG_PATH)
-            if returncode == 0 and first_line:
-                MULTIVIEW_FFMPEG_VERSION_INFO = first_line
-            else:
-                raise OSError(f"exit code {returncode}")
-        except (FileNotFoundError, OSError, asyncio.TimeoutError) as exc:
-            _log_failure(f"probe Multi-View ffmpeg {MULTIVIEW_FFMPEG_PATH!r}; using {FFMPEG_PATH!r}", exc)
-            MULTIVIEW_FFMPEG_PATH = FFMPEG_PATH
-    if MULTIVIEW_FFMPEG_PATH == FFMPEG_PATH:
-        MULTIVIEW_FFMPEG_VERSION_INFO = FFMPEG_VERSION_INFO
-    if MULTIVIEW_FFMPEG_VERSION_INFO:
-        LOGGER.info("Multi-View ffmpeg: %s (%s)", MULTIVIEW_FFMPEG_VERSION_INFO, MULTIVIEW_FFMPEG_PATH)
 
 
 def _multiview_bufsize(bitrate: str) -> str:
@@ -1909,23 +1808,6 @@ def _build_multiview_ffmpeg_args(
     return args
 
 
-def _child_process_creationflags() -> int:
-    """No console window per ffmpeg/taskkill child in the windowed tray exe."""
-    if sys.platform == "win32":
-        return getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-    return 0
-
-
-def _ffmpeg_creationflags() -> int:
-    """Multi-View / placeholder ffmpeg: no console window, and below-normal
-    priority so a CPU (libx264) fallback encode can't starve Jellyfin's own
-    transcodes or this server's request handling."""
-    flags = _child_process_creationflags()
-    if sys.platform == "win32":
-        flags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
-    return flags
-
-
 def _multiview_popen_kwargs(out_dir: Path) -> dict:
     kwargs = {
         "cwd": str(out_dir),
@@ -1936,34 +1818,6 @@ def _multiview_popen_kwargs(out_dir: Path) -> dict:
     if sys.platform == "win32":
         kwargs["creationflags"] = _ffmpeg_creationflags()
     return kwargs
-
-
-async def _drain_multiview_log(channel_id: str, process: "asyncio.subprocess.Process", log_lines: "deque[str]") -> None:
-    """Continuously read ffmpeg's combined stdout/stderr pipe into a rolling
-    buffer. This is not optional: an unread PIPE fills its OS buffer (~64KB) and
-    blocks ffmpeg forever. Read in chunks rather than readline(): ffmpeg's
-    progress output ends in '\\r', and readline() raises once 64KB arrive with no
-    '\\n', which used to kill this task and then hang ffmpeg."""
-    pending = b""
-    try:
-        while True:
-            chunk = await process.stdout.read(8192)
-            if not chunk:
-                break
-            pending += chunk
-            *lines, pending = re.split(rb"[\r\n]+", pending)
-            for line in lines:
-                if line.strip():
-                    log_lines.append(line.decode(errors="replace").rstrip())
-            if len(pending) > 16384:
-                log_lines.append(pending[-1024:].decode(errors="replace"))
-                pending = b""
-        if pending.strip():
-            log_lines.append(pending.decode(errors="replace").rstrip())
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        _log_failure(f"drain ffmpeg log multiview={channel_id}", exc)
 
 
 async def _watch_multiview_process(channel_id: str, process: "asyncio.subprocess.Process") -> None:
@@ -1977,232 +1831,6 @@ async def _watch_multiview_process(channel_id: str, process: "asyncio.subprocess
             LOGGER.warning("multiview ffmpeg exited unexpectedly channel=%s code=%s\n%s", channel_id, returncode, log_tail)
 
 
-class _Win32ProcessApi:
-    """The kernel32 calls used for ffmpeg process control, with explicit
-    prototypes. Without restype=HANDLE ctypes returns a C int, which truncates
-    64-bit handles; a private WinDLL instance keeps these prototypes from
-    clashing with any other ctypes user of kernel32."""
-
-    PROCESS_TERMINATE = 0x0001
-    PROCESS_SET_QUOTA = 0x0100
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    SYNCHRONIZE = 0x00100000
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
-    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
-
-    def __init__(self) -> None:
-        import ctypes
-        from ctypes import wintypes
-
-        class _IO_COUNTERS(ctypes.Structure):
-            _fields_ = [(name, ctypes.c_ulonglong) for name in (
-                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
-            )]
-
-        class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_int64),
-                ("PerJobUserTimeLimit", ctypes.c_int64),
-                ("LimitFlags", wintypes.DWORD),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", wintypes.DWORD),
-                ("Affinity", ctypes.c_size_t),
-                ("PriorityClass", wintypes.DWORD),
-                ("SchedulingClass", wintypes.DWORD),
-            ]
-
-        class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
-                ("IoInfo", _IO_COUNTERS),
-                ("ProcessMemoryLimit", ctypes.c_size_t),
-                ("JobMemoryLimit", ctypes.c_size_t),
-                ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                ("PeakJobMemoryUsed", ctypes.c_size_t),
-            ]
-
-        self.ctypes = ctypes
-        self.wintypes = wintypes
-        self.extended_limit_info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        HANDLE, BOOL, DWORD, UINT = wintypes.HANDLE, wintypes.BOOL, wintypes.DWORD, wintypes.UINT
-        PFILETIME = ctypes.POINTER(wintypes.FILETIME)
-        prototypes = {
-            "CreateJobObjectW": (HANDLE, [wintypes.LPVOID, wintypes.LPCWSTR]),
-            "SetInformationJobObject": (BOOL, [HANDLE, ctypes.c_int, wintypes.LPVOID, DWORD]),
-            "AssignProcessToJobObject": (BOOL, [HANDLE, HANDLE]),
-            "TerminateJobObject": (BOOL, [HANDLE, UINT]),
-            "OpenProcess": (HANDLE, [DWORD, BOOL, DWORD]),
-            "TerminateProcess": (BOOL, [HANDLE, UINT]),
-            "GetProcessTimes": (BOOL, [HANDLE, PFILETIME, PFILETIME, PFILETIME, PFILETIME]),
-            "WaitForSingleObject": (DWORD, [HANDLE, DWORD]),
-            "CloseHandle": (BOOL, [HANDLE]),
-        }
-        for name, (restype, argtypes) in prototypes.items():
-            function = getattr(k32, name)
-            function.restype = restype
-            function.argtypes = argtypes
-        self.k32 = k32
-
-    def close(self, handle) -> None:
-        if handle:
-            self.k32.CloseHandle(handle)
-
-    def create_kill_on_close_job(self):
-        h_job = self.k32.CreateJobObjectW(None, None)
-        if not h_job:
-            return None
-        info = self.extended_limit_info()
-        info.BasicLimitInformation.LimitFlags = self.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not self.k32.SetInformationJobObject(
-            h_job, self.JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
-            self.ctypes.byref(info), self.ctypes.sizeof(info),
-        ):
-            self.close(h_job)
-            return None
-        return h_job
-
-    def assign_pid(self, h_job, pid: int) -> bool:
-        h_process = self.k32.OpenProcess(self.PROCESS_TERMINATE | self.PROCESS_SET_QUOTA, False, pid)
-        if not h_process:
-            return False
-        try:
-            return bool(self.k32.AssignProcessToJobObject(h_job, h_process))
-        finally:
-            self.close(h_process)
-
-    def terminate_job(self, h_job) -> bool:
-        return bool(self.k32.TerminateJobObject(h_job, 1))
-
-    def _creation_time(self, h_process) -> Optional[int]:
-        times = [self.wintypes.FILETIME() for _ in range(4)]
-        if not self.k32.GetProcessTimes(h_process, *(self.ctypes.byref(t) for t in times)):
-            return None
-        return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
-
-    def process_creation_time(self, pid: int) -> Optional[int]:
-        h_process = self.k32.OpenProcess(self.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not h_process:
-            return None
-        try:
-            return self._creation_time(h_process)
-        finally:
-            self.close(h_process)
-
-    def terminate_pid_if_created_at(self, pid: int, created: int, wait_ms: int = 3000) -> bool:
-        """Kill `pid` only if it is still the process created at `created`
-        (a FILETIME): a bare pid may have been reused by anything since."""
-        access = self.PROCESS_TERMINATE | self.PROCESS_QUERY_LIMITED_INFORMATION | self.SYNCHRONIZE
-        h_process = self.k32.OpenProcess(access, False, pid)
-        if not h_process:
-            return False
-        try:
-            if self._creation_time(h_process) != created:
-                return False
-            if not self.k32.TerminateProcess(h_process, 1):
-                return False
-            self.k32.WaitForSingleObject(h_process, wait_ms)
-            return True
-        finally:
-            self.close(h_process)
-
-
-_WIN32_PROCESS_API = None  # None = not loaded yet, False = unavailable
-
-
-def _win32_process_api() -> Optional[_Win32ProcessApi]:
-    global _WIN32_PROCESS_API
-    if sys.platform != "win32":
-        return None
-    if _WIN32_PROCESS_API is None:
-        try:
-            _WIN32_PROCESS_API = _Win32ProcessApi()
-        except Exception as exc:
-            _log_failure("load kernel32 process API", exc)
-            _WIN32_PROCESS_API = False
-    return _WIN32_PROCESS_API or None
-
-
-_WINDOWS_CLEANUP_JOB_HANDLE = None
-
-
-def _get_windows_cleanup_job():
-    """Lazily create one Windows Job Object with KILL_ON_JOB_CLOSE for the lifetime
-    of this process. Any ffmpeg child assigned to it is terminated by Windows itself
-    if this process dies — including an ungraceful crash or Task Manager 'End Task'
-    where our own lifespan shutdown / _stop_*_process cleanup never gets to run.
-    Only a fallback now: each run normally gets its own job (_create_run_job)."""
-    global _WINDOWS_CLEANUP_JOB_HANDLE
-    if _WINDOWS_CLEANUP_JOB_HANDLE is not None:
-        return _WINDOWS_CLEANUP_JOB_HANDLE
-    api = _win32_process_api()
-    if api is None:
-        return None
-    try:
-        _WINDOWS_CLEANUP_JOB_HANDLE = api.create_kill_on_close_job()
-    except Exception as exc:
-        _log_failure("create Windows job object for child-process cleanup", exc)
-        return None
-    return _WINDOWS_CLEANUP_JOB_HANDLE
-
-
-def _assign_child_to_cleanup_job(pid: int) -> None:
-    """Best-effort; a failure here just means we fall back to explicit stop-on-shutdown
-    cleanup (already in place) instead of Windows guaranteeing it on an ungraceful exit."""
-    api = _win32_process_api()
-    h_job = _get_windows_cleanup_job()
-    if api is None or not h_job:
-        return
-    try:
-        api.assign_pid(h_job, pid)
-    except Exception as exc:
-        _log_failure(f"assign pid={pid} to cleanup job object", exc)
-
-
-def _create_run_job(pid: int):
-    """Put one ffmpeg run in its own Job Object (KILL_ON_JOB_CLOSE). Stopping
-    the run is then TerminateJobObject, which acts on the process objects in
-    the job and can never hit an unrelated process that reused the pid; and
-    Windows still kills the run if Jellyball dies without cleaning up (the job
-    handle closes with us). Returns the job handle, or None off Windows or if
-    no job could be made (then the shared cleanup job gives crash safety)."""
-    api = _win32_process_api()
-    if api is None:
-        return None
-    h_job = None
-    try:
-        h_job = api.create_kill_on_close_job()
-        if h_job and api.assign_pid(h_job, pid):
-            return h_job
-    except Exception as exc:
-        _log_failure(f"create job object for ffmpeg pid={pid}", exc)
-    if h_job:
-        api.close(h_job)
-    _assign_child_to_cleanup_job(pid)
-    return None
-
-
-RUN_PID_FILE = "ffmpeg.pid"
-
-
-def _write_run_pid_file(run_dir: Path, pid: int) -> None:
-    """Record pid + creation time in the run dir so the next startup can kill
-    this ffmpeg if Jellyball died without stopping it (and its job didn't take
-    it down). Windows only: the creation time is what proves a live pid is
-    still our ffmpeg rather than a reused pid."""
-    api = _win32_process_api()
-    if api is None:
-        return
-    try:
-        created = api.process_creation_time(pid)
-        if created is not None:
-            (run_dir / RUN_PID_FILE).write_text(json.dumps({"pid": pid, "created": created}), encoding="utf-8")
-    except Exception as exc:
-        _log_failure(f"write ffmpeg pid file pid={pid}", exc)
-
-
 def _kill_orphaned_ffmpeg() -> int:
     """Startup: kill ffmpeg runs a crashed previous instance left behind (pid
     and creation time must both match its pid file). Returns how many were
@@ -2211,7 +1839,7 @@ def _kill_orphaned_ffmpeg() -> int:
     if api is None:
         return 0
     pid_files: List[Path] = []
-    for root, pattern in ((MULTIVIEW_OUTPUT_ROOT, f"*/run*/{RUN_PID_FILE}"), (PLACEHOLDER_OUTPUT_DIR, f"run*/{RUN_PID_FILE}")):
+    for root, pattern in ((MULTIVIEW_OUTPUT_ROOT, f"*/run*/{RUN_PID_FILE}"), (placeholder.PLACEHOLDER_OUTPUT_DIR, f"run*/{RUN_PID_FILE}")):
         try:
             pid_files += list(root.glob(pattern))
         except OSError:
@@ -2230,100 +1858,6 @@ def _kill_orphaned_ffmpeg() -> int:
         except Exception as exc:
             _log_failure(f"kill orphaned ffmpeg pid={pid}", exc)
     return killed
-
-
-async def _taskkill_tree(pid: int, label: str) -> None:
-    try:
-        kill_proc = await asyncio.create_subprocess_exec(
-            "taskkill", "/F", "/T", "/PID", str(pid),
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            creationflags=_child_process_creationflags(),
-        )
-        await asyncio.wait_for(kill_proc.wait(), timeout=10.0)
-    except (OSError, asyncio.TimeoutError) as exc:
-        _log_failure(f"taskkill ffmpeg {label}", exc, logging.ERROR)
-
-
-async def _terminate_ffmpeg(entry: dict, label: str, *, term_timeout: float = 5.0, kill_timeout: float = 3.0) -> None:
-    """Stop one Multi-View/placeholder ffmpeg run.
-
-    Windows: TerminateJobObject on the run's own job. It doesn't depend on
-    process.returncode (asyncio's Proactor loop has been seen reporting a
-    heavily-piped ffmpeg as exited while it was still encoding) and, unlike
-    `taskkill /PID`, can't kill an unrelated process that reused the pid.
-    Without a job: TerminateProcess through our own process handle (also
-    immune to pid reuse), and taskkill only as a last resort while asyncio
-    still considers the process alive."""
-    process: asyncio.subprocess.Process = entry["process"]
-    job = entry.pop("job", None)
-    try:
-        if sys.platform == "win32":
-            api = _win32_process_api()
-            terminated = False
-            if job and api is not None:
-                try:
-                    terminated = api.terminate_job(job)
-                except Exception as exc:
-                    _log_failure(f"terminate job ffmpeg {label}", exc)
-            if not terminated and process.returncode is None:
-                try:
-                    process.kill()
-                except (ProcessLookupError, OSError):
-                    pass
-            try:
-                await asyncio.wait_for(process.wait(), timeout=kill_timeout)
-            except asyncio.TimeoutError:
-                if process.returncode is None:
-                    await _taskkill_tree(process.pid, label)
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=kill_timeout)
-                    except asyncio.TimeoutError:
-                        LOGGER.error("ffmpeg %s pid=%s did not exit after kill", label, process.pid)
-        elif process.returncode is None:
-            try:
-                process.terminate()
-                await asyncio.wait_for(process.wait(), timeout=term_timeout)
-            except (asyncio.TimeoutError, ProcessLookupError):
-                try:
-                    process.kill()
-                    await asyncio.wait_for(process.wait(), timeout=kill_timeout)
-                except (asyncio.TimeoutError, ProcessLookupError) as exc:
-                    _log_failure(f"kill ffmpeg {label}", exc, logging.ERROR)
-    finally:
-        if job:
-            api = _win32_process_api()
-            if api is not None:
-                api.close(job)
-
-
-def _rmtree_with_retries(path: Path, attempts: int = 5, delay: float = 1.0) -> bool:
-    """Blocking (run it in a thread). Windows keeps a just-killed process's
-    files locked for a moment, so one rmtree right after the kill used to
-    leave the whole run directory (~100MB of segments) behind."""
-    for attempt in range(attempts):
-        try:
-            shutil.rmtree(path)
-            return True
-        except OSError:
-            if not path.exists():
-                return True
-            if attempt + 1 < attempts:
-                time.sleep(delay)
-    return not path.exists()
-
-
-def _remove_tree_later(path: Path, label: str) -> None:
-    """Delete a run directory off the event loop, retrying while files are locked."""
-    _spawn_background_task(asyncio.to_thread(_rmtree_with_retries, path), f"remove {label} output dir")
-
-
-def _prepare_run_dir(run_dir: Path, audio_outputs: int) -> None:
-    """Blocking: a fresh, empty run directory (plus a{N}/ per Multi-View audio output)."""
-    if run_dir.exists():
-        shutil.rmtree(run_dir, ignore_errors=True)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    for idx in range(audio_outputs):
-        (run_dir / f"a{idx}").mkdir(parents=True, exist_ok=True)
 
 
 async def _stop_multiview_process(
@@ -2349,30 +1883,6 @@ async def _stop_multiview_process(
         await asyncio.gather(*tasks, return_exceptions=True)
     _remove_tree_later(entry["output_dir"], f"multiview={channel_id}")
     return True
-
-
-async def _wait_for_first_segment(
-    out_dir: Path,
-    process: "asyncio.subprocess.Process",
-    timeout: float,
-    poll_interval: float = 0.25,
-) -> bool:
-    playlist = out_dir / "index.m3u8"
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if process.returncode is not None:
-            return False
-        if playlist.exists():
-            try:
-                text = playlist.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                text = ""
-            if "#EXTINF" in text:
-                first_segment = next((line for line in text.splitlines() if line.endswith(".ts")), None)
-                if first_segment and (out_dir / first_segment).exists():
-                    return True
-        await asyncio.sleep(poll_interval)
-    return False
 
 
 def _multiview_entry_alive(entry: dict) -> bool:
@@ -2595,7 +2105,7 @@ async def _spawn_multiview(channel_id: str, data: dict) -> None:
         return
     if not _multiview_spawn_wanted(channel_id, data) or _multiview_cooldown_remaining(channel_id) > 0:
         return
-    if not FFMPEG_AVAILABLE:
+    if not ffmpeg_proc.FFMPEG_AVAILABLE:
         _record_multiview_refusal(channel_id, "ffmpeg is unavailable")
         return
     in_use = _running_multiview_count(exclude=channel_id)
@@ -2678,7 +2188,7 @@ async def _launch_multiview_run(
             hw_decode=hw_decode, input_ids=[item.session_id for item in inputs],
         )
         try:
-            process = await asyncio.create_subprocess_exec(MULTIVIEW_FFMPEG_PATH, *args, **_multiview_popen_kwargs(run_dir))
+            process = await asyncio.create_subprocess_exec(ffmpeg_proc.MULTIVIEW_FFMPEG_PATH, *args, **_multiview_popen_kwargs(run_dir))
         except (FileNotFoundError, OSError) as exc:
             _log_failure(f"spawn ffmpeg multiview={channel_id}", exc, logging.ERROR)
             _remove_tree_later(run_dir, f"multiview={channel_id}")
@@ -2857,7 +2367,7 @@ def _resolve_multiview_view_source(channel_id: str, audio_index: Optional[int]) 
             label=f"Multi-View {label}",
         )
     _request_multiview_start(channel_id)
-    if _multiview_cooldown_remaining(channel_id) > 0 or not FFMPEG_AVAILABLE:
+    if _multiview_cooldown_remaining(channel_id) > 0 or not ffmpeg_proc.FFMPEG_AVAILABLE:
         # Backoff, refusal (concurrency cap) or no ffmpeg: No Signal, not a 503.
         return _placeholder_source()
     return None  # starting: the session waits (and keeps its current window)
@@ -3048,7 +2558,7 @@ async def multiview_idle_monitor() -> None:
 
             # The placeholder runs on demand: channel sessions (re)start it when a
             # channel has nothing live, and it stops after a stretch of disuse.
-            state = _PLACEHOLDER_STATE
+            state = placeholder._PLACEHOLDER_STATE
             if state and now - state.get("last_access", now) > PLACEHOLDER_IDLE_SECONDS:
                 LOGGER.info("Stopping idle placeholder ffmpeg")
                 await _stop_placeholder_process()
@@ -3094,7 +2604,7 @@ def _sweep_output_dirs_sync(live_dirs: Set[Path], min_age: float) -> List[Path]:
                 removed.append(channel_dir)
             except OSError:
                 pass
-    for run_dir in children(PLACEHOLDER_OUTPUT_DIR):
+    for run_dir in children(placeholder.PLACEHOLDER_OUTPUT_DIR):
         if stale(run_dir) and _rmtree_with_retries(run_dir, attempts=2, delay=0.5):
             removed.append(run_dir)
     return removed
@@ -3103,8 +2613,8 @@ def _sweep_output_dirs_sync(live_dirs: Set[Path], min_age: float) -> List[Path]:
 async def _sweep_output_dirs(min_age: float = 60.0) -> List[Path]:
     live: Set[Path] = {entry["output_dir"] for entry in _MULTIVIEW_PROCESSES.values()}
     live |= _MULTIVIEW_PENDING_RUN_DIRS | _PLACEHOLDER_PENDING_DIRS
-    if _PLACEHOLDER_STATE:
-        live.add(_PLACEHOLDER_STATE["output_dir"])
+    if placeholder._PLACEHOLDER_STATE:
+        live.add(placeholder._PLACEHOLDER_STATE["output_dir"])
     removed = await asyncio.to_thread(_sweep_output_dirs_sync, live, min_age)
     if removed:
         LOGGER.info("Removed %d leftover Multi-View/placeholder output dir(s)", len(removed))
@@ -3186,240 +2696,6 @@ async def serve_multiview_audio_segment(channel_id: str, audio_index: int, seq: 
     return _serve_session_segment(f"{channel_id}#a{audio_index}", seq)
 
 
-# --- SHARED "NO SIGNAL" PLACEHOLDER ---
-# A single, always-on synthetic HLS stream shown for ANY channel (regular team,
-# always-live special channel, or Multi-View member) that currently has no
-# live candidates - instead of a bare 404. This turns Jellyfin's ugly "fatal
-# player error" into a clean "no signal" screen, and - since Multi-View's
-# ffmpeg pulls every member through this exact same /stream/{team_id} route -
-# also transparently fixes a Multi-View channel refusing to start entirely
-# just because one of its members isn't currently live: that member's input
-# simply resolves to this placeholder instead of a 404, so ffmpeg's -i for it
-# always succeeds.
-PLACEHOLDER_OUTPUT_DIR = DATA_DIR / "placeholder"
-PLACEHOLDER_STARTUP_TIMEOUT_SECONDS = 20.0
-PLACEHOLDER_IDLE_SECONDS = bounded_float(os.getenv("PLACEHOLDER_IDLE_SECONDS", "900"), 900.0, 60.0, 86400.0)
-_PLACEHOLDER_STATE: Optional[dict] = None
-_PLACEHOLDER_LOCK = asyncio.Lock()
-# Bumped per placeholder ffmpeg start: names its run dir and is part of its
-# source key, so channel sessions treat a restarted placeholder (segment
-# numbers back at 0) as a new source instead of a lagging edge.
-_PLACEHOLDER_RUN_COUNTER = 0
-# Last spawn failure(s): {"count", "last_failure", "last_error"}. The next start
-# waits _multiview_backoff_seconds(count), so a broken placeholder ffmpeg is
-# no longer respawned (and logged as an ERROR) on every session poll.
-_PLACEHOLDER_FAILURE: Optional[dict] = None
-# Turned off once drawtext failed with this ffmpeg build (no libfreetype, no
-# usable font): later starts render the logo without the caption.
-_PLACEHOLDER_DRAWTEXT_OK = True
-_PLACEHOLDER_PENDING_DIRS: Set[Path] = set()
-_DRAWTEXT_FAILURE_MARKERS = (
-    "drawtext", "fontconfig", "freetype", "fontfile", "font file", "could not load font", "cannot find a valid font",
-)
-
-
-def _ffmpeg_filter_path(path: Path) -> str:
-    """A path for a single-quoted filter option value: forward slashes, and
-    the drive colon escaped (ffmpeg splits filter options on ':')."""
-    return str(path).replace("\\", "/").replace(":", "\\:").replace("'", "'\\''")
-
-
-def _placeholder_font_option() -> str:
-    """drawtext font selection. Bundled Windows ffmpeg builds usually have no
-    fontconfig configuration, so font='Sans' fails or falls back unpredictably
-    there: point at a real Windows font file instead."""
-    if sys.platform == "win32":
-        fonts_dir = Path(os.environ.get("WINDIR") or os.environ.get("SystemRoot") or r"C:\Windows") / "Fonts"
-        for name in ("segoeui.ttf", "arial.ttf", "tahoma.ttf", "verdana.ttf"):
-            candidate = fonts_dir / name
-            if candidate.is_file():
-                return f"fontfile='{_ffmpeg_filter_path(candidate)}':"
-        return ""
-    return "font='Sans':"
-
-
-def _build_placeholder_ffmpeg_args(out_dir: Path, drawtext: bool = True) -> List[str]:
-    """Pure command-builder for the shared "No Signal" loop (no I/O besides
-    locating a font, unit-testable)."""
-    logo_path = _resource_path("assets/jellyball-logo.png")
-    video_filter = (
-        "scale=1920:1080:force_original_aspect_ratio=decrease,"
-        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2"
-    )
-    if drawtext:
-        video_filter += (
-            f",drawtext={_placeholder_font_option()}text='No Signal':fontcolor=white:fontsize=64:"
-            "box=1:boxcolor=black@0.5:boxborderw=16:x=(w-text_w)/2:y=h-200"
-        )
-    # -re paces both inputs at real time: without it ffmpeg encoded this loop as
-    # fast as the CPU allowed (pinning a core and racing segments far ahead of
-    # the wall clock). 1080p30 with 2s segments so a channel that starts on the
-    # placeholder and then goes live doesn't make Jellyfin lock in a low
-    # resolution/frame rate from its initial probe, and so a cold start has a
-    # playable buffer within a few seconds.
-    return [
-        "-y",
-        "-hide_banner", "-nostats", "-loglevel", "warning",
-        "-re", "-loop", "1", "-framerate", "30", "-i", str(logo_path),
-        "-re", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-        "-vf", video_filter,
-        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
-        "-b:v", "1M", "-maxrate", "1M", "-bufsize", "2M",
-        "-g", "60", "-keyint_min", "60", "-sc_threshold", "0", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "64k", "-ac", "2", "-ar", "48000",
-        "-f", "hls",
-        "-hls_time", "2",
-        "-hls_list_size", "8",
-        "-hls_flags", "delete_segments+independent_segments",
-        "-hls_segment_type", "mpegts",
-        "-hls_segment_filename", "seg_%05d.ts",
-        "index.m3u8",
-    ]
-
-
-def _looks_like_drawtext_failure(log_lines) -> bool:
-    text = "\n".join(str(line) for line in log_lines).lower()
-    return any(marker in text for marker in _DRAWTEXT_FAILURE_MARKERS)
-
-
-def _placeholder_cooldown_remaining() -> float:
-    record = _PLACEHOLDER_FAILURE
-    if not record:
-        return 0.0
-    elapsed = time.monotonic() - record["last_failure"]
-    return max(0.0, _multiview_backoff_seconds(record["count"]) - elapsed)
-
-
-def _record_placeholder_failure(error: str) -> float:
-    global _PLACEHOLDER_FAILURE
-    record = _PLACEHOLDER_FAILURE or {"count": 0, "last_failure": 0.0, "last_error": ""}
-    record["count"] += 1
-    record["last_failure"] = time.monotonic()
-    record["last_error"] = error
-    _PLACEHOLDER_FAILURE = record
-    return _multiview_backoff_seconds(record["count"])
-
-
-async def _drain_placeholder_log(process: "asyncio.subprocess.Process", log_lines: "deque[str]") -> None:
-    # Same chunked reader as Multi-View (readline() can die on CR-only progress output).
-    await _drain_multiview_log("placeholder", process, log_lines)
-
-
-async def _watch_placeholder_process(process: "asyncio.subprocess.Process") -> None:
-    returncode = await process.wait()
-    if _PLACEHOLDER_STATE and _PLACEHOLDER_STATE["process"] is process:
-        _PLACEHOLDER_STATE["exited"] = True
-        if returncode != 0:
-            LOGGER.warning("placeholder ffmpeg exited unexpectedly code=%s", returncode)
-
-
-async def _stop_placeholder_process() -> None:
-    global _PLACEHOLDER_STATE
-    state, _PLACEHOLDER_STATE = _PLACEHOLDER_STATE, None
-    if not state:
-        return
-    await _terminate_ffmpeg(state, "placeholder", term_timeout=5.0, kill_timeout=3.0)
-    tasks = [state.get(key) for key in ("watch_task", "log_task") if state.get(key)]
-    for task in tasks:
-        if not task.done():
-            task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    _remove_tree_later(state["output_dir"], "placeholder")
-
-
-async def _launch_placeholder_run(drawtext: bool) -> Tuple[bool, List[str]]:
-    """One placeholder ffmpeg attempt (caller holds _PLACEHOLDER_LOCK):
-    (ready, log lines of a failed attempt)."""
-    global _PLACEHOLDER_STATE, _PLACEHOLDER_RUN_COUNTER
-    _PLACEHOLDER_RUN_COUNTER += 1
-    run_id = _PLACEHOLDER_RUN_COUNTER
-    out_dir = PLACEHOLDER_OUTPUT_DIR / f"run{run_id}"
-    _PLACEHOLDER_PENDING_DIRS.add(out_dir)
-    try:
-        await asyncio.to_thread(_prepare_run_dir, out_dir, 0)
-        args = _build_placeholder_ffmpeg_args(out_dir, drawtext=drawtext)
-        try:
-            process = await asyncio.create_subprocess_exec(
-                FFMPEG_PATH, *args,
-                cwd=str(out_dir),
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                creationflags=_ffmpeg_creationflags(),
-            )
-        except (FileNotFoundError, OSError) as exc:
-            _log_failure("spawn placeholder ffmpeg", exc, logging.ERROR)
-            _remove_tree_later(out_dir, "placeholder")
-            return False, ["could not launch ffmpeg"]
-        job = _create_run_job(process.pid)
-        _write_run_pid_file(out_dir, process.pid)
-
-        log_lines: "deque[str]" = deque(maxlen=200)
-        watch_task = _spawn_background_task(_watch_placeholder_process(process), "watch placeholder ffmpeg")
-        log_task = _spawn_background_task(_drain_placeholder_log(process, log_lines), "drain placeholder ffmpeg log")
-        state = {
-            "process": process,
-            "job": job,
-            "run_id": run_id,
-            "output_dir": out_dir,
-            "exited": False,
-            "watch_task": watch_task,
-            "log_task": log_task,
-            "log_lines": log_lines,
-            "ready": False,
-            "last_access": time.monotonic(),
-        }
-        _PLACEHOLDER_STATE = state
-        try:
-            ready = await _wait_for_first_segment(out_dir, process, PLACEHOLDER_STARTUP_TIMEOUT_SECONDS)
-        except asyncio.CancelledError:
-            if _PLACEHOLDER_STATE is state:
-                await _stop_placeholder_process()
-            raise
-        if ready and _PLACEHOLDER_STATE is state:
-            state["ready"] = True
-            return True, []
-        lines = list(log_lines)
-        if _PLACEHOLDER_STATE is state:
-            await _stop_placeholder_process()
-        return False, lines
-    finally:
-        _PLACEHOLDER_PENDING_DIRS.discard(out_dir)
-
-
-async def _ensure_placeholder_running() -> bool:
-    """Start the shared placeholder stream if it isn't already running. Idempotent;
-    after a failed start it declines (returns False) until the backoff expires."""
-    global _PLACEHOLDER_FAILURE, _PLACEHOLDER_DRAWTEXT_OK
-    async with _PLACEHOLDER_LOCK:
-        if _PLACEHOLDER_STATE and _PLACEHOLDER_STATE["process"].returncode is None and not _PLACEHOLDER_STATE.get("exited"):
-            return True
-        if not FFMPEG_AVAILABLE or _placeholder_cooldown_remaining() > 0:
-            return False
-        if _PLACEHOLDER_STATE is not None:  # a dead run: reap it before starting over
-            await _stop_placeholder_process()
-
-        lines: List[str] = []
-        for _attempt in range(2):
-            ready, lines = await _launch_placeholder_run(_PLACEHOLDER_DRAWTEXT_OK)
-            if ready:
-                _PLACEHOLDER_FAILURE = None
-                return True
-            if _PLACEHOLDER_DRAWTEXT_OK and _looks_like_drawtext_failure(lines):
-                _PLACEHOLDER_DRAWTEXT_OK = False
-                LOGGER.warning(
-                    "placeholder ffmpeg: drawtext failed (%s); retrying without the 'No Signal' caption",
-                    _multiview_error_from_log(lines),
-                )
-                continue
-            break
-        error = _multiview_error_from_log(lines)
-        retry_in = _record_placeholder_failure(error)
-        LOGGER.error("placeholder ffmpeg failed to produce a first segment: %s (retrying in %.0fs)", error, retry_in)
-        return False
-
-
 # --- CHANNEL SESSIONS (proxy-built continuous playlists; see hls_session.py) ---
 
 SESSION_IDLE_SECONDS = bounded_float(os.getenv("SESSION_IDLE_SECONDS", "60"), 60.0, 10.0, 3600.0)
@@ -3458,7 +2734,7 @@ async def _session_fetch(url: str, headers: Dict[str, str], max_bytes: int, time
 
 def _request_placeholder_start() -> None:
     global _PLACEHOLDER_START_TASK
-    if not FFMPEG_AVAILABLE or _placeholder_cooldown_remaining() > 0:
+    if not ffmpeg_proc.FFMPEG_AVAILABLE or _placeholder_cooldown_remaining() > 0:
         return
     if _PLACEHOLDER_START_TASK is None or _PLACEHOLDER_START_TASK.done():
         _PLACEHOLDER_START_TASK = _spawn_background_task(_ensure_placeholder_running(), "start placeholder stream")
@@ -3474,7 +2750,7 @@ def _is_placeholder_key(key) -> bool:
 
 
 def _placeholder_source() -> Optional[SourceSpec]:
-    state = _PLACEHOLDER_STATE
+    state = placeholder._PLACEHOLDER_STATE
     if state and state.get("ready") and state["process"].returncode is None and not state.get("exited"):
         state["last_access"] = time.monotonic()
         return SourceSpec(
@@ -3595,7 +2871,7 @@ SESSIONS = SessionRegistry(
 
 def _start_on_placeholder(channel_id: str) -> bool:
     data = stream_state.get(channel_id)
-    if not data or data.get("type") == "multiview" or not FFMPEG_AVAILABLE:
+    if not data or data.get("type") == "multiview" or not ffmpeg_proc.FFMPEG_AVAILABLE:
         return False
     data["startup_placeholder_until"] = time.monotonic() + STARTUP_PLACEHOLDER_SECONDS
     LOGGER.info("Stream slow to start; showing No Signal meanwhile channel=%s", channel_id)
@@ -3639,7 +2915,7 @@ def _serve_session_segment(session_id: str, seq: int) -> Response:
 
 
 async def _serve_channel_playlist(team_id: str, request: Request) -> Response:
-    if team_id == PLACEHOLDER_SESSION_ID and FFMPEG_AVAILABLE:
+    if team_id == PLACEHOLDER_SESSION_ID and ffmpeg_proc.FFMPEG_AVAILABLE:
         # Stand-in input for a Multi-View member that no longer exists.
         return await _serve_session_playlist(team_id, f"{team_id}/seg/")
     data = stream_state.get(team_id)
@@ -4539,7 +3815,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         })
 
     multiview = {
-        "ffmpeg_available": FFMPEG_AVAILABLE,
+        "ffmpeg_available": ffmpeg_proc.FFMPEG_AVAILABLE,
         "ffmpeg_path": FFMPEG_PATH,
         "checkbox_list": multiview_checkbox_list,
         "rows": multiview_rows,
@@ -5011,7 +4287,7 @@ async def ffmpeg_status(auth: bool = Depends(verify_dashboard_auth)):
             "failure_count": failure["count"] if failure else 0,
             "retry_in_seconds": round(_multiview_cooldown_remaining(channel_id)) if failure else 0,
         })
-    return {"available": FFMPEG_AVAILABLE, "version": FFMPEG_VERSION_INFO, "channels": channels}
+    return {"available": ffmpeg_proc.FFMPEG_AVAILABLE, "version": ffmpeg_proc.FFMPEG_VERSION_INFO, "channels": channels}
 
 
 @app.post("/favorite/{team_id}")
