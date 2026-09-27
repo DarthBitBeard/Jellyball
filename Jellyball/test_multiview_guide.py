@@ -23,7 +23,6 @@ import state
 from main import (
     generate_m3u,
     generate_xmltv,
-    xmltv_ts,
     _channel_programmes,
     _multiview_audio_channels,
     _multiview_audio_tvg_id,
@@ -38,6 +37,7 @@ from main import (
     _cap_intervals,
     _programme_at,
 )
+from catalog import xmltv_ts
 
 
 def _dt(minutes: int, base: datetime) -> datetime:

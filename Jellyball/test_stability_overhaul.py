@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import alerts
 import db
 import scrapers
 import security
@@ -83,12 +84,12 @@ class DashboardPasswordTests(unittest.TestCase):
 
 class GuideRefreshDebounceTests(unittest.IsolatedAsyncioTestCase):
     async def test_unchanged_guide_does_not_schedule_refresh(self):
-        state = main._JELLYFIN_REFRESH_STATE
+        state = alerts._JELLYFIN_REFRESH_STATE
         saved = dict(state)
         try:
             state["pending"] = None
-            state["signature"] = main._guide_signature()
-            main.request_jellyfin_guide_refresh_if_changed()
+            state["signature"] = alerts._guide_signature()
+            alerts.request_jellyfin_guide_refresh_if_changed()
             self.assertIsNone(state["pending"])
         finally:
             state.update(saved)

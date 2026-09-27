@@ -12,6 +12,7 @@ from unittest.mock import patch
 import httpx
 
 import main
+import alerts
 import db
 import security
 import state
@@ -173,7 +174,7 @@ class SecretSettingsTests(TempDbMixin, unittest.TestCase):
                 jellyfin_url="https://attacker.example", jellyfin_api_key="",
                 jellyfin_task_id="", clear_jellyfin_api_key="", auth=True,
             )
-            return response, await main.get_jellyfin_config()
+            return response, await alerts.get_jellyfin_config()
 
         response, config = asyncio.run(exercise())
         self.assertIn("jellyfin_key_required", response.headers["location"])
@@ -188,7 +189,7 @@ class SecretSettingsTests(TempDbMixin, unittest.TestCase):
                 jellyfin_url="http://192.168.1.10:8096/", jellyfin_api_key="",
                 jellyfin_task_id="task", clear_jellyfin_api_key="", auth=True,
             )
-            return await main.get_jellyfin_config()
+            return await alerts.get_jellyfin_config()
 
         config = asyncio.run(exercise())
         self.assertEqual(config["jellyfin_api_key"], "secret-key")

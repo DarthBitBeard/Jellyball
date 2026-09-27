@@ -2,7 +2,6 @@
 import config  # noqa: F401
 
 import asyncio
-import hashlib
 import json
 import logging
 import math
@@ -20,7 +19,7 @@ import webbrowser
 from collections import deque, OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
@@ -109,17 +108,39 @@ from scrapers import (
     HtmlAggregatorScraper,
     master_scrape,
 )
+import catalog
+from catalog import (
+    _channel_group_title,
+    _channel_is_always_live,
+    _channel_is_off_season,
+    _channel_listed,
+    _channel_logo_url,
+    _channel_tvg_id,
+    _season_resume_label,
+    _special_channel_for,
+    _sport_labeled_name,
+    fetch_espn_team_schedule,
+    get_catalog_entries,
+    is_in_season,
+    is_stream_window_active,
+    parse_team_schedule,
+    resolve_espn_logo,
+    SCRAPE_REFRESH_SECONDS,
+    STREAM_LEAD_TIME,
+    STREAM_TRAIL_TIME,
+    xmltv_ts,
+)
+from alerts import (
+    get_jellyfin_config,
+    get_notification_config,
+    request_jellyfin_guide_refresh_if_changed,
+    send_alert,
+    trigger_jellyfin_refresh,
+)
+from updates import _update_available, _UPDATE_STATE, check_for_update, update_check_loop
 from hls_session import FetchResult, SessionConfig, SessionHooks, SessionRegistry, SourceSpec
 from network_safety import bounded_float, bounded_int, validate_http_url_async
-from sports_catalog import (
-    ESPN_DIRECTORY_ENDPOINTS,
-    parse_espn_team_directory,
-    SEASON_WINDOWS,
-    SPECIAL_CHANNELS,
-    STATIC_TEAM_RECORDS,
-    TeamSlug,
-)
-from sports_matcher import canonical_team_name, get_team_search_terms
+from sports_matcher import get_team_search_terms
 from stream_extractor import DEFAULT_USER_AGENT, verify_stream_live
 from version import __version__
 
@@ -153,215 +174,6 @@ async def enforce_scheduled_disables():
         await asyncio.sleep(3600)
 
 
-async def get_notification_config() -> dict:
-    return {
-        "discord_webhook_url": await get_setting_async("discord_webhook_url", os.getenv("DISCORD_WEBHOOK_URL", "")),
-        "telegram_bot_token": await get_setting_async("telegram_bot_token", os.getenv("TELEGRAM_BOT_TOKEN", "")),
-        "telegram_chat_id": await get_setting_async("telegram_chat_id", os.getenv("TELEGRAM_CHAT_ID", ""))
-    }
-
-# Backoff between webhook delivery attempts: one initial attempt plus up to
-# this many retries, for transient failures only (network errors, 5xx, 429).
-_ALERT_RETRY_DELAYS = (1.0, 3.0)
-_ALERT_MAX_RETRY_AFTER_SECONDS = 10.0
-
-
-def _parse_retry_after_seconds(value: Optional[str]) -> Optional[float]:
-    """Parse a `Retry-After` header's numeric-seconds form. The HTTP-date form
-    is rare for webhook 429s and isn't worth the parsing surface here; when
-    the header is absent or unparseable the caller falls back to its own
-    backoff schedule."""
-    if not value:
-        return None
-    try:
-        return max(0.0, float(value.strip()))
-    except (TypeError, ValueError):
-        return None
-
-
-async def _post_webhook_with_retries(client: httpx.AsyncClient, provider: str, url: str, **kwargs) -> None:
-    """POST a webhook payload with up to len(_ALERT_RETRY_DELAYS) retries.
-
-    Retries transient failures — network/timeout errors, 5xx, and 429 (honouring
-    a `Retry-After` header, capped at _ALERT_MAX_RETRY_AFTER_SECONDS). Any other
-    4xx is treated as non-retryable. Reuses the caller's single AsyncClient
-    across every attempt. The final failure is logged once at WARNING with only
-    the provider name — never the webhook URL or any token embedded in it.
-    """
-    attempts = len(_ALERT_RETRY_DELAYS) + 1
-    for attempt in range(attempts):
-        is_last_attempt = attempt == attempts - 1
-        try:
-            response = await client.post(url, **kwargs)
-        except httpx.HTTPError:
-            if is_last_attempt:
-                LOGGER.warning("Alert webhook delivery failed after retries provider=%s", provider)
-                return
-            await asyncio.sleep(_ALERT_RETRY_DELAYS[attempt])
-            continue
-
-        if response.status_code < 400:
-            return
-
-        retryable = response.status_code == 429 or response.status_code >= 500
-        if not retryable or is_last_attempt:
-            LOGGER.warning(
-                "Alert webhook delivery failed after retries provider=%s status=%s",
-                provider, response.status_code,
-            )
-            return
-
-        if response.status_code == 429:
-            retry_after = _parse_retry_after_seconds(response.headers.get("Retry-After"))
-            delay = _ALERT_RETRY_DELAYS[attempt] if retry_after is None else retry_after
-            delay = min(delay, _ALERT_MAX_RETRY_AFTER_SECONDS)
-        else:
-            delay = _ALERT_RETRY_DELAYS[attempt]
-        await asyncio.sleep(delay)
-
-
-async def send_alert(title: str, message: str, level: str = "warning"):
-    config = await get_notification_config()
-    discord_url = config["discord_webhook_url"]
-    if discord_url and not _validate_upstream_url(discord_url):
-        LOGGER.warning("Ignoring invalid Discord webhook URL")
-        discord_url = ""
-    tg_token = config["telegram_bot_token"]
-    tg_chat_id = config["telegram_chat_id"]
-
-    color_map = {"info": 3066993, "warning": 16753920, "danger": 14431526, "success": 3647337}
-    headers = {"User-Agent": "Jellyball-Proxy/1.0"}
-    tasks = []
-
-    if discord_url:
-        embed = {"title": title, "description": message, "color": color_map.get(level, 16753920), "timestamp": datetime.now(timezone.utc).isoformat()}
-        async def _send_discord():
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    await _post_webhook_with_retries(client, "Discord", discord_url, json={"embeds": [embed]}, headers=headers)
-            except Exception as exc:
-                _log_failure("send Discord alert", exc)
-        tasks.append(_send_discord())
-
-    if tg_token and tg_chat_id:
-        tg_url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
-        tg_text = f"*{title}*\n{message}"
-        async def _send_telegram():
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    await _post_webhook_with_retries(client, "Telegram", tg_url, json={"chat_id": tg_chat_id, "text": tg_text, "parse_mode": "Markdown"}, headers=headers)
-            except Exception as exc:
-                _log_failure("send Telegram alert", exc)
-        tasks.append(_send_telegram())
-
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-async def get_jellyfin_config() -> dict:
-    return {
-        "jellyfin_url": (await get_setting_async("jellyfin_url", os.getenv("JELLYFIN_URL", "http://localhost:8096"))).rstrip("/"),
-        "jellyfin_api_key": await get_setting_async("jellyfin_api_key", os.getenv("JELLYFIN_API_KEY", "")),
-        "jellyfin_task_id": await get_setting_async("jellyfin_task_id", os.getenv("JELLYFIN_TASK_ID", ""))
-    }
-
-async def trigger_jellyfin_refresh() -> bool:
-    cfg = await get_jellyfin_config()
-    jellyfin_url = _validate_upstream_url(cfg["jellyfin_url"], allow_private=True)
-    api_key = cfg["jellyfin_api_key"]
-    task_id = cfg["jellyfin_task_id"]
-
-    if not jellyfin_url or not api_key:
-        return False
-
-    headers = {"X-Emby-Token": api_key, "User-Agent": "Jellyball-Proxy/1.0"}
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        if not task_id:
-            try:
-                tasks_resp = await client.get(f"{jellyfin_url}/ScheduledTasks", headers=headers)
-                if tasks_resp.status_code == 200:
-                    for t in tasks_resp.json():
-                        if t.get("Key") == "RefreshGuide" or "refresh guide" in t.get("Name", "").lower():
-                            task_id = t.get("Id", "")
-                            await set_setting_async("jellyfin_task_id", task_id)
-                            break
-            except Exception as exc:
-                _log_failure("discover Jellyfin guide task", exc)
-
-        if not task_id:
-            return False
-
-        url = f"{jellyfin_url}/ScheduledTasks/Running/{task_id}"
-        try:
-            response = await client.post(url, headers=headers)
-            if response.status_code in [200, 204]:
-                await log_metric_event_async("Jellyfin", "API", "guide_refresh", "Triggered Live TV Guide Refresh task")
-                return True
-            return False
-        except Exception as exc:
-            _log_failure("trigger Jellyfin guide refresh", exc)
-            return False
-
-
-JELLYFIN_AUTO_REFRESH_MIN_INTERVAL = bounded_float(
-    os.getenv("JELLYFIN_AUTO_REFRESH_MIN_INTERVAL", "600"), 600.0, 60.0, 86400.0
-)
-_JELLYFIN_REFRESH_STATE = {"signature": None, "last_run": 0.0, "pending": None}
-
-
-def _guide_signature() -> str:
-    """Hash of everything Jellyfin's guide shows for our channels. Scrapes only
-    trigger a guide refresh when this changes - previously every successful
-    5-minute rescrape of every channel queued a full Jellyfin guide refresh."""
-    parts = [f"show_offseason={SHOW_OFFSEASON_CHANNELS}"]
-    for team_id, data in sorted(stream_state.items()):
-        parts.append("\0".join(str(value) for value in (
-            team_id,
-            data.get("name", ""),
-            data.get("logo_url", ""),
-            data.get("start_time", ""),
-            data.get("stop_time", ""),
-            data.get("schedule_status", ""),
-            data.get("tvg_id", ""),
-            data.get("group_title", ""),
-            bool(data.get("candidates")),
-        )))
-    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
-
-
-async def _debounced_jellyfin_refresh(delay: float) -> None:
-    try:
-        await asyncio.sleep(delay)
-        signature = _guide_signature()
-        if signature == _JELLYFIN_REFRESH_STATE["signature"]:
-            return
-        _JELLYFIN_REFRESH_STATE["signature"] = signature
-        _JELLYFIN_REFRESH_STATE["last_run"] = time.monotonic()
-        await trigger_jellyfin_refresh()
-    finally:
-        _JELLYFIN_REFRESH_STATE["pending"] = None
-
-
-def request_jellyfin_guide_refresh_if_changed() -> None:
-    """Refresh Jellyfin's guide for automatic (scrape/schedule-driven) changes only
-    when the guide contents actually changed, at most once per
-    JELLYFIN_AUTO_REFRESH_MIN_INTERVAL. User-initiated changes still call
-    trigger_jellyfin_refresh() directly for an immediate refresh."""
-    if _JELLYFIN_REFRESH_STATE["pending"] is not None:
-        return
-    if _guide_signature() == _JELLYFIN_REFRESH_STATE["signature"]:
-        return
-    if _JELLYFIN_REFRESH_STATE["last_run"] == 0.0:
-        # First automatic refresh after startup: wait a minute so the initial
-        # burst of channel scrapes lands in one refresh instead of the first one.
-        delay = 60.0
-    else:
-        elapsed = time.monotonic() - _JELLYFIN_REFRESH_STATE["last_run"]
-        delay = max(0.0, JELLYFIN_AUTO_REFRESH_MIN_INTERVAL - elapsed)
-    _JELLYFIN_REFRESH_STATE["pending"] = _spawn_background_task(
-        _debounced_jellyfin_refresh(delay), "debounced Jellyfin guide refresh"
-    )
-
-
 def _maybe_record_playback_event(team_id: str) -> None:
     """Fire-and-forget, de-duplicated so Jellyfin's frequent manifest re-polling
     during one viewing session doesn't produce dozens of rows for it."""
@@ -377,13 +189,6 @@ def _maybe_record_playback_event(team_id: str) -> None:
 
 _SCRAPE_IN_FLIGHT: Set[str] = set()
 
-CATALOG_REFRESH_SECONDS = bounded_float(os.getenv("CATALOG_REFRESH_SECONDS", "3600"), 3600.0, 60.0, 86400.0)
-_CATALOG_CACHE: Dict[str, Tuple[TeamSlug, ...]] = {}
-_CATALOG_CACHE_LOADED_AT = 0.0
-_CATALOG_REMOTE_LOADED = False
-_CATALOG_LOCK = asyncio.Lock()
-CATALOG_FAILURE_RETRY_SECONDS = bounded_float(os.getenv("CATALOG_FAILURE_RETRY_SECONDS", "120"), 120.0, 30.0, 1800.0)
-
 _TEAM_SCRAPE_TASKS: Dict[str, asyncio.Task] = {}
 _TEAM_SCRAPE_WAKE_EVENTS: Dict[str, asyncio.Event] = {}
 _TEAM_STATE_LOCKS: Dict[str, asyncio.Lock] = {}
@@ -395,250 +200,6 @@ def _team_state_lock(team_id: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _TEAM_STATE_LOCKS[team_id] = lock
     return lock
-
-
-def _static_catalog_records(category: str) -> List[TeamSlug]:
-    records: List[TeamSlug] = []
-    for record in STATIC_TEAM_RECORDS:
-        if category in {"ncaaf", "ncaam"}:
-            if record.is_college:
-                records.append(record.for_category(category))
-        elif record.category == category:
-            records.append(record)
-    return records
-
-
-def _catalog_record_key(record: TeamSlug) -> Tuple[str, str, str]:
-    return record.category, record.slug, record.canonical
-
-
-async def _fetch_espn_directory(category: str, client: httpx.AsyncClient) -> Tuple[TeamSlug, ...]:
-    endpoint = ESPN_DIRECTORY_ENDPOINTS.get(category)
-    if not endpoint:
-        return ()
-    sport, league = endpoint
-    url = f"https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams"
-    try:
-        response = await client.get(url, params={"limit": "1000"})
-        if response.status_code != 200:
-            LOGGER.warning("ESPN catalog request category=%s status=%s", category, response.status_code)
-            return ()
-        records = parse_espn_team_directory(response.json(), category)
-        return tuple(record.for_category(category) for record in records)
-    except Exception as exc:
-        _log_failure(f"fetch ESPN team directory category={category}", exc)
-        return ()
-
-
-async def get_team_catalog() -> Dict[str, Tuple[TeamSlug, ...]]:
-    """Return grouped catalog records, refreshing college directories periodically."""
-    global _CATALOG_CACHE, _CATALOG_CACHE_LOADED_AT, _CATALOG_REMOTE_LOADED
-
-    now = time.monotonic()
-    if _CATALOG_CACHE and now - _CATALOG_CACHE_LOADED_AT < CATALOG_REFRESH_SECONDS:
-        return dict(_CATALOG_CACHE)
-
-    async with _CATALOG_LOCK:
-        now = time.monotonic()
-        if _CATALOG_CACHE and now - _CATALOG_CACHE_LOADED_AT < CATALOG_REFRESH_SECONDS:
-            return dict(_CATALOG_CACHE)
-
-        categories = ("ncaaf", "ncaam", "nfl", "mlb", "nhl", "nba")
-        grouped: Dict[str, Dict[Tuple[str, str, str], TeamSlug]] = {
-            category: {
-                _catalog_record_key(record): record
-                for record in _static_catalog_records(category)
-            }
-            for category in categories
-        }
-        previous_catalog = dict(_CATALOG_CACHE)
-        was_remote_loaded = _CATALOG_REMOTE_LOADED
-
-        owns_client = state.SHARED_HTTP_CLIENT is None
-        client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(
-            timeout=10.0,
-            follow_redirects=True,
-            http2=True,
-        )
-        try:
-            remote_results = await asyncio.gather(
-                *(_fetch_espn_directory(category, client) for category in ("ncaaf", "ncaam")),
-                return_exceptions=True,
-            )
-            remote_success = False
-            for category, result in zip(("ncaaf", "ncaam"), remote_results):
-                if isinstance(result, tuple) and result:
-                    remote_success = True
-                    grouped[category] = {
-                        _catalog_record_key(record): record
-                        for record in result
-                    }
-            _CATALOG_REMOTE_LOADED = remote_success or was_remote_loaded
-        finally:
-            if owns_client:
-                await client.aclose()
-
-        _CATALOG_CACHE = {
-            category: tuple(sorted(records.values(), key=lambda record: record.display_name.casefold()))
-            for category, records in grouped.items()
-        }
-        # A failed remote refresh should not suppress the next retry for the
-        # full interval. Static records remain usable while ESPN recovers.
-        if remote_success:
-            _CATALOG_CACHE_LOADED_AT = time.monotonic()
-        elif not previous_catalog:
-            _CATALOG_CACHE_LOADED_AT = time.monotonic() - max(
-                0.0,
-                CATALOG_REFRESH_SECONDS - CATALOG_FAILURE_RETRY_SECONDS,
-            )
-        return dict(_CATALOG_CACHE)
-
-
-def _catalog_team_id(category: str, source_id: str, name: str) -> str:
-    return _safe_team_id(f"{category}_{source_id or name}")
-
-
-_COLLEGE_CATEGORY_LABELS = {
-    "ncaaf": "Football",
-    "ncaam": "Men's Basketball",
-}
-
-
-def _sport_labeled_name(name: str, category: str) -> str:
-    base_name = str(name or "").strip()
-    sport_label = _COLLEGE_CATEGORY_LABELS.get(category, "")
-    if not base_name or not sport_label:
-        return base_name
-    suffix = f" ({sport_label})"
-    if base_name.casefold().endswith(suffix.casefold()):
-        return base_name
-    return f"{base_name}{suffix}"
-
-
-def _catalog_display_name(category: str, record: TeamSlug) -> str:
-    return _sport_labeled_name(record.display_name, category)
-
-
-_SPECIAL_CHANNELS_BY_KEY = {channel.key: channel for channel in SPECIAL_CHANNELS}
-
-
-def _normalize_channel_label(value: object) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold())).strip()
-
-
-_SPECIAL_CHANNELS_BY_LABEL = {
-    _normalize_channel_label(label): channel
-    for channel in SPECIAL_CHANNELS
-    for label in (channel.name, *channel.search_terms)
-    if _normalize_channel_label(label)
-}
-_CATEGORY_GROUP_LABELS = {
-    "ncaaf": "College Football",
-    "ncaam": "College Basketball",
-    "nfl": "NFL",
-    "mlb": "MLB",
-    "nhl": "NHL",
-    "nba": "NBA",
-}
-
-
-def _special_channel_for(data: dict):
-    catalog_key = str(data.get("catalog_key") or "")
-    if catalog_key.startswith("special:"):
-        channel = _SPECIAL_CHANNELS_BY_KEY.get(catalog_key.removeprefix("special:"))
-        if channel:
-            return channel
-    for field in ("name", "query"):
-        channel = _SPECIAL_CHANNELS_BY_LABEL.get(_normalize_channel_label(data.get(field)))
-        if channel:
-            return channel
-    return None
-
-
-def _channel_is_always_live(data: dict) -> bool:
-    return bool(data.get("always_live") or _special_channel_for(data))
-
-
-def _channel_is_off_season(data: dict) -> bool:
-    return data.get("schedule_status") == "off_season"
-
-
-# Off-season channels leave the M3U/guide by default; with this on they stay
-# listed with an "Off-season - resumes <date>" guide block (Settings tab).
-SHOW_OFFSEASON_CHANNELS = False
-
-
-def _channel_listed(data: dict) -> bool:
-    """Whether a channel appears in the M3U playlist and XMLTV guide."""
-    return SHOW_OFFSEASON_CHANNELS or not _channel_is_off_season(data)
-
-
-def _channel_tvg_id(team_id: str, data: dict) -> str:
-    special_channel = _special_channel_for(data)
-    return str(data.get("tvg_id") or (special_channel.tvg_id if special_channel else "") or team_id)
-
-
-def _channel_group_title(data: dict) -> str:
-    special_channel = _special_channel_for(data)
-    return str(data.get("group_title") or (special_channel.group_title if special_channel else "") or _CATEGORY_GROUP_LABELS.get(data.get("category"), "Team Trackers"))
-
-
-def _channel_logo_url(data: dict) -> str:
-    special_channel = _special_channel_for(data)
-    return str(
-        data.get("logo_url")
-        or (special_channel.logo_url if special_channel else "")
-        or resolve_espn_logo(data.get("name", ""), data.get("category", ""), data.get("source_id", ""))
-    )
-
-
-def _catalog_search_terms(record: TeamSlug, source_id: str) -> List[str]:
-    values = [record.canonical, *record.aliases, source_id, record.slug.replace("-", " ")]
-    terms = {str(value).strip() for value in values if str(value).strip()}
-    return sorted(terms, key=lambda value: (len(value.split()), len(value)), reverse=True)
-
-
-def _team_catalog_entry(category: str, record: TeamSlug) -> dict:
-    source_id = record.team_id or record.slug
-    name = _catalog_display_name(category, record)
-    return {
-        "catalog_key": f"team:{category}:{source_id}",
-        "team_id": _catalog_team_id(category, source_id, name),
-        "name": name,
-        "query": record.canonical,
-        "category": category,
-        "source_id": source_id,
-        "content_type": "team",
-        "search_terms": _catalog_search_terms(record, source_id),
-        "always_live": False,
-        "logo_url": resolve_espn_logo(name, category, source_id),
-    }
-
-
-def _special_catalog_entry(channel) -> dict:
-    return {
-        "catalog_key": f"special:{channel.key}",
-        "team_id": _safe_team_id(f"special_{channel.key}"),
-        "name": channel.name,
-        "query": channel.name,
-        "category": "special",
-        "source_id": "",
-        "content_type": "channel",
-        "search_terms": list(channel.search_terms),
-        "always_live": True,
-        "logo_url": channel.logo_url,
-        "tvg_id": channel.tvg_id or channel.key,
-        "group_title": channel.group_title,
-    }
-
-
-async def get_catalog_entries() -> List[dict]:
-    grouped = await get_team_catalog()
-    entries: List[dict] = []
-    for category in ("ncaaf", "ncaam", "nfl", "mlb", "nhl", "nba"):
-        entries.extend(_team_catalog_entry(category, record) for record in grouped.get(category, ()))
-    entries.extend(_special_catalog_entry(channel) for channel in SPECIAL_CHANNELS)
-    return entries
 
 
 def _start_team_scrape_loop(team_id: str, initial_delay: float = 0.0) -> asyncio.Task:
@@ -782,217 +343,6 @@ def _remove_startup_buffer_task(done: asyncio.Task) -> None:
     for key, task in list(_STARTUP_BUFFER_TASKS.items()):
         if task is done:
             _STARTUP_BUFFER_TASKS.pop(key, None)
-
-_ESPN_LOGO_CDN = "https://a.espncdn.com/i/teamlogos"
-_SPORT_SLUG_MAP: Dict[str, tuple[str, str]] = {
-    "florida state seminoles": ("ncaa", "52"),
-    "florida state": ("ncaa", "52"),
-    "seminoles": ("ncaa", "52"),
-    "miami hurricanes": ("ncaa", "2390"),
-    "inter miami": ("soccer", "10739"),
-    "miami heat": ("nba", "mia"),
-    "miami dolphins": ("nfl", "mia"),
-    "miami marlins": ("mlb", "mia"),
-    "florida panthers": ("nhl", "fla"),
-    "florida gators": ("ncaa", "57"),
-    "gators": ("ncaa", "57"),
-    "florida": ("ncaa", "57"),
-    "miami": ("ncaa", "2390"),
-    "new york jets": ("nfl", "nyj"),
-    "jets": ("nfl", "nyj"),
-    "tampa bay buccaneers": ("nfl", "tb"),
-    "buccaneers": ("nfl", "tb"),
-    "jacksonville jaguars": ("nfl", "jax"),
-    "jaguars": ("nfl", "jax"),
-    "ucf knights": ("ncaa", "2116"),
-    "ucf": ("ncaa", "2116"),
-    "tampa bay lightning": ("nhl", "tb"),
-    "lightning": ("nhl", "tb"),
-    "michigan wolverines": ("ncaa", "130"),
-    "michigan": ("ncaa", "130"),
-    "michigan state spartans": ("ncaa", "127"),
-    "ohio state buckeyes": ("ncaa", "194"),
-    "new york mets": ("mlb", "nym"),
-    "new york yankees": ("mlb", "nyy"),
-    "tampa bay rays": ("mlb", "tb"),
-}
-
-def _resolve_espn_team(team_name: str) -> tuple[Optional[str], Optional[str], str]:
-    identity = canonical_team_name(team_name)
-    if not identity:
-        return None, None, ""
-
-    if identity in _SPORT_SLUG_MAP:
-        sport, slug = _SPORT_SLUG_MAP[identity]
-        return sport, slug, identity
-
-    # Fallback only for a complete mapped phrase, never a loose substring such
-    # as "michigan" inside "michigan state".
-    words = set(identity.split())
-    matches = [
-        (key, value) for key, value in _SPORT_SLUG_MAP.items()
-        if set(key.split()).issubset(words)
-    ]
-    if len(matches) == 1:
-        key, (sport, slug) = matches[0]
-        return sport, slug, key
-    return None, None, identity
-
-
-def resolve_espn_logo(team_name: str, category: str = "", source_id: str = "") -> str:
-    category_logo_sports = {
-        "nfl": "nfl",
-        "ncaaf": "ncaa",
-        "ncaam": "ncaa",
-        "nba": "nba",
-        "mlb": "mlb",
-        "nhl": "nhl",
-    }
-    if category in category_logo_sports and source_id:
-        return f"{_ESPN_LOGO_CDN}/{category_logo_sports[category]}/500/{source_id}.png?v=titan2"
-    sport, slug, _ = _resolve_espn_team(team_name)
-    if sport and slug:
-        return f"{_ESPN_LOGO_CDN}/{sport}/500/{slug}.png?v=titan2"
-    return ""
-
-
-async def fetch_espn_team_schedule(
-    team_name: str,
-    query: str = "",
-    category: str = "",
-    source_id: str = "",
-) -> tuple[Optional[datetime], Optional[datetime], bool]:
-    api_map = {
-        "nfl": ("football", "nfl"),
-        "ncaaf": ("football", "college-football"),
-        "ncaam": ("basketball", "mens-college-basketball"),
-        "ncaa": ("football", "college-football"),
-        "nba": ("basketball", "nba"),
-        "mlb": ("baseball", "mlb"),
-        "nhl": ("hockey", "nhl"),
-        "soccer": ("soccer", "usa.1")
-    }
-
-    matched_sport = category
-    matched_slug = source_id
-    if not matched_sport or not matched_slug:
-        matched_sport, matched_slug, _ = _resolve_espn_team(team_name or query)
-    if not matched_sport or not matched_slug:
-        return None, None, False
-    
-    if matched_sport not in api_map:
-        return None, None, False
-        
-    sport, league = api_map[matched_sport]
-    url = f"https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams/{matched_slug}/schedule"
-    
-    now_utc = datetime.now(timezone.utc)
-    duration_by_sport = {
-        "football": timedelta(hours=4),
-        "basketball": timedelta(hours=3),
-        "baseball": timedelta(hours=4),
-        "hockey": timedelta(hours=3),
-        "soccer": timedelta(hours=2.5),
-    }
-    upcoming = []
-    owns_client = state.SHARED_HTTP_CLIENT is None
-    client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=8.0, follow_redirects=True, http2=True)
-    try:
-        resp = await client.get(url)
-        if resp.status_code != 200:
-            LOGGER.warning("ESPN schedule request team=%s status=%s", team_name or query, resp.status_code)
-            return None, None, False
-        data = resp.json()
-        events = data.get("events", [])
-        for ev in events:
-            date_str = ev.get("date")
-            if date_str:
-                dt_start = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                if dt_start.tzinfo is None:
-                    dt_start = dt_start.replace(tzinfo=timezone.utc)
-                dt_start = dt_start.astimezone(timezone.utc)
-                dt_stop = dt_start + duration_by_sport.get(sport, timedelta(hours=3))
-                if dt_stop >= now_utc - timedelta(hours=1) and dt_start <= now_utc + timedelta(days=14):
-                    upcoming.append((dt_start, dt_stop))
-        if upcoming:
-            start, stop = min(upcoming, key=lambda event: event[0])
-            return start, stop, True
-        return None, None, True
-    except Exception as exc:
-        _log_failure(f"fetch ESPN schedule team={team_name or query}", exc)
-        return None, None, False
-    finally:
-        if owns_client:
-            await client.aclose()
-    return None, None, False
-
-def xmltv_ts(dt: datetime) -> str:
-    return dt.strftime("%Y%m%d%H%M%S +0000")
-
-
-STREAM_LEAD_TIME = timedelta(hours=1)
-STREAM_TRAIL_TIME = timedelta(hours=1)
-SCRAPE_REFRESH_SECONDS = 300
-
-
-def parse_team_schedule(data: dict) -> tuple[Optional[datetime], Optional[datetime]]:
-    try:
-        start_str = data.get("start_time", "")
-        stop_str = data.get("stop_time", "")
-        if not start_str or not stop_str:
-            return None, None
-        start = datetime.strptime(start_str, "%Y%m%d%H%M%S +0000").replace(tzinfo=timezone.utc)
-        stop = datetime.strptime(stop_str, "%Y%m%d%H%M%S +0000").replace(tzinfo=timezone.utc)
-        return start, stop
-    except (TypeError, ValueError):
-        return None, None
-
-
-def is_in_season(category: str, today: Optional[date] = None) -> bool:
-    """Return whether `category`'s sport is inside its preseason-to-championship window.
-
-    Categories with no defined window (manually added "custom" teams, and
-    non-sport special channels) are always considered in season.
-    """
-    window = SEASON_WINDOWS.get(category)
-    if not window:
-        return True
-    start_month, start_day, end_month, end_day = window
-    current = today or datetime.now(timezone.utc).date()
-    start = (start_month, start_day)
-    end = (end_month, end_day)
-    here = (current.month, current.day)
-    if start <= end:
-        return start <= here <= end
-    # The window wraps across the new year (e.g. NFL: Aug 1 -> Feb 15).
-    return here >= start or here <= end
-
-
-def _season_resume_label(category: str) -> str:
-    """Return a short "Mon D" label for when `category`'s season window reopens."""
-    window = SEASON_WINDOWS.get(category)
-    if not window:
-        return ""
-    start_month, start_day, _, _ = window
-    return f"{date(2000, start_month, 1).strftime('%b')} {start_day}"
-
-
-def is_stream_window_active(data: dict, now: Optional[datetime] = None) -> bool:
-    if _channel_is_always_live(data):
-        return True
-    schedule_status = data.get("schedule_status", "unknown")
-    if schedule_status in ("no_event", "off_season"):
-        return False
-    if schedule_status == "lookup_failed":
-        # A failed schedule lookup must not prevent discovery of a live stream.
-        return True
-    start, stop = parse_team_schedule(data)
-    if not start or not stop:
-        # Unknown schedules retain the old behavior instead of silently
-        # removing a channel that may still have a valid live event.
-        return True
-    current = now or datetime.now(timezone.utc)
-    return start - STREAM_LEAD_TIME <= current <= stop + STREAM_TRAIL_TIME
 
 
 def _scrape_lifecycle_defaults() -> dict:
@@ -1861,8 +1211,7 @@ async def lifespan(app: FastAPI):
     shutil.rmtree(PLACEHOLDER_OUTPUT_DIR, ignore_errors=True)
     # Advanced settings saved from the dashboard override the env defaults.
     _load_tunable_overrides()
-    global SHOW_OFFSEASON_CHANNELS
-    SHOW_OFFSEASON_CHANNELS = get_setting("show_offseason_channels", "0") == "1"
+    catalog.SHOW_OFFSEASON_CHANNELS = get_setting("show_offseason_channels", "0") == "1"
     _spawn_background_task(update_check_loop(), "update check")
     stream_state.clear()
     _TEAM_SCRAPE_TASKS.clear()
@@ -5935,7 +5284,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         })
     catalog_source_text = (
         "College directories refreshed from ESPN."
-        if _CATALOG_REMOTE_LOADED
+        if catalog._CATALOG_REMOTE_LOADED
         else "Using bundled teams; ESPN college directories will be retried on the next refresh."
     )
 
@@ -6104,7 +5453,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         "telegram_bot_token_secret": _secret_input("telegram_bot_token", notif_cfg['telegram_bot_token']),
         "advanced_settings_groups": _advanced_settings_html(),
         "update_check_enabled": update_check_enabled,
-        "show_offseason_channels": SHOW_OFFSEASON_CHANNELS,
+        "show_offseason_channels": catalog.SHOW_OFFSEASON_CHANNELS,
         "provider_rotation_enabled": provider_rotation_enabled,
         "dashboard_data": {},
     }
@@ -6904,56 +6253,6 @@ async def set_provider_rotation(enabled: bool = Form(False), auth: bool = Depend
     return RedirectResponse(url="/?tab=playback&status=saved", status_code=303)
 
 
-UPDATE_CHECK_URL = os.getenv(
-    "UPDATE_CHECK_URL", "https://api.github.com/repos/DarthBitBeard/Jellyball/releases/latest"
-)
-UPDATE_CHECK_INTERVAL = 12 * 3600.0
-_UPDATE_STATE: Dict[str, object] = {"latest": "", "url": "", "checked_at": 0.0}
-
-
-def _version_tuple(value: str) -> Tuple[int, ...]:
-    numbers = re.findall(r"\d+", str(value or "").split("-", 1)[0])
-    return tuple(int(n) for n in numbers[:3]) or (0,)
-
-
-def _update_available() -> bool:
-    latest = str(_UPDATE_STATE.get("latest") or "")
-    return bool(latest) and _version_tuple(latest) > _version_tuple(__version__)
-
-
-async def check_for_update() -> None:
-    """One request to GitHub Releases (opt-in: Settings > Update check)."""
-    try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            response = await client.get(
-                UPDATE_CHECK_URL,
-                headers={"Accept": "application/vnd.github+json", "User-Agent": f"Jellyball/{__version__}"},
-            )
-        if response.status_code != 200:
-            return
-        release = response.json()
-        tag = str(release.get("tag_name") or "").lstrip("vV")
-        html_url = str(release.get("html_url") or "")
-        if tag and not release.get("draft") and not release.get("prerelease"):
-            _UPDATE_STATE.update({
-                "latest": tag,
-                "url": html_url if html_url.startswith("https://github.com/") else "",
-                "checked_at": time.time(),
-            })
-            if _update_available():
-                LOGGER.info("Jellyball %s is available (running %s)", tag, __version__)
-    except Exception as exc:
-        _log_failure("check for updates", exc, logging.INFO)
-
-
-async def update_check_loop() -> None:
-    await asyncio.sleep(random.uniform(30.0, 120.0))
-    while True:
-        if await get_setting_async("update_check_enabled", "0") == "1":
-            await check_for_update()
-        await asyncio.sleep(UPDATE_CHECK_INTERVAL)
-
-
 @app.get("/api/version")
 async def api_version(auth: bool = Depends(verify_dashboard_auth)):
     return {
@@ -6974,10 +6273,9 @@ async def set_update_check(enabled: bool = Form(False), auth: bool = Depends(ver
 
 @app.post("/settings/offseason")
 async def set_offseason_listing(enabled: bool = Form(False), auth: bool = Depends(verify_dashboard_auth)):
-    global SHOW_OFFSEASON_CHANNELS
     await set_setting_async("show_offseason_channels", "1" if enabled else "0")
-    if SHOW_OFFSEASON_CHANNELS != bool(enabled):
-        SHOW_OFFSEASON_CHANNELS = bool(enabled)
+    if catalog.SHOW_OFFSEASON_CHANNELS != bool(enabled):
+        catalog.SHOW_OFFSEASON_CHANNELS = bool(enabled)
         request_jellyfin_guide_refresh_if_changed()
     return RedirectResponse(url="/?tab=playback&status=saved", status_code=303)
 
