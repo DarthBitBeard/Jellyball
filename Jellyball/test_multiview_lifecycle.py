@@ -17,6 +17,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import config
+import shutil
 from hls_session import SourceSpec
 
 
@@ -330,7 +332,7 @@ class SlotReservationTests(MultiviewStateTestCase):
 
         with patch.object(main, "MAX_CONCURRENT_MULTIVIEW", 1), \
                 patch.object(main, "_start_multiview_run", slow_run), \
-                self.assertLogs(main.LOGGER, "WARNING"):
+                self.assertLogs(config.LOGGER, "WARNING"):
             asyncio.run(scenario())
         self.assertEqual(started, ["mv1"])
         self.assertEqual(main._MULTIVIEW_HOLDS["mv2"]["kind"], "refused")
@@ -366,7 +368,7 @@ class RefusalTests(MultiviewStateTestCase):
 
         with patch.object(main, "MAX_CONCURRENT_MULTIVIEW", 1), \
                 patch.object(main, "_placeholder_source", return_value=PLACEHOLDER_SPEC), \
-                self.assertLogs(main.LOGGER, "WARNING") as logs:
+                self.assertLogs(config.LOGGER, "WARNING") as logs:
             results = asyncio.run(scenario())
         refusals = [line for line in logs.output if "Refusing to start multiview" in line]
         self.assertEqual(len(refusals), 1)
@@ -374,7 +376,7 @@ class RefusalTests(MultiviewStateTestCase):
         self.assertGreater(main._multiview_cooldown_remaining("mv"), 0.0)
 
     def test_refusal_hold_grows_and_caps(self):
-        with patch.object(main.LOGGER, "warning"):
+        with patch.object(config.LOGGER, "warning"):
             delays = [main._record_multiview_refusal("mv", "cap") for _ in range(6)]
         self.assertEqual(delays, [5.0, 10.0, 20.0, 40.0, 60.0, 60.0])
 
@@ -382,7 +384,7 @@ class RefusalTests(MultiviewStateTestCase):
         main.FFMPEG_AVAILABLE = False
         data = multiview_data()
         main.stream_state["mv"] = data
-        with patch.object(main.LOGGER, "warning"):
+        with patch.object(config.LOGGER, "warning"):
             asyncio.run(main._spawn_multiview("mv", data))
         self.assertNotIn("mv", main._MULTIVIEW_FAILURES)
         self.assertEqual(main._MULTIVIEW_HOLDS["mv"]["kind"], "refused")
@@ -422,7 +424,7 @@ class HwEncoderFailureTests(MultiviewStateTestCase):
         with patch.object(main, "MULTIVIEW_HWACCEL", "nvenc"), \
                 patch.object(main, "_warm_multiview_members", AsyncMock(return_value=inputs)), \
                 patch.object(main, "_launch_multiview_run", fake_launch), \
-                patch.object(main.LOGGER, "warning"):
+                patch.object(config.LOGGER, "warning"):
             asyncio.run(main._start_multiview_run("mv", data))
             plan = main._multiview_encoder_plan()
             later = main._multiview_encoder_plan(now=time.monotonic() + main.NVENC_FALLBACK_SECONDS + 1)
@@ -451,7 +453,7 @@ class MemberInputTests(MultiviewStateTestCase):
     def test_unknown_audio_gets_silent_track_and_inputs_probe_briefly(self):
         data = multiview_data()
         main.stream_state.update({"ta": {"name": "TA"}, "tb": {"name": "TB"}})
-        with patch.object(main, "PORT", 8000), patch.dict(os.environ, {"JELLYBALL_HOST": ""}):
+        with patch.object(config, "PORT", 8000), patch.dict(os.environ, {"JELLYBALL_HOST": ""}):
             args = main._build_multiview_ffmpeg_args(
                 "mv", data, Path("/x"), [True, None], "none", input_ids=["ta", main.PLACEHOLDER_SESSION_ID],
             )
@@ -484,7 +486,7 @@ class MemberInputTests(MultiviewStateTestCase):
         with patch.object(main, "SESSIONS", registry), \
                 patch.object(main, "MULTIVIEW_MEMBER_WARM_TIMEOUT", 0.2), \
                 patch.object(main, "MULTIVIEW_STANDIN_WAIT_SECONDS", 0.1), \
-                patch.object(main.LOGGER, "warning"):
+                patch.object(config.LOGGER, "warning"):
             inputs = asyncio.run(main._warm_multiview_members(["ta", "tb", "gone"]))
         self.assertEqual(inputs, [
             main._MultiviewInput("ta", "ta", False, None, False),
@@ -579,7 +581,7 @@ class SweepTests(MultiviewStateTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "run1"
             target.mkdir()
-            with patch.object(main.shutil, "rmtree", flaky_rmtree):
+            with patch.object(shutil, "rmtree", flaky_rmtree):
                 self.assertTrue(main._rmtree_with_retries(target, attempts=5, delay=0.01))
         self.assertEqual(len(calls), 3)
 
@@ -656,7 +658,7 @@ class ManualStopTests(MultiviewStateTestCase):
 
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(main, "MULTIVIEW_OUTPUT_ROOT", Path(tmp)), \
-                patch.object(main.asyncio, "create_subprocess_exec", fake_exec), \
+                patch.object(asyncio, "create_subprocess_exec", fake_exec), \
                 patch.object(main, "_wait_for_first_segment", never_ready), \
                 patch.object(main, "_watch_multiview_process", AsyncMock()), \
                 patch.object(main, "_drain_multiview_log", AsyncMock()), \
@@ -718,8 +720,8 @@ class PlaceholderTests(MultiviewStateTestCase):
 
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(main, "PLACEHOLDER_OUTPUT_DIR", Path(tmp)), \
-                patch.object(main.asyncio, "create_subprocess_exec", failing_exec), \
-                patch.object(main.LOGGER, "error") as error_log:
+                patch.object(asyncio, "create_subprocess_exec", failing_exec), \
+                patch.object(config.LOGGER, "error") as error_log:
             self.assertEqual(asyncio.run(scenario()), (False, False))
             with patch.object(main, "_spawn_background_task") as spawn:
                 main._request_placeholder_start()
@@ -738,7 +740,7 @@ class PlaceholderTests(MultiviewStateTestCase):
                 return False, ["[Parsed_drawtext_2 @ 0x1] Cannot find a valid font for the family Sans"]
             return True, []
 
-        with patch.object(main, "_launch_placeholder_run", fake_launch), patch.object(main.LOGGER, "warning"):
+        with patch.object(main, "_launch_placeholder_run", fake_launch), patch.object(config.LOGGER, "warning"):
             self.assertTrue(asyncio.run(main._ensure_placeholder_running()))
         self.assertEqual(attempts, [True, False])
         self.assertFalse(main._PLACEHOLDER_DRAWTEXT_OK)
@@ -761,7 +763,7 @@ class EncoderSettingsTests(unittest.TestCase):
     def test_env_choice_rejects_unknown_values(self):
         with patch.dict(os.environ, {"X_PRESET": "P7"}):
             self.assertEqual(main._env_choice("X_PRESET", "p4", {"p4", "p7"}), "p7")
-        with patch.dict(os.environ, {"X_PRESET": "turbo"}), patch.object(main.LOGGER, "warning"):
+        with patch.dict(os.environ, {"X_PRESET": "turbo"}), patch.object(config.LOGGER, "warning"):
             self.assertEqual(main._env_choice("X_PRESET", "p4", {"p4", "p7"}), "p4")
 
     def test_gop_and_keyframes_follow_fps_and_segment_length(self):
@@ -797,7 +799,7 @@ class ProcessControlTests(unittest.TestCase):
         async def fake_exec(*args, **kwargs):
             return process
 
-        with patch.object(main.asyncio, "create_subprocess_exec", fake_exec):
+        with patch.object(asyncio, "create_subprocess_exec", fake_exec):
             with self.assertRaises(asyncio.TimeoutError):
                 asyncio.run(main._probe_ffmpeg_version("ffmpeg", timeout=0.05))
         self.assertTrue(process.killed)
@@ -860,7 +862,7 @@ class ProcessControlTests(unittest.TestCase):
                     {"pid": bystander.pid, "created": api.process_creation_time(bystander.pid) + 1}), encoding="utf-8")
                 with patch.object(main, "MULTIVIEW_OUTPUT_ROOT", root), \
                         patch.object(main, "PLACEHOLDER_OUTPUT_DIR", placeholder_root), \
-                        patch.object(main.LOGGER, "warning"):
+                        patch.object(config.LOGGER, "warning"):
                     self.assertEqual(main._kill_orphaned_ffmpeg(), 1)
             self.assertIsNotNone(orphan.wait(timeout=10))
             self.assertIsNone(bystander.poll())

@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+from sports_matcher import get_team_search_terms
 import stream_extractor
 
 
@@ -425,7 +426,7 @@ class ParseHelperRegressionTests(unittest.TestCase):
             "<div><a href='/watch/ohio-state-vs-michigan'>Ohio State vs Michigan</a></div>"
             "<div><a href='/about'>About</a></div>"
         )
-        search_terms = main.get_team_search_terms("Florida Gators", "Florida Gators")
+        search_terms = get_team_search_terms("Florida Gators", "Florida Gators")
         matches = []
         seen = set()
         scraper._parse_matches_from_html(html, page_url, search_terms, matches, seen)
@@ -440,7 +441,7 @@ class ParseHelperRegressionTests(unittest.TestCase):
     def test_html_aggregator_respects_cumulative_event_cutoff(self):
         scraper = main.HtmlAggregatorScraper("TestAgg", "https://agg.example.test", ["/cfb"], ["/watch/"])
         html = "".join(f"<a href='/watch/game-{i}'>Florida Gators vs Team {i}</a>" for i in range(10))
-        search_terms = main.get_team_search_terms("Florida Gators", "Florida Gators")
+        search_terms = get_team_search_terms("Florida Gators", "Florida Gators")
         matches = []
         seen = set()
         with patch.object(main, "MAX_PROVIDER_EVENTS", 3):
@@ -454,7 +455,7 @@ class ParseHelperRegressionTests(unittest.TestCase):
             "<div><a href='/watch/espn2'>ESPN2</a></div>"
             "<div><a href='/watch/fs1'>FS1</a></div>"
         )
-        search_terms = main.get_team_search_terms("ESPN", "ESPN")
+        search_terms = get_team_search_terms("ESPN", "ESPN")
         best_url, best_score, best_title = scraper._find_best_channel_match(html, ["espn"], search_terms)
 
         self.assertEqual(best_url, urllib.parse.urljoin(scraper.base_url, "/watch/espn"))
