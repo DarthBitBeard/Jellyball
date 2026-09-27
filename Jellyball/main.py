@@ -7068,7 +7068,16 @@ SESSIONS = SessionRegistry(
         report_incompatible=lambda channel_id, key, reason: _on_session_incompatible(channel_id, key, reason),
         on_media_info=lambda channel_id, key, has_audio, sig: _on_session_media_info(channel_id, key, has_audio, sig),
     ),
-    SessionConfig(idle_timeout=SESSION_IDLE_SECONDS, bandwidth_cap=STREAM_MAX_BANDWIDTH),
+    SessionConfig(
+        idle_timeout=SESSION_IDLE_SECONDS,
+        bandwidth_cap=STREAM_MAX_BANDWIDTH,
+        # Also editable live in Advanced Settings (TUNABLES); these env vars set the default.
+        live_edge_segments=bounded_int(os.getenv("SESSION_LIVE_EDGE_SEGMENTS", "3"), 3, 1, 10),
+        window_min_seconds=bounded_float(os.getenv("SESSION_WINDOW_SECONDS", "30"), 30.0, 12.0, 600.0),
+        stale_min_seconds=bounded_float(os.getenv("SESSION_STALE_SECONDS", "15"), 15.0, 5.0, 300.0),
+        fail_threshold=bounded_int(os.getenv("SESSION_FAIL_THRESHOLD", "3"), 3, 1, 20),
+        segment_timeout=bounded_float(os.getenv("SESSION_SEGMENT_TIMEOUT", "15"), 15.0, 3.0, 120.0),
+    ),
 )
 
 
