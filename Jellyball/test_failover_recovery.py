@@ -11,6 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import main
+import alerts
+import catalog
+import updates
 import db
 import scrapers
 import state
@@ -250,30 +253,30 @@ class OffSeasonGuideTests(StateMixin, unittest.TestCase):
     def test_off_season_channels_hidden_by_default_and_listed_when_enabled(self):
         state.stream_state["t"] = {"name": "Team", "query": "t", "candidates": [], "category": "nfl",
                                   "schedule_status": "off_season"}
-        with patch.object(main, "SHOW_OFFSEASON_CHANNELS", False):
-            self.assertFalse(main._channel_listed(state.stream_state["t"]))
-        with patch.object(main, "SHOW_OFFSEASON_CHANNELS", True):
-            self.assertTrue(main._channel_listed(state.stream_state["t"]))
+        with patch.object(catalog, "SHOW_OFFSEASON_CHANNELS", False):
+            self.assertFalse(catalog._channel_listed(state.stream_state["t"]))
+        with patch.object(catalog, "SHOW_OFFSEASON_CHANNELS", True):
+            self.assertTrue(catalog._channel_listed(state.stream_state["t"]))
             now = datetime.now(timezone.utc)
             blocks = main._channel_programmes("t", state.stream_state["t"], now, now + timedelta(days=1), {})
             self.assertEqual(len(blocks), 1)
             self.assertIn("Off-season", blocks[0]["title"])
 
     def test_guide_signature_changes_with_the_toggle(self):
-        with patch.object(main, "SHOW_OFFSEASON_CHANNELS", False):
-            off = main._guide_signature()
-        with patch.object(main, "SHOW_OFFSEASON_CHANNELS", True):
-            on = main._guide_signature()
+        with patch.object(catalog, "SHOW_OFFSEASON_CHANNELS", False):
+            off = alerts._guide_signature()
+        with patch.object(catalog, "SHOW_OFFSEASON_CHANNELS", True):
+            on = alerts._guide_signature()
         self.assertNotEqual(off, on)
 
 
 class UpdateCheckTests(unittest.TestCase):
     def test_version_comparison(self):
-        with patch.dict(main._UPDATE_STATE, {"latest": "2.1.0"}):
-            with patch.object(main, "__version__", "2.0.0"):
-                self.assertTrue(main._update_available())
-            with patch.object(main, "__version__", "2.1.0"):
-                self.assertFalse(main._update_available())
-        with patch.dict(main._UPDATE_STATE, {"latest": ""}):
-            self.assertFalse(main._update_available())
-        self.assertGreater(main._version_tuple("v10.0.0"), main._version_tuple("9.9.9"))
+        with patch.dict(updates._UPDATE_STATE, {"latest": "2.1.0"}):
+            with patch.object(updates, "__version__", "2.0.0"):
+                self.assertTrue(updates._update_available())
+            with patch.object(updates, "__version__", "2.1.0"):
+                self.assertFalse(updates._update_available())
+        with patch.dict(updates._UPDATE_STATE, {"latest": ""}):
+            self.assertFalse(updates._update_available())
+        self.assertGreater(updates._version_tuple("v10.0.0"), updates._version_tuple("9.9.9"))

@@ -6,16 +6,15 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from main import (
+from catalog import (
     _catalog_display_name,
     _channel_group_title,
     _channel_logo_url,
     _channel_tvg_id,
     _channel_is_always_live,
     _team_catalog_entry,
-    generate_m3u,
-    generate_xmltv,
 )
+from main import generate_m3u, generate_xmltv
 from sports_catalog import SPECIAL_CHANNELS, STATIC_TEAM_RECORDS
 import state
 

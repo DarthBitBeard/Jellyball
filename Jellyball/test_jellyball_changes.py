@@ -48,7 +48,6 @@ from main import (
     _scrape_lifecycle_defaults,
     api_status,
     LRUChunkCache,
-    _resolve_espn_team,
     _chunk_route_for_url,
     _ensure_startup_buffer,
     _manifest_uri_is_playlist,
@@ -73,8 +72,8 @@ from main import (
     generate_m3u,
     generate_xmltv,
     _resolve_schedule_status,
-    xmltv_ts,
 )
+from catalog import _resolve_espn_team, xmltv_ts
 from state import stream_state
 from config import _upstream_media_headers
 
