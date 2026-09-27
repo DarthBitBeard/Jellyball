@@ -178,6 +178,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Form, Request, Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import PlainTextResponse, Response, HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from typing import Callable, Dict, List, Optional, Tuple, Set
 from playwright.async_api import async_playwright, Browser, Playwright, Page
 # pystray/PIL are imported lazily in tray mode only: on a headless Linux host
@@ -4438,6 +4440,12 @@ app = FastAPI(title="Jellyfin Sports Proxy - Titan Engine", version=__version__,
 app.add_middleware(CsrfOriginMiddleware)
 app.add_middleware(RequestDiagnosticsMiddleware)
 
+# Dashboard templates/static assets. Resolved with _resource_path so both the
+# source tree and the PyInstaller bundle (BUNDLE_DIR/_MEIPASS) find them; see
+# jellyball.spec, which adds both directories to `datas`.
+TEMPLATES = Jinja2Templates(directory=str(_resource_path("templates")))
+app.mount("/static", StaticFiles(directory=str(_resource_path("static"))), name="static")
+
 
 @app.get("/healthz")
 async def healthz():
@@ -8235,7 +8243,6 @@ def _tail_log_file(limit: int) -> List[str]:
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, tab: str = "channels", status: str = "", auth: bool = Depends(verify_dashboard_auth)):
     base_url = _public_base_url(request)
-    base_url_html = _html(base_url)
     dashboard_metrics = await _load_dashboard_metrics_async()
     metrics = dashboard_metrics
     favorites = dashboard_metrics["favorites"]
@@ -8243,30 +8250,22 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
     notif_cfg = await get_notification_config()
     jellyfin_cfg = await get_jellyfin_config()
     provider_rotation_enabled = await get_setting_async("provider_rotation_mode", "0") == "1"
-    provider_url_rows_html = "".join(
-        f'''
-                        <div style="display:grid; grid-template-columns: 160px 1fr; gap:0.75rem; align-items:center; margin-bottom:0.85rem;">
-                            <label style="font-size:0.85rem; color: var(--text-soft); font-weight:600;">{_html(provider.name)}</label>
-                            <div>
-                                <input type="text" name="url_{_html(provider.name)}" value="{_html(provider.base_url)}" placeholder="{_html(provider._default_base_url)}">
-                                <p class="hint-text" style="margin:0.25rem 0 0;">Leave blank to reset to default: {_html(provider._default_base_url)}</p>
-                            </div>
-                        </div>'''
+    provider_url_rows = [
+        {
+            "name": provider.name,
+            "base_url": provider.base_url,
+            "default_base_url": provider._default_base_url,
+        }
         for provider in ACTIVE_PROVIDERS
         if isinstance(provider, HtmlAggregatorScraper)
-    )
+    ]
     update_check_enabled = await get_setting_async("update_check_enabled", "0") == "1"
-    update_banner = ""
+    update_banner = None
     if update_check_enabled and _update_available():
-        release_link = (
-            f' <a href="{_html(_UPDATE_STATE["url"])}" target="_blank" rel="noopener noreferrer">Release notes</a>'
-            if _UPDATE_STATE.get("url") else ""
-        )
-        update_banner = (
-            f'<div class="card" role="status" style="border-color: var(--success);">'
-            f'⬆️ Jellyball {_html(_UPDATE_STATE["latest"])} is available (you are running {_html(__version__)}).'
-            f'{release_link}</div>'
-        )
+        update_banner = {
+            "latest": _UPDATE_STATE["latest"],
+            "url": _UPDATE_STATE.get("url") or "",
+        }
     catalog_entries = await get_catalog_entries()
     active_catalog_keys = {
         data.get("catalog_key")
@@ -8274,7 +8273,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         if data.get("catalog_key")
     }
 
-    provider_health_html = ""
+    provider_health = []
     if metrics["failovers_by_provider"]:
         provider_stats = {}
         for prov, count in metrics["failovers_by_provider"].items():
@@ -8285,11 +8284,9 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         for prov in sorted(provider_stats.keys(), key=lambda p: provider_stats[p][0], reverse=True):
             rate, fails, total = provider_stats[prov]
             rate_color = "var(--success)" if rate > 90 else ("var(--warning)" if rate > 70 else "var(--danger)")
-            provider_health_html += f'<div style="margin-bottom: 0.75rem;"><div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;"><span>{_html(prov)}</span><span style="color: {rate_color}; font-weight: 700;">{rate:.1f}%</span></div><div style="background: var(--surface-3); height: 6px; border-radius: 3px; overflow: hidden;"><div style="background: {rate_color}; height: 100%; width: {rate:.1f}%; transition: width 0.4s var(--ease);"></div></div><span class="hint-text">{total} total checks</span></div>'
-    else:
-        provider_health_html = '<span style="color: var(--text-muted); font-size: 0.85rem;">No provider data yet.</span>'
+            provider_health.append({"provider": prov, "rate": rate, "rate_color": rate_color, "total": total})
 
-    catalog_groups = (
+    catalog_group_defs = (
         ("ncaaf", "College Football"),
         ("ncaam", "College Basketball"),
         ("nfl", "NFL"),
@@ -8298,1018 +8295,212 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         ("nba", "NBA"),
         ("special", "Always-Live Sports Channels"),
     )
-    catalog_html = ""
-    for group_key, group_label in catalog_groups:
+    catalog_groups = []
+    for group_key, group_label in catalog_group_defs:
         group_entries = [
             entry for entry in catalog_entries
             if ("special" if entry["content_type"] == "channel" else entry["category"]) == group_key
         ]
         if not group_entries:
             continue
-        item_html = ""
-        for entry in group_entries:
-            checked = " checked" if entry["catalog_key"] in active_catalog_keys else ""
-            live_badge = '<span class="badge catalog-live-badge">Always live</span>' if entry["always_live"] else ""
-            item_html += f'''
-                <div class="catalog-item" data-catalog-name="{_html(entry["name"])}">
-                    <label class="catalog-toggle">
-                        <input type="checkbox" name="catalog_keys" value="{_html(entry["catalog_key"])}"{checked} onchange="updateCatalogSelectionCount()" aria-label="Enable {_html(entry["name"])}">
-                        <span class="catalog-name">{_html(entry["name"])}</span>
-                        {live_badge}
-                    </label>
-                </div>'''
-        catalog_html += f'''
-            <details class="catalog-group">
-                <summary><span>{_html(group_label)}</span><span class="badge">{len(group_entries)} available</span></summary>
-                <div class="catalog-grid">{item_html}</div>
-            </details>'''
+        catalog_groups.append({
+            "label": group_label,
+            "entries": [
+                {
+                    "catalog_key": entry["catalog_key"],
+                    "name": entry["name"],
+                    "checked": entry["catalog_key"] in active_catalog_keys,
+                    "always_live": entry["always_live"],
+                }
+                for entry in group_entries
+            ],
+        })
     catalog_source_text = (
         "College directories refreshed from ESPN."
         if _CATALOG_REMOTE_LOADED
         else "Using bundled teams; ESPN college directories will be retried on the next refresh."
     )
-    
-    failover_stats_html = ""
-    if metrics["failovers_by_provider"]:
-        for prov, count in metrics["failovers_by_provider"].items():
-            failover_stats_html += f'<span class="badge" style="margin-right: 0.5rem; background: var(--border-strong);">{_html(prov)}: {_html(count)} failover(s)</span>'
-    else:
-        failover_stats_html = '<span style="color: var(--text-muted); font-size: 0.85rem;">No failover incidents recorded yet.</span>'
 
-    events_html = ""
-    if metrics["recent_events"]:
-        for ts, team_id, prov, ev_type, details in metrics["recent_events"]:
-            badge_color = "var(--danger)" if ev_type in ["exhausted", "danger"] else ("var(--warning)" if ev_type == "failover" else "var(--success)")
-            events_html += f'<tr style="border-bottom: 1px solid var(--border); font-size: 0.85rem;"><td style="padding: 0.5rem; color: var(--text-muted);">{_html(ts)}</td><td style="padding: 0.5rem; font-weight: 600;">{_html(team_id)}</td><td style="padding: 0.5rem;"><span style="background: {badge_color}; color: white; padding: 0.15rem 0.4rem; border-radius: 4px;">{_html(ev_type)}</span></td><td style="padding: 0.5rem; color: var(--text-soft);">{_html(prov)}</td><td style="padding: 0.5rem; color: var(--text-muted);">{_html(details)}</td></tr>'
-    else:
-        events_html = '<tr><td colspan="5" style="padding: 1rem; text-align: center; color: var(--text-muted); font-size: 0.85rem;">No historical events recorded yet.</td></tr>'
+    failover_stats = [
+        {"provider": prov, "count": count}
+        for prov, count in metrics["failovers_by_provider"].items()
+    ]
+
+    events = []
+    for ts, team_id, prov, ev_type, details in metrics["recent_events"]:
+        badge_color = "var(--danger)" if ev_type in ["exhausted", "danger"] else ("var(--warning)" if ev_type == "failover" else "var(--success)")
+        events.append({"ts": ts, "team_id": team_id, "prov": prov, "ev_type": ev_type, "details": details, "badge_color": badge_color})
 
     if DASHBOARD_AUTH_MODE == "open":
-        auth_badge = '<span class="badge" style="background: var(--surface-3); color: var(--text-muted);" title="No DASHBOARD_PASSWORD; only reachable from this computer">🔓 Local Open Access</span>'
+        auth_badge = {"text": "\U0001f513 Local Open Access", "title": "No DASHBOARD_PASSWORD; only reachable from this computer"}
     elif DASHBOARD_AUTH_MODE == "generated":
-        auth_badge = f'<span class="badge" style="background: var(--surface-3); color: var(--text-muted);" title="Generated password in {_html(DASHBOARD_PASSWORD_FILE)}">🔒 Generated Password</span>'
+        auth_badge = {"text": "\U0001f512 Generated Password", "title": f"Generated password in {DASHBOARD_PASSWORD_FILE}"}
     else:
-        auth_badge = '<span class="badge" style="background: var(--surface-3); color: var(--text-muted);">🔒 Password Protected</span>'
-    webhook_discord_badge = '<span class="badge" style="background: #5865F2; color: white;">Discord Alert On</span>' if notif_cfg["discord_webhook_url"] else '<span class="badge" style="background: var(--surface-3); color: var(--text-dim);">Discord Off</span>'
-    webhook_telegram_badge = '<span class="badge" style="background: #229ED9; color: white;">Telegram Alert On</span>' if (notif_cfg["telegram_bot_token"] and notif_cfg["telegram_chat_id"]) else '<span class="badge" style="background: var(--surface-3); color: var(--text-dim);">Telegram Off</span>'
-    jellyfin_badge = '<span class="badge" style="background: var(--purple); color: white;">🍇 Jellyfin Auto-Refresh On</span>' if jellyfin_cfg["jellyfin_api_key"] else '<span class="badge" style="background: var(--surface-3); color: var(--text-dim);">🍇 Jellyfin Manual</span>'
+        auth_badge = {"text": "\U0001f512 Password Protected", "title": ""}
+    webhook_discord_badge = {"text": "Discord Alert On" if notif_cfg["discord_webhook_url"] else "Discord Off"}
+    webhook_telegram_badge = {"text": "Telegram Alert On" if (notif_cfg["telegram_bot_token"] and notif_cfg["telegram_chat_id"]) else "Telegram Off"}
+    jellyfin_badge = {"text": "\U0001f347 Jellyfin Auto-Refresh On" if jellyfin_cfg["jellyfin_api_key"] else "\U0001f347 Jellyfin Manual"}
 
-    channels_html = ""
-    favorites_html = ""
-    other_teams_html = ""
+    def _channel_watch_fields(t_id: str, data: dict) -> dict:
+        session = SESSIONS.peek(t_id)
+        watching = bool(session is not None and session.is_watched())
+        on_placeholder = bool(watching and _session_on_placeholder(session))
+        return {
+            "watching": watching,
+            "on_placeholder": on_placeholder,
+            "failover_count": int(data.get("failover_count", 0)),
+        }
 
-    if not stream_state:
-        channels_html = '<div class="card" style="grid-column: 1 / -1; text-align: center; color: var(--text-muted); padding: 3rem;">No channels enabled. Select entries from the catalog above.</div>'
-    else:
-        bulk_form_start = '<form id="bulk-actions-form" style="display: none;"><input type="hidden" id="bulk-team-ids" name="team_ids" value=""></form>'
-
-        for t_id, data in stream_state.items():
-            if data.get('type') == "multiview":
-                continue
-            dot_class = "online" if data.get('is_healthy') else "offline"
-            if data.get('is_healthy'):
-                status_text = "Stream Stable & Active"
-            elif data.get('schedule_status') == "off_season":
-                resume_label = _season_resume_label(data.get('category', ''))
-                status_text = f"Off-season (resumes {resume_label})" if resume_label else "Off-season"
-            else:
-                status_text = "Searching / Re-evaluating"
-            candidates_list = data.get('candidates', [])
-            candidates_len = len(candidates_list)
-            is_favorite = t_id in favorites
-
-            candidates_options_html = ""
-            for idx, cand in enumerate(candidates_list):
-                is_active = "★ " if idx == data.get('active_index', 0) else ""
-                prov = cand.get('provider', 'Unknown')
-                title_trunc = cand.get("match_title", "Stream")[:25]
-                candidates_options_html += f'<option value="{idx}">{_html(is_active)}{_html(prov)} - {_html(title_trunc)}</option>'
-
-            override_form = f'''
-            <form action="/override/{_html(t_id)}" method="post" style="margin-top:0.75rem; display:flex; gap:0.5rem; align-items:center;">
-                <select name="candidate_index" style="flex:1; padding:0.55rem; border-radius:6px; background:var(--surface-2); color:#fff; border:1px solid var(--border-strong); font-size:0.85rem;">
-                    {candidates_options_html}
-                </select>
-                <button type="submit" style="width:auto; padding:0.55rem 0.85rem; font-size:0.8rem; background:var(--border-strong); border:1px solid var(--border-soft);">Override</button>
-            </form>
-            ''' if candidates_list else '<p style="font-size:0.85rem; color:var(--text-dim); margin-top:0.75rem;">No candidates available</p>'
-
-            channel_badge = "Always live" if data.get("always_live") else (
-                str(data.get("category") or "manual").upper()
-            )
-            remove_label = "Disable" if data.get("catalog_key") else "Remove"
-
-            active_provider = ""
-            if candidates_list:
-                active_index = data.get("active_index", 0)
-                if 0 <= active_index < len(candidates_list):
-                    active_provider = candidates_list[active_index].get("provider", "")
-
-            card_html = f'''
-            <div class="card channel-card" data-team-id="{_html(t_id)}" data-candidate-count="{candidates_len}" data-active-provider="{_html(active_provider)}" style="margin-bottom: 0;">
-                <div style="display: flex; gap: 0.75rem; align-items: flex-start;">
-                    <input type="checkbox" class="team-bulk-select" data-team-id="{_html(t_id)}" style="margin-top: 0.5rem; cursor: pointer;">
-                    <div style="flex: 1;">
-                        <div class="team-header">
-                            <h4 class="team-name">{_html(data["name"])}</h4>
-                            <span class="badge">{_html(channel_badge)}</span>
-                        </div>
-                        <div class="status-row" data-role="status-row">
-                            <div class="dot {dot_class}" data-role="status-dot"></div>
-                            <span data-role="status-text">{_html(status_text)}</span>
-                        </div>
-                        <p class="meta-text" data-role="candidate-count">Backups: {candidates_len}</p>
-                        {override_form}
-                        <div style="display: flex; gap: 0.5rem; margin-top: 0.75rem; flex-wrap: wrap;">
-                            <form action="/favorite/{_html(t_id)}" method="post" style="display: inline;">
-                                <button type="submit" style="width: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; background: {'var(--warning)' if is_favorite else 'var(--surface-3)'}; border: 1px solid var(--border-strong);">{'⭐ Favorited' if is_favorite else '☆ Favorite'}</button>
-                            </form>
-                            <form action="/rescrape/{_html(t_id)}" method="post" style="display: inline;">
-                                <button type="submit" style="width: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; background: var(--surface-3); border: 1px solid var(--border-strong);">🔄 Rescrape</button>
-                            </form>
-                            <button type="button" onclick="testTeamStream('{_html(t_id)}')" style="width: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; background: var(--surface-3); border: 1px solid var(--border-strong); color: var(--text-soft); border-radius: 6px; cursor: pointer;">🧪 Test Stream</button>
-                            <form action="/remove_team/{_html(t_id)}" method="post" style="display: inline;">
-                                <button class="btn-danger" type="submit" style="width: auto; padding: 0.5rem 0.75rem; margin-top: 0; font-size: 0.8rem;">{_html(remove_label)}</button>
-                            </form>
-                        </div>
-                        <p data-role="test-result" style="font-size: 0.8rem; margin: 0.5rem 0 0; min-height: 1.1em;"></p>
-                        <details style="margin-top: 0.5rem;">
-                            <summary style="font-size: 0.8rem; color: var(--text-muted); cursor: pointer;">⏰ Schedule auto-disable</summary>
-                            <form action="/team/{_html(t_id)}/schedule-disable" method="post" style="display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem;">
-                                <input type="date" name="disable_date" value="{_html(data.get('auto_disable_after', ''))}" style="flex: 1; padding: 0.5rem; border-radius: 6px; background: var(--surface-2); color: #fff; border: 1px solid var(--border-strong); font-size: 0.8rem;">
-                                <button type="submit" style="width: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; background: var(--surface-3); border: 1px solid var(--border-strong);">Save</button>
-                            </form>
-                        </details>
-                    </div>
-                </div>
-            </div>'''
-
-            if is_favorite:
-                favorites_html += card_html
-            else:
-                other_teams_html += card_html
-
-        channels_html = bulk_form_start
-
-        if stream_state:
-            channels_html += '''
-            <div class="card" style="background: var(--accent-card-bg); border-color: var(--accent);">
-                <h3 style="margin-top: 0;">🎛️ Bulk Team Management</h3>
-                <p class="hint-text">Select multiple teams to perform actions on them at once.</p>
-                <div style="display: flex; gap: 0.75rem; flex-wrap: wrap;">
-                    <button type="button" onclick="selectAllTeams()" style="width: auto; padding: 0.7rem 1rem; background: var(--surface-3); border: 1px solid var(--border-strong); color: var(--text-soft); border-radius: 6px; cursor: pointer; font-weight: 600;">☑️ Select All</button>
-                    <button type="button" onclick="deselectAllTeams()" style="width: auto; padding: 0.7rem 1rem; background: var(--surface-3); border: 1px solid var(--border-strong); color: var(--text-soft); border-radius: 6px; cursor: pointer; font-weight: 600;">☐ Deselect All</button>
-                    <button type="button" onclick="bulkFavorite()" style="width: auto; padding: 0.7rem 1rem; background: var(--warning); border: 1px solid var(--warning-border); color: #000; border-radius: 6px; cursor: pointer; font-weight: 600;">⭐ Favorite</button>
-                    <button type="button" onclick="bulkUnfavorite()" style="width: auto; padding: 0.7rem 1rem; background: var(--surface-3); border: 1px solid var(--border-strong); color: var(--text-soft); border-radius: 6px; cursor: pointer; font-weight: 600;">☆ Unfavorite</button>
-                    <button type="button" onclick="bulkRemove()" style="width: auto; padding: 0.7rem 1rem; background: var(--danger); border: 1px solid var(--danger-border); color: #fff; border-radius: 6px; cursor: pointer; font-weight: 600;">🗑️ Remove</button>
-                </div>
-            </div>
-            '''
-
-        multiview_checkbox_html = "".join(
-            f'<label style="display:flex; align-items:center; gap:0.5rem; padding:0.25rem 0; font-size:0.85rem;">'
-            f'<input type="checkbox" class="multiview-member-select" data-team-id="{_html(mv_t_id)}">{_html(mv_data.get("name", mv_t_id))}</label>'
-            for mv_t_id, mv_data in stream_state.items()
-            if mv_data.get("type") != "multiview"
-        )
-
-        multiview_rows_html = ""
-        for mv_id, mv_data in stream_state.items():
-            if mv_data.get("type") != "multiview":
-                continue
-            mv_entry = _MULTIVIEW_PROCESSES.get(mv_id)
-            mv_running = bool(mv_entry and mv_entry["process"].returncode is None and not mv_entry.get("exited"))
-            mv_status = "🟢 Running" if mv_running else "⚪ Stopped"
-            member_ids = mv_data.get("member_team_ids", [])
-            member_names = ", ".join(_html(stream_state.get(m, {}).get("name", m)) for m in member_ids)
-            audio_options = "".join(
-                f'<option value="{_html(m)}"{" selected" if m == mv_data.get("active_audio_team_id") else ""}>{_html(stream_state.get(m, {}).get("name", m))}</option>'
-                for m in member_ids
-            )
-            mv_failure = _MULTIVIEW_FAILURES.get(mv_id)
-            mv_failure_html = ""
-            if not mv_running and mv_failure:
-                retry_in = round(_multiview_cooldown_remaining(mv_id))
-                mv_failure_html = (
-                    f'<p class="meta-text" style="color:var(--danger-text);">⚠️ {_html(mv_failure["last_error"])} '
-                    f'(failed {mv_failure["count"]}x, retrying in {retry_in}s)</p>'
-                )
-            multiview_rows_html += f'''
-            <div class="card multiview-card" data-team-id="{_html(mv_id)}" style="margin-bottom: 0.75rem;">
-                <div class="team-header">
-                    <h4 class="team-name">{_html(mv_data.get("name", mv_id))}</h4>
-                    <span class="badge">{_html(mv_data.get("layout", ""))}</span>
-                </div>
-                <p class="meta-text"><span data-role="mv-status">{mv_status}</span> &middot; Members: {member_names}</p>
-                <div data-role="mv-failure">{mv_failure_html}</div>
-                <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; align-items: center;">
-                    <form action="/multiview/{_html(mv_id)}/set-audio" method="post" style="display:flex; gap:0.5rem; align-items:center;">
-                        <select name="active_audio_team_id" style="padding:0.5rem; border-radius:6px; background:var(--surface-2); color:#fff; border:1px solid var(--border-strong); font-size:0.8rem;">
-                            {audio_options}
-                        </select>
-                        <button type="submit" style="width:auto; padding:0.5rem 0.75rem; font-size:0.8rem; background:var(--surface-3); border:1px solid var(--border-strong);">🔊 Set Audio</button>
-                    </form>
-                    <form action="/multiview/{_html(mv_id)}/stop" method="post" style="display:inline;">
-                        <button type="submit" style="width:auto; padding:0.5rem 0.75rem; font-size:0.8rem; background:var(--surface-3); border:1px solid var(--border-strong);">⏹️ Stop</button>
-                    </form>
-                    <form action="/multiview/{_html(mv_id)}/remove" method="post" style="display:inline;">
-                        <button class="btn-danger" type="submit" style="width:auto; padding:0.5rem 0.75rem; margin-top:0; font-size:0.8rem;">Remove</button>
-                    </form>
-                </div>
-            </div>'''
-
-        if not FFMPEG_AVAILABLE:
-            multiview_creation_html = (
-                f'<p class="hint-text" style="color:var(--danger-text);">⚠️ ffmpeg was not found at FFMPEG_PATH='
-                f'"{_html(FFMPEG_PATH)}". Install ffmpeg and restart Jellyball to enable Multi-View channels.</p>'
-            )
-        elif not multiview_checkbox_html:
-            multiview_creation_html = '<p class="hint-text">Add at least two channels above before creating a Multi-View.</p>'
+    def _build_channel(t_id: str, data: dict) -> dict:
+        dot_class = "online" if data.get('is_healthy') else "offline"
+        if data.get('is_healthy'):
+            status_text = "Stream Stable & Active"
+        elif data.get('schedule_status') == "off_season":
+            resume_label = _season_resume_label(data.get('category', ''))
+            status_text = f"Off-season (resumes {resume_label})" if resume_label else "Off-season"
         else:
-            multiview_creation_html = f'''
-            <form action="/multiview/create" method="post" onsubmit="return updateMultiviewTeamIds()">
-                <div style="max-height: 180px; overflow-y: auto; border: 1px solid var(--border-strong); border-radius: 6px; padding: 0.5rem; margin-bottom: 0.75rem;">
-                    {multiview_checkbox_html}
-                </div>
-                <input type="hidden" id="multiview-team-ids" name="member_team_ids" value="">
-                <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center;">
-                    <input type="text" name="name" placeholder="Channel name (e.g. NFL Sunday Quad-Box)" required style="flex: 1; min-width: 220px;">
-                    <select name="layout" style="padding: 0.6rem; border-radius: 6px; background:var(--surface-2); color:#fff; border:1px solid var(--border-strong);">
-                        <option value="grid_2x2">2x2 Grid (4 channels)</option>
-                        <option value="side_by_side_2">Side-by-Side (2 channels)</option>
-                    </select>
-                    <button type="submit" style="width: auto; padding: 0.6rem 1rem;">➕ Create Multi-View</button>
-                </div>
-            </form>
-            '''
+            status_text = "Searching / Re-evaluating"
+        candidates_list = data.get('candidates', [])
 
-        channels_html += f'''
-        <div class="card" style="background: var(--accent-card-bg); border-color: var(--accent);">
-            <h3 style="margin-top: 0;">🖼️ Multi-View Channels</h3>
-            <p class="hint-text">Composite 2 or 4 existing channels into one grid feed using server-side ffmpeg transcoding.</p>
-            {multiview_creation_html}
-        </div>
-        {multiview_rows_html}
-        '''
+        candidates_options = []
+        for idx, cand in enumerate(candidates_list):
+            is_active = "★ " if idx == data.get('active_index', 0) else ""
+            prov = cand.get('provider', 'Unknown')
+            title_trunc = cand.get("match_title", "Stream")[:25]
+            candidates_options.append({"idx": idx, "label": f"{is_active}{prov} - {title_trunc}"})
 
-        if favorites_html:
-            channels_html += f'<h3 style="margin-top: 1.5rem; margin-bottom: 0.75rem;">⭐ Your Favorites</h3>{favorites_html}'
-        if other_teams_html:
-            channels_html += f'<h3 style="margin-top: 1.5rem; margin-bottom: 0.75rem;">📺 All Channels</h3>{other_teams_html}'
+        channel_badge = "Always live" if data.get("always_live") else (
+            str(data.get("category") or "manual").upper()
+        )
+        remove_label = "Disable" if data.get("catalog_key") else "Remove"
 
-    html = f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="dark light"><title>Jellyball Sports Manager</title>
-        <script>
-            (function() {{
-                try {{
-                    var t = localStorage.getItem('theme');
-                    if (!t) {{ t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'; }}
-                    document.documentElement.setAttribute('data-theme', t);
-                }} catch (e) {{}}
-            }})();
-        </script>
-        <style>
-            :root {{
-                --bg: #0a0e17; --bg-translucent: rgba(10,14,23,0.72);
-                --card-bg: #121a2c; --surface-1: #0d1526; --surface-2: #0f172a; --surface-3: #1a2436;
-                --border: #1e293b; --border-strong: #30425c; --border-soft: #415367;
-                --text: #f1f5f9; --text-soft: #cbd5e1; --text-muted: #94a3b8; --text-dim: #64748b;
-                --accent: #3b82f6; --accent-hover: #2563eb; --accent-text: #60a5fa; --accent-rgb: 59,130,246; --accent-surface: rgba(59,130,246,0.1);
-                --accent-card-bg: #182544; --purple-card-to: #171026;
-                --success: #10b981; --danger: #ef4444; --danger-text: #f87171; --danger-border: #7f1d1d;
-                --warning: #eab308; --warning-border: #92400e;
-                --purple: #a855f7; --purple-dark: #9333ea; --purple-text: #c084fc;
-                --live-bg: #14532d; --live-border: #166534; --live-text: #86efac;
-                --code-bg: #080b12; --code-text: #cbd5e1;
-                --shadow: rgba(0,0,0,0.45); --shadow-soft: rgba(0,0,0,0.25);
-                --ease: cubic-bezier(0.16, 1, 0.3, 1);
-                color-scheme: dark;
-            }}
-            :root[data-theme="light"] {{
-                --bg: #f2f4f9; --bg-translucent: rgba(242,244,249,0.75);
-                --card-bg: #ffffff; --surface-1: #eef1f7; --surface-2: #eef1f7; --surface-3: #e7ebf3;
-                --border: #e2e8f0; --border-strong: #cbd5e1; --border-soft: #cbd5e1;
-                --text: #0f172a; --text-soft: #334155; --text-muted: #64748b; --text-dim: #94a3b8;
-                --accent: #2563eb; --accent-hover: #1d4ed8; --accent-text: #2563eb; --accent-rgb: 37,99,235; --accent-surface: rgba(37,99,235,0.07);
-                --accent-card-bg: #eaf1ff; --purple-card-to: #f6effe;
-                --success: #059669; --danger: #dc2626; --danger-text: #dc2626; --danger-border: #fecaca;
-                --warning: #b45309; --warning-border: #fde68a;
-                --purple: #9333ea; --purple-dark: #7e22ce; --purple-text: #7e22ce;
-                --live-bg: #dcfce7; --live-border: #86efac; --live-text: #166534;
-                --code-bg: #0f172a; --code-text: #e2e8f0;
-                --shadow: rgba(15,23,42,0.12); --shadow-soft: rgba(15,23,42,0.06);
-                color-scheme: light;
-            }}
-            * {{ box-sizing: border-box; }}
-            @media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }} }}
-            body {{
-                font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
-                background: radial-gradient(circle at 15% -10%, var(--accent-surface), transparent 45%), var(--bg);
-                background-attachment: fixed;
-                color: var(--text); margin: 0; padding: 2.5rem 1.5rem;
-                transition: background-color 0.4s var(--ease), color 0.3s var(--ease);
-            }}
-            @keyframes fadeInUp {{ from {{ opacity: 0; transform: translateY(14px); }} to {{ opacity: 1; transform: translateY(0); }} }}
-            @keyframes fadeIn {{ from {{ opacity: 0; }} to {{ opacity: 1; }} }}
-            @keyframes gradientPan {{ 0% {{ background-position: 0% 50%; }} 100% {{ background-position: 200% 50%; }} }}
-            @keyframes pulseGlow {{ 0%, 100% {{ box-shadow: 0 0 0 0 rgba(16,185,129,0.55); }} 50% {{ box-shadow: 0 0 0 5px rgba(16,185,129,0); }} }}
-            @keyframes spinIn {{ from {{ transform: rotate(-90deg) scale(0.6); opacity: 0; }} to {{ transform: rotate(0) scale(1); opacity: 1; }} }}
-            .toast {{ position: fixed; top: 20px; right: 20px; background: var(--success); color: white; padding: 1rem 1.5rem; border-radius: 10px; box-shadow: 0 10px 30px var(--shadow); z-index: 9999; animation: slideIn 0.35s var(--ease); backdrop-filter: blur(6px); }}
-            .toast.error {{ background: var(--danger); }}
-            @keyframes slideIn {{ from {{ transform: translateX(420px); opacity: 0; }} to {{ transform: translateX(0); opacity: 1; }} }}
-            @keyframes slideOut {{ from {{ transform: translateX(0); opacity: 1; }} to {{ transform: translateX(420px); opacity: 0; }} }}
-            .container {{ max-width: 920px; margin: 0 auto; }}
-            header {{ text-align: center; margin-bottom: 1.75rem; position: relative; animation: fadeInUp 0.5s var(--ease) both; }}
-            header h1 {{
-                font-size: 2.3rem; font-weight: 800; margin: 0 0 0.5rem 0; letter-spacing: -0.02em;
-                background: linear-gradient(90deg, var(--text) 0%, var(--accent-text) 35%, var(--purple-text) 60%, var(--text) 100%);
-                background-size: 220% auto; -webkit-background-clip: text; background-clip: text; color: transparent;
-                animation: gradientPan 10s linear infinite;
-            }}
-            header p {{ color: var(--text-muted); font-size: 0.95rem; margin: 0; }}
-            .header-controls {{ position: absolute; top: 0; right: 0; display: flex; gap: 0.5rem; }}
-            .theme-toggle {{ background: var(--card-bg); border: 1px solid var(--border); color: var(--text); padding: 0.6rem 0.8rem; border-radius: 8px; cursor: pointer; font-size: 1.2rem; transition: transform 0.2s var(--ease), border-color 0.2s var(--ease), background-color 0.3s var(--ease); line-height: 1; }}
-            .theme-toggle:hover {{ border-color: var(--accent); transform: translateY(-2px) scale(1.05); }}
-            .theme-toggle:active {{ transform: scale(0.92); }}
-            .theme-toggle.spin span, .theme-toggle.spin {{ animation: spinIn 0.4s var(--ease); }}
-            .status-badges {{ display: flex; justify-content: center; gap: 0.5rem; margin-top: 0.75rem; flex-wrap: wrap; }}
-            .status-badges .badge {{ transition: transform 0.2s var(--ease); }}
-            .status-badges .badge:hover {{ transform: translateY(-1px); }}
-            .tabs-nav {{
-                display: flex; gap: 0.5rem; margin: 0 -1.5rem 1.5rem; padding: 0.75rem 1.5rem; border-bottom: 1px solid var(--border);
-                position: sticky; top: 0; z-index: 50; background: var(--bg-translucent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-                overflow-x: auto; scrollbar-width: none;
-            }}
-            .tabs-nav::-webkit-scrollbar {{ display: none; }}
-            .tab-btn {{ background: var(--card-bg); color: var(--text-muted); border: 1px solid var(--border); padding: 0.7rem 1.25rem; border-radius: 8px; font-weight: 600; font-size: 0.9rem; cursor: pointer; transition: all 0.2s var(--ease); width: auto; white-space: nowrap; }}
-            .tab-btn:hover {{ color: var(--text); border-color: var(--border-strong); transform: translateY(-1px); }}
-            .tab-btn.active {{ background: var(--accent); color: #fff; border-color: var(--accent); box-shadow: 0 4px 14px rgba(var(--accent-rgb),0.35); }}
-            .tab-pane {{ display: none; }} .tab-pane.active {{ display: block; animation: fadeInUp 0.45s var(--ease) both; }}
-            .log-viewer {{ max-height: 34rem; overflow: auto; margin: 0; padding: 1rem; background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; color: var(--code-text); font: 0.78rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }}
-            .card {{
-                background: var(--card-bg); border: 1px solid var(--border); border-radius: 16px; padding: 1.75rem; margin-bottom: 1.5rem;
-                box-shadow: 0 10px 24px -8px var(--shadow); transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease), background-color 0.3s var(--ease), border-color 0.3s var(--ease);
-                animation: fadeInUp 0.5s var(--ease) both;
-            }}
-            .card:hover {{ transform: translateY(-2px); box-shadow: 0 16px 32px -10px var(--shadow); }}
-            .card h3 {{ margin-top: 0; margin-bottom: 1.25rem; font-size: 1.25rem; font-weight: 600; }}
-            .form-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }}
-            input[type="text"], input[type="date"], select {{ width: 100%; padding: 0.85rem 1rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 0.95rem; box-sizing: border-box; transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease); }}
-            input[type="text"]:focus, input[type="date"]:focus, select:focus {{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(var(--accent-rgb),0.2); }}
-            button {{ width: 100%; padding: 0.85rem; background: var(--accent); color: white; border: none; border-radius: 8px; font-weight: 600; font-size: 0.95rem; cursor: pointer; transition: background-color 0.2s var(--ease), transform 0.15s var(--ease), box-shadow 0.2s var(--ease); }}
-            button:hover {{ background: var(--accent-hover); transform: translateY(-1px); box-shadow: 0 6px 16px -4px rgba(var(--accent-rgb),0.45); }}
-            button:active {{ transform: translateY(0) scale(0.98); }}
-            .btn-secondary {{ background: var(--surface-3); color: var(--text-soft); border: 1px solid var(--border-strong); }} .btn-secondary:hover {{ background: var(--border-strong); color: var(--text); }}
-            .btn-danger {{ background: var(--danger); margin-top: 1rem; }} .btn-danger:hover {{ background: #b91c1c; }}
-            .team-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.25rem; }}
-            .team-header {{ display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.75rem; }}
-            .team-name {{ font-size: 1.15rem; font-weight: 700; margin: 0; }}
-            .badge {{ background: var(--surface-3); color: var(--text-soft); padding: 0.25rem 0.6rem; border-radius: 6px; font-size: 0.8rem; border: 1px solid var(--border-strong); display: inline-block; }}
-            .status-row {{ display: flex; align-items: center; gap: 0.6rem; font-size: 0.9rem; font-weight: 500; margin-bottom: 0.5rem; }}
-            .dot {{ width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }}
-            .dot.online {{ background: var(--success); box-shadow: 0 0 10px var(--success); animation: pulseGlow 2.2s ease-in-out infinite; }}
-            .dot.offline {{ background: var(--danger); box-shadow: 0 0 10px var(--danger); }}
-            .meta-text {{ color: var(--text-muted); font-size: 0.85rem; margin: 0; }}
-            .feed-box {{ display: flex; flex-direction: column; gap: 0.75rem; }} .feed-item label {{ font-size: 0.8rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; display: block; margin-bottom: 0.25rem; }}
-            .feed-item input {{ font-family: monospace; font-size: 0.9rem; cursor: pointer; background: var(--surface-2); }}
-            table {{ width: 100%; border-collapse: collapse; }} .hint-text {{ font-size: 0.8rem; color: var(--text-muted); margin-top: 0.35rem; line-height: 1.4; }}
-             .catalog-filter {{ margin: 1rem 0 1.25rem; }}
-             .catalog-list {{ display: flex; flex-direction: column; gap: 0.75rem; max-height: 48rem; overflow-y: auto; padding-right: 0.25rem; }}
-             .catalog-list::-webkit-scrollbar, .log-viewer::-webkit-scrollbar {{ width: 8px; }}
-             .catalog-list::-webkit-scrollbar-track, .log-viewer::-webkit-scrollbar-track {{ background: transparent; }}
-             .catalog-list::-webkit-scrollbar-thumb, .log-viewer::-webkit-scrollbar-thumb {{ background: var(--border-strong); border-radius: 8px; }}
-             .catalog-group {{ border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface-1); transition: border-color 0.2s var(--ease); }}
-             .catalog-group summary {{ display: flex; justify-content: space-between; align-items: center; cursor: pointer; padding: 0.85rem 1rem; font-weight: 700; list-style: none; }}
-             .catalog-group summary::-webkit-details-marker {{ display: none; }}
-             .catalog-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.5rem; padding: 0 0.75rem 0.75rem; }}
-             .catalog-item {{ margin: 0; }}
-             .catalog-toggle {{ display: flex; align-items: center; gap: 0.6rem; min-height: 2.6rem; padding: 0.45rem 0.6rem; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; background: var(--surface-2); transition: border-color 0.2s var(--ease), background-color 0.2s var(--ease), transform 0.15s var(--ease); }}
-             .catalog-toggle:hover {{ border-color: var(--accent); background: var(--accent-surface); transform: translateY(-1px); }}
-             .catalog-toggle input {{ width: 1rem; height: 1rem; accent-color: var(--accent); flex: 0 0 auto; }}
-             .catalog-name {{ font-size: 0.88rem; line-height: 1.2; flex: 1; }}
-              .catalog-live-badge {{ color: var(--live-text); border-color: var(--live-border); background: var(--live-bg); font-size: 0.68rem; white-space: nowrap; }}
-              .catalog-actions {{ display: flex; align-items: center; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap; }}
-              .catalog-actions button {{ width: auto; min-width: 13rem; }}
-              .catalog-selection-count {{ color: var(--text-muted); font-size: 0.85rem; }}
-             @media (max-width: 640px) {{ .form-grid {{ grid-template-columns: 1fr; }} .catalog-grid {{ grid-template-columns: 1fr; }} .card {{ padding: 1.25rem; }} .tabs-nav {{ margin: 0 -1rem 1.25rem; padding: 0.75rem 1rem; }} }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <header>
-                <div class="header-controls">
-                    <button type="button" class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle Dark/Light Mode" aria-label="Toggle dark or light mode">🌙</button>
-                </div>
-                <h1>Jellyball Sports Manager</h1>
-                <p>Multi-Aggregator Scraper & Jellyfin Live TV Gateway</p>
-                <div class="status-badges">{auth_badge} {jellyfin_badge} {webhook_discord_badge} {webhook_telegram_badge}</div>
-            </header>
-            {update_banner}
-            <div class="tabs-nav">
-                <button type="button" class="tab-btn {'active' if tab == 'channels' else ''}" id="btn-channels" onclick="switchTab('channels')">📺 Channels & Streams</button>
-                <button type="button" class="tab-btn {'active' if tab == 'metrics' else ''}" id="btn-metrics" onclick="switchTab('metrics')">📊 Stability Metrics</button>
-                <button type="button" class="tab-btn {'active' if tab == 'performance' else ''}" id="btn-performance" onclick="switchTab('performance')">⚡ Performance</button>
-                <button type="button" class="tab-btn {'active' if tab == 'playback' else ''}" id="btn-playback" onclick="switchTab('playback')">⚙️ Settings</button>
-                <button type="button" class="tab-btn {'active' if tab == 'alerts' else ''}" id="btn-alerts" onclick="switchTab('alerts')">🔔 Alerts & Integrations</button>
-                <button type="button" class="tab-btn {'active' if tab == 'logs' else ''}" id="btn-logs" onclick="switchTab('logs')">📜 Logs</button>
-            </div>
-            <div id="tab-channels" class="tab-pane {'active' if tab == 'channels' else ''}">
-                <div class="card" style="border-color: var(--accent); background: linear-gradient(180deg, var(--card-bg) 0%, var(--surface-1) 100%);">
-                    <h3 style="color: var(--accent-text); margin-bottom: 0.5rem;">Jellyfin Integration Endpoints</h3>
-                    <div class="feed-box">
-                        <div class="feed-item"><label>M3U Tuner Playlist URL (Click to copy)</label><input type="text" readonly value="{base_url_html}/playlist.m3u" onclick="copyToClipboard(this.value, 'Playlist URL copied!')"></div>
-                        <div class="feed-item"><label>XMLTV EPG Guide URL (Click to copy)</label><input type="text" readonly value="{base_url_html}/epg.xml" onclick="copyToClipboard(this.value, 'EPG URL copied!')"></div>
-                    </div>
-                </div>
-                <div class="card catalog-card">
-                    <h3>Sports Catalog</h3>
-                    <p class="hint-text">Turn on exact teams or always-live sports channels. Disabled entries are not scraped and do not appear in the Jellyfin playlist.</p>
-                    <p class="hint-text">{_html(catalog_source_text)} Available entries: {_html(len(catalog_entries))}. Select as many entries as needed, then apply them together.</p>
-                    <form action="/catalog/apply" method="post" id="catalog-form">
-                        <input id="catalog-filter" class="catalog-filter" type="text" placeholder="Filter teams and channels..." oninput="filterCatalog(this.value)">
-                        <div class="catalog-list">{catalog_html}</div>
-                        <div class="catalog-actions">
-                            <button type="submit">Apply Selected Teams</button>
-                            <span class="catalog-selection-count" id="catalog-selection-count">Selected: {_html(len(active_catalog_keys))}</span>
-                        </div>
-                    </form>
-                </div>
-                <div class="card" style="background: var(--accent-card-bg); border-color: var(--accent);">
-                    <div style="display: flex; justify-content: space-between; align-items: center; gap: 1rem;">
-                        <div>
-                            <h3 style="margin-top: 0; margin-bottom: 0.25rem;">🔄 Bulk Provider Override</h3>
-                            <p class="hint-text" style="margin: 0;">Temporarily force all active streams to use a specific provider.</p>
-                        </div>
-                        <select id="global-provider-override" style="padding: 0.65rem; border-radius: 6px; background: var(--surface-2); color: #fff; border: 1px solid var(--border-strong); font-size: 0.9rem; min-width: 180px; cursor: pointer;">
-                            <option value="">No Override (Auto)</option>
-                            <option value="iSportSurge">iSportSurge</option>
-                            <option value="MyBuffStreams">MyBuffStreams</option>
-                            <option value="MethStreams">MethStreams</option>
-                            <option value="StreamEast">StreamEast</option>
-                            <option value="Footybite">Footybite</option>
-                            <option value="1Stream">1Stream</option>
-                            <option value="Streamed">Streamed</option>
-                            <option value="TopStreams">TopStreams</option>
-                            <option value="TheTVApp">TheTVApp</option>
-                            <option value="DaddyLive">DaddyLive</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="team-grid">{channels_html}</div>
-            </div>
-            <div id="tab-metrics" class="tab-pane {'active' if tab == 'metrics' else ''}">
-                <div class="card">
-                    <h3>Provider Health Leaderboard</h3>
-                    <p class="hint-text">Success rates based on failover history. Higher is better.</p>
-                    <div style="background: var(--surface-2); padding: 1rem; border-radius: 8px; border: 1px solid var(--border);">{provider_health_html}</div>
-                </div>
-                <div class="card">
-                    <h3>Stream Stability & Provider Metrics</h3>
-                    <div style="margin-bottom: 1.25rem;"><div>{failover_stats_html}</div></div>
-                    <div style="overflow-x: auto;">
-                        <table>
-                            <thead><tr style="border-bottom: 1px solid var(--border-strong); text-align: left; font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase;"><th style="padding: 0.5rem;">Time (UTC)</th><th style="padding: 0.5rem;">Team</th><th style="padding: 0.5rem;">Event</th><th style="padding: 0.5rem;">Source</th><th style="padding: 0.5rem;">Details</th></tr></thead>
-                            <tbody>{events_html}</tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-            <div id="tab-performance" class="tab-pane {'active' if tab == 'performance' else ''}">
-                <div class="card">
-                    <h3>⚡ System Performance</h3>
-                    <p class="hint-text">Real-time performance metrics and diagnostics.</p>
-                    <div id="performance-metrics" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem;">
-                        <div style="background: var(--surface-2); padding: 1rem; border-radius: 8px; border: 1px solid var(--border);">
-                            <div style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.5rem;">Cache Hit Rate</div>
-                            <div style="font-size: 1.5rem; font-weight: 700; color: var(--success);" id="cache-hit-rate">--</div>
-                        </div>
-                        <div style="background: var(--surface-2); padding: 1rem; border-radius: 8px; border: 1px solid var(--border);">
-                            <div style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.5rem;">Playback Sessions (1h)</div>
-                            <div style="font-size: 1.5rem; font-weight: 700; color: var(--accent);" id="playback-sessions">--</div>
-                        </div>
-                        <div style="background: var(--surface-2); padding: 1rem; border-radius: 8px; border: 1px solid var(--border);">
-                            <div style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.5rem;">Failovers (1h)</div>
-                            <div style="font-size: 1.5rem; font-weight: 700; color: var(--danger);" id="failover-count">--</div>
-                        </div>
-                        <div style="background: var(--surface-2); padding: 1rem; border-radius: 8px; border: 1px solid var(--border);">
-                            <div style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.5rem;">Database Size</div>
-                            <div style="font-size: 1.5rem; font-weight: 700; color: var(--warning);" id="db-size">--</div>
-                        </div>
-                    </div>
-                </div>
-                <div class="card">
-                    <h3>📊 Top Watched Teams (Last 7 Days)</h3>
-                    <div id="top-teams-list" style="display: flex; flex-direction: column; gap: 0.75rem;">
-                        <p style="color: var(--text-muted);">Loading...</p>
-                    </div>
-                </div>
-                <div class="card">
-                    <h3>⚠️ Rate Limiting Protection</h3>
-                    <p class="hint-text">Success rate of each provider's search attempts in the last hour. A provider stuck below 50% may be throttling or banning us.</p>
-                    <div id="rate-limiting-status" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem;">
-                        <p style="color: var(--text-muted);">Loading...</p>
-                    </div>
-                </div>
-            </div>
-            <div id="tab-logs" class="tab-pane {'active' if tab == 'logs' else ''}">
-                <div class="card">
-                    <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem; margin-bottom:1rem;">
-                        <div><h3 style="margin-bottom:0.35rem;">Recent Application Logs</h3><p class="hint-text" style="margin:0;">The most recent 500 Jellyball log entries.</p></div>
-                        <button type="button" class="btn-secondary" style="width:auto; white-space:nowrap;" onclick="loadLogs()">Refresh Logs</button>
-                    </div>
-                    <pre id="log-viewer" class="log-viewer">Loading logs...</pre>
-                </div>
-            </div>
-            <div id="tab-playback" class="tab-pane {'active' if tab == 'playback' else ''}">
-                <div class="card">
-                    <h3>Advanced Settings</h3>
-                    <p class="hint-text">Leave a field blank to use its default (the .env value, or the built-in default). Changes apply immediately.</p>
-                    <form action="/settings/advanced" method="post" style="display: flex; flex-direction: column; gap: 1.25rem;">
-                        {_advanced_settings_html()}
-                        <button type="submit" style="width: auto; align-self: flex-start;">💾 Save Advanced Settings</button>
-                    </form>
-                </div>
-                <div class="card">
-                    <h3>Update Check</h3>
-                    <p class="hint-text">Running Jellyball {_html(__version__)}. When enabled, Jellyball asks GitHub twice a day whether a newer release exists and shows a notice here. Nothing else is sent.</p>
-                    <form action="/settings/update-check" method="post" style="display: flex; align-items: center; gap: 0.75rem;">
-                        <input type="checkbox" name="enabled" value="true" id="update-toggle" {'checked' if update_check_enabled else ''} style="width: auto; cursor: pointer;">
-                        <label for="update-toggle" style="cursor: pointer;">Check for new versions</label>
-                        <button type="submit" style="width: auto; margin-left: auto;">💾 Save</button>
-                    </form>
-                </div>
-                <div class="card">
-                    <h3>Off-season Channels</h3>
-                    <p class="hint-text">By default a team's channel leaves Jellyfin's channel list and guide between seasons. Keep them listed instead, with an "Off-season" guide entry showing when the season resumes.</p>
-                    <form action="/settings/offseason" method="post" style="display: flex; align-items: center; gap: 0.75rem;">
-                        <input type="checkbox" name="enabled" value="true" id="offseason-toggle" {'checked' if SHOW_OFFSEASON_CHANNELS else ''} style="width: auto; cursor: pointer;">
-                        <label for="offseason-toggle" style="cursor: pointer;">Keep off-season channels in Jellyfin</label>
-                        <button type="submit" style="width: auto; margin-left: auto;">💾 Save</button>
-                    </form>
-                </div>
-                <div class="card">
-                    <h3>Provider Rotation</h3>
-                    <p class="hint-text">When enabled, the preferred provider for tie-broken stream matches rotates hourly instead of always favoring the same aggregator, spreading load across sources.</p>
-                    <form action="/settings/provider-rotation" method="post" style="display: flex; align-items: center; gap: 0.75rem;">
-                        <input type="checkbox" name="enabled" value="true" id="rotation-toggle" {'checked' if provider_rotation_enabled else ''} style="width: auto; cursor: pointer;">
-                        <label for="rotation-toggle" style="cursor: pointer;">Enable provider rotation mode</label>
-                        <button type="submit" style="width: auto; margin-left: auto;">💾 Save</button>
-                    </form>
-                </div>
-                <div class="card">
-                    <h3>Import/Export Team Configuration</h3>
-                    <p class="hint-text">Backup or transfer your team selections to another Jellyball instance.</p>
-                    <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
-                        <a href="/api/export-config" download="jellyball-config.json" style="display: inline-block; padding: 0.85rem 1.5rem; background: var(--accent); color: white; border-radius: 8px; text-decoration: none; font-weight: 600; cursor: pointer;">📥 Export Configuration</a>
-                        <button type="button" onclick="document.getElementById('import-file').click()" style="width: auto; padding: 0.85rem 1.5rem;">📤 Import Configuration</button>
-                        <input type="file" id="import-file" accept=".json" style="display: none;" onchange="importConfig(this.files[0])">
-                    </div>
-                </div>
-            </div>
-            <div id="tab-alerts" class="tab-pane {'active' if tab == 'alerts' else ''}">
-                <div class="card" style="border-color: var(--purple); background: linear-gradient(180deg, var(--card-bg) 0%, var(--purple-card-to) 100%);">
-                    <h3 style="color: var(--purple-text);">🍇 Jellyfin Automatic Guide Refresh API</h3>
-                    <form action="/settings/jellyfin" method="post" style="display: flex; flex-direction: column; gap: 1.25rem;">
-                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
-                            <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">🌐 Jellyfin Server URL</label><input type="text" name="jellyfin_url" value="{_html(jellyfin_cfg['jellyfin_url'])}"></div>
-                            <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">🔑 Jellyfin API Key</label>{_secret_input("jellyfin_api_key", jellyfin_cfg['jellyfin_api_key'])}</div>
-                        </div>
-                        <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">⚙️ Refresh Guide Scheduled Task ID</label><input type="text" name="jellyfin_task_id" value="{_html(jellyfin_cfg['jellyfin_task_id'])}"></div>
-                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.25rem;"><button type="submit" style="background: var(--purple-dark);">💾 Save Jellyfin API Settings</button></div>
-                    </form>
-                    <form action="/settings/test_jellyfin" method="post" style="margin-top: 1rem; display: flex; gap: 0.75rem; align-items: center;">
-                        <button type="submit" class="btn-secondary" style="border-color: var(--purple); color: var(--purple-text); flex: 1;">🍇 Test Jellyfin Connection</button>
-                        <span id="jellyfin-status" style="font-size: 0.9rem; min-width: 120px;"></span>
-                    </form>
-                    <p class="hint-text">Tests the API connection and shows whether the refresh task will work correctly.</p>
-                </div>
-                <div class="card">
-                    <h3>🌐 Provider Domains</h3>
-                    <p class="hint-text">Aggregator domains change often. Override any provider's base URL here without editing .env or restarting the service — changes apply immediately. Leave a field blank to reset it to its built-in default (shown as the placeholder and in the hint below each field).</p>
-                    <form action="/settings/providers" method="post" style="display: flex; flex-direction: column; gap: 0.25rem;">
-                        {provider_url_rows_html}
-                        <button type="submit" style="width: auto; align-self: flex-start; margin-top: 0.5rem;">💾 Save Provider Domains</button>
-                    </form>
-                </div>
-                <div class="card">
-                    <h3>Webhook Notification Settings</h3>
-                    <form action="/settings/notifications" method="post" style="display: flex; flex-direction: column; gap: 1.25rem;">
-                        <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">👾 Discord Incoming Webhook URL</label>{_secret_input("discord_webhook_url", notif_cfg['discord_webhook_url'])}</div>
-                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
-                            <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">✈️ Telegram Bot Token</label>{_secret_input("telegram_bot_token", notif_cfg['telegram_bot_token'])}</div>
-                            <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">💬 Telegram Chat ID</label><input type="text" name="telegram_chat_id" value="{_html(notif_cfg['telegram_chat_id'])}"></div>
-                        </div>
-                        <button type="submit" style="margin-top: 0.5rem;">💾 Save Notification Settings</button>
-                    </form>
-                </div>
-            </div>
-        </div>
-        <script>
-            function escapeHtml(value) {{
-                return String(value ?? '').replace(/[&<>"']/g, c => ({{'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}})[c]);
-            }}
-            function showToast(message, duration = 3000, isError = false) {{
-                const toast = document.createElement('div');
-                toast.className = 'toast' + (isError ? ' error' : '');
-                toast.textContent = message;
-                document.body.appendChild(toast);
-                setTimeout(() => {{
-                    toast.style.animation = 'slideOut 0.3s ease-out forwards';
-                    setTimeout(() => toast.remove(), 300);
-                }}, duration);
-            }}
-            function copyToClipboard(text, message = 'Copied!') {{
-                navigator.clipboard.writeText(text).then(() => {{
-                    showToast(message);
-                }}).catch(() => {{
-                    showToast('Failed to copy', 3000, true);
-                }});
-            }}
-            function toggleTheme() {{
-                const html = document.documentElement;
-                const isDark = html.getAttribute('data-theme') !== 'light';
-                const newTheme = isDark ? 'light' : 'dark';
-                html.setAttribute('data-theme', newTheme);
-                localStorage.setItem('theme', newTheme);
-                const btn = document.getElementById('theme-toggle');
-                btn.textContent = isDark ? '☀️' : '🌙';
-                btn.classList.remove('spin');
-                void btn.offsetWidth;
-                btn.classList.add('spin');
-            }}
-            function switchTab(tabName) {{
-                document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
-                document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
-                const pane = document.getElementById('tab-' + tabName);
-                const btn = document.getElementById('btn-' + tabName);
-                if (pane) pane.classList.add('active');
-                if (btn) btn.classList.add('active');
-                if (tabName === 'logs') loadLogs();
-                const url = new URL(window.location);
-                url.searchParams.set('tab', tabName);
-                window.history.replaceState({{}}, '', url);
-            }}
-                async function loadLogs() {{
-                    const viewer = document.getElementById('log-viewer');
-                    if (!viewer) return;
-                    viewer.textContent = 'Loading logs...';
-                    try {{
-                        const response = await fetch('/api/logs?limit=500', {{ cache: 'no-store' }});
-                        if (!response.ok) throw new Error('Unable to load logs');
-                        const payload = await response.json();
-                        viewer.textContent = (payload.logs || []).join('\\n') || 'No log entries available.';
-                        viewer.scrollTop = viewer.scrollHeight;
-                    }} catch (error) {{
-                        viewer.textContent = 'Unable to load logs. Check the application log file directly.';
-                    }}
-                }}
-             function filterCatalog(value) {{
-                 const query = (value || '').toLowerCase().trim();
-                 document.querySelectorAll('.catalog-group').forEach(group => {{
-                     let visible = 0;
-                     group.querySelectorAll('.catalog-item').forEach(item => {{
-                         const matches = !query || (item.dataset.catalogName || '').toLowerCase().includes(query);
-                         item.style.display = matches ? '' : 'none';
-                         if (matches) visible += 1;
-                     }});
-                     group.style.display = visible ? '' : 'none';
-                     if (query && visible) group.open = true;
-                 }});
-             }}
-              function updateCatalogSelectionCount() {{
-                  const selected = document.querySelectorAll('#catalog-form input[name="catalog_keys"]:checked').length;
-                  const label = document.getElementById('catalog-selection-count');
-                  if (label) label.textContent = 'Selected: ' + selected;
-              }}
-               function applyStatusSnapshot(snapshot) {{
-                   // Structural changes (a channel was added/removed, e.g. from another
-                   // tab or a scheduled auto-disable) still need a reload since we don't
-                   // have the HTML to insert a brand-new card client-side. Everything
-                   // else — candidate count, active provider, health — is common during
-                   // normal failover/rescrape churn and is patched into the existing
-                   // card in place instead, so the page doesn't jump/reload every ~5s.
-                   const channels = snapshot.channels || [];
-                   const byId = new Map(channels.map(channel => [channel.team_id, channel]));
-                   let shouldReload = channels.length !== document.querySelectorAll('.channel-card').length;
-                   document.querySelectorAll('.channel-card').forEach(card => {{
-                       const channel = byId.get(card.dataset.teamId);
-                       if (!channel) {{
-                           shouldReload = true;
-                           return;
-                       }}
-                       const candidateCount = Number(channel.candidate_count || 0);
-                       const activeProvider = channel.active_provider || '';
-                       card.dataset.candidateCount = String(candidateCount);
-                       card.dataset.activeProvider = activeProvider;
-                       const dot = card.querySelector('[data-role="status-dot"]');
-                       const statusText = card.querySelector('[data-role="status-text"]');
-                       const candidateText = card.querySelector('[data-role="candidate-count"]');
-                       if (dot) {{
-                           dot.classList.toggle('online', Boolean(channel.healthy));
-                           dot.classList.toggle('offline', !channel.healthy);
-                       }}
-                       if (statusText) {{
-                           if (channel.healthy) {{
-                               statusText.textContent = 'Stream Stable & Active';
-                           }} else if (channel.schedule_status === 'off_season') {{
-                               statusText.textContent = channel.season_resume_label
-                                   ? `Off-season (resumes ${{channel.season_resume_label}})`
-                                   : 'Off-season';
-                           }} else {{
-                               statusText.textContent = 'Searching / Re-evaluating';
-                           }}
-                       }}
-                       if (candidateText) candidateText.textContent = 'Available Backups: ' + candidateCount;
-                   }});
-                   if (shouldReload) window.location.reload();
-               }}
-               async function pollChannelStatus() {{
-                   try {{
-                       const response = await fetch('/api/status', {{ cache: 'no-store' }});
-                       if (response.ok) applyStatusSnapshot(await response.json());
-                   }} catch (error) {{
-                       // The next poll retries transient server or network failures.
-                   }} finally {{
-                       window.setTimeout(pollChannelStatus, 5000);
-                   }}
-               }}
-               function applyMultiviewStatusSnapshot(snapshot) {{
-                   const byId = new Map((snapshot.channels || []).map(ch => [ch.channel_id, ch]));
-                   document.querySelectorAll('.multiview-card').forEach(card => {{
-                       const ch = byId.get(card.dataset.teamId);
-                       if (!ch) return;
-                       const statusEl = card.querySelector('[data-role="mv-status"]');
-                       const failureEl = card.querySelector('[data-role="mv-failure"]');
-                       if (statusEl) statusEl.textContent = ch.running ? '🟢 Running' : '⚪ Stopped';
-                       if (failureEl) {{
-                           if (!ch.running && ch.last_error) {{
-                               failureEl.innerHTML = `<p class="meta-text" style="color:var(--danger-text);">⚠️ ${{escapeHtml(ch.last_error)}} (failed ${{escapeHtml(ch.failure_count)}}x, retrying in ${{escapeHtml(ch.retry_in_seconds)}}s)</p>`;
-                           }} else {{
-                               failureEl.innerHTML = '';
-                           }}
-                       }}
-                   }});
-               }}
-               async function pollMultiviewStatus() {{
-                   if (!document.querySelector('.multiview-card')) {{
-                       window.setTimeout(pollMultiviewStatus, 5000);
-                       return;
-                   }}
-                   try {{
-                       const response = await fetch('/api/ffmpeg-status', {{ cache: 'no-store' }});
-                       if (response.ok) applyMultiviewStatusSnapshot(await response.json());
-                   }} catch (error) {{
-                       // The next poll retries transient server or network failures.
-                   }} finally {{
-                       window.setTimeout(pollMultiviewStatus, 5000);
-                   }}
-               }}
-            function updateBulkTeamIds() {{
-                const checked = document.querySelectorAll('.team-bulk-select:checked');
-                const ids = Array.from(checked).map(c => c.dataset.teamId).join(',');
-                document.getElementById('bulk-team-ids').value = ids;
-                return ids;
-            }}
-            function updateMultiviewTeamIds() {{
-                const checked = document.querySelectorAll('.multiview-member-select:checked');
-                if (checked.length !== 2 && checked.length !== 4) {{
-                    showToast('Select exactly 2 or 4 channels for a Multi-View', 3000, true);
-                    return false;
-                }}
-                document.getElementById('multiview-team-ids').value = Array.from(checked).map(c => c.dataset.teamId).join(',');
-                return true;
-            }}
-            function selectAllTeams() {{
-                document.querySelectorAll('.team-bulk-select').forEach(c => c.checked = true);
-                updateBulkTeamIds();
-                showToast(`Selected ${{document.querySelectorAll('.team-bulk-select:checked').length}} teams`);
-            }}
-            function deselectAllTeams() {{
-                document.querySelectorAll('.team-bulk-select').forEach(c => c.checked = false);
-                updateBulkTeamIds();
-                showToast('Deselected all teams');
-            }}
-            function bulkFavorite() {{
-                const ids = updateBulkTeamIds();
-                if (!ids) {{
-                    showToast('Select teams first', 3000, true);
-                    return;
-                }}
-                const form = document.createElement('form');
-                form.method = 'POST';
-                form.action = '/bulk-favorite';
-                form.innerHTML = `<input type="hidden" name="team_ids" value="${{escapeHtml(ids)}}">`;
-                document.body.appendChild(form);
-                form.submit();
-            }}
-            function bulkUnfavorite() {{
-                const ids = updateBulkTeamIds();
-                if (!ids) {{
-                    showToast('Select teams first', 3000, true);
-                    return;
-                }}
-                const form = document.createElement('form');
-                form.method = 'POST';
-                form.action = '/bulk-unfavorite';
-                form.innerHTML = `<input type="hidden" name="team_ids" value="${{escapeHtml(ids)}}">`;
-                document.body.appendChild(form);
-                form.submit();
-            }}
-            function bulkRemove() {{
-                const ids = updateBulkTeamIds();
-                if (!ids) {{
-                    showToast('Select teams first', 3000, true);
-                    return;
-                }}
-                if (!confirm(`Remove ${{document.querySelectorAll('.team-bulk-select:checked').length}} teams?`)) return;
-                const form = document.createElement('form');
-                form.method = 'POST';
-                form.action = '/bulk-remove';
-                form.innerHTML = `<input type="hidden" name="team_ids" value="${{escapeHtml(ids)}}">`;
-                document.body.appendChild(form);
-                form.submit();
-            }}
-            async function testTeamStream(teamId) {{
-                const card = document.querySelector(`.channel-card[data-team-id="${{teamId}}"]`);
-                const resultEl = card ? card.querySelector('[data-role="test-result"]') : null;
-                if (resultEl) {{
-                    resultEl.textContent = 'Testing...';
-                    resultEl.style.color = 'var(--text-muted)';
-                }}
-                try {{
-                    const resp = await fetch(`/api/test-stream/${{teamId}}`, {{ method: 'POST' }});
-                    const result = await resp.json();
-                    if (resultEl) {{
-                        const count = result.candidate_count || 0;
-                        resultEl.textContent = `${{result.status}} (${{count}} candidate${{count === 1 ? '' : 's'}})`;
-                        resultEl.style.color = result.is_live ? '#22c55e' : 'var(--danger-text)';
-                    }}
-                }} catch (err) {{
-                    if (resultEl) {{
-                        resultEl.textContent = '❌ Test failed';
-                        resultEl.style.color = 'var(--danger-text)';
-                    }}
-                }}
-            }}
-            function importConfig(file) {{
-                if (!file) return;
-                const reader = new FileReader();
-                reader.onload = async (e) => {{
-                    try {{
-                        const config = JSON.parse(e.target.result);
-                        const resp = await fetch('/api/import-config', {{
-                            method: 'POST',
-                            headers: {{'Content-Type': 'application/json'}},
-                            body: JSON.stringify(config)
-                        }});
-                        if (resp.ok) {{
-                            const result = await resp.json();
-                            showToast(`✅ Imported ${{result.count}} teams`);
-                            setTimeout(() => window.location.reload(), 2000);
-                        }} else {{
-                            showToast('Import failed', 3000, true);
-                        }}
-                    }} catch (error) {{
-                        showToast('Invalid config file', 3000, true);
-                    }}
-                }};
-                reader.readAsText(file);
-            }}
+        active_provider = ""
+        if candidates_list:
+            active_index = data.get("active_index", 0)
+            if 0 <= active_index < len(candidates_list):
+                active_provider = candidates_list[active_index].get("provider", "")
 
-            window.addEventListener('DOMContentLoaded', () => {{
-                const params = new URLSearchParams(window.location.search);
-                const activeTab = params.get('tab');
-                const status = params.get('status');
+        channel = {
+            "team_id": t_id,
+            "name": data["name"],
+            "badge": channel_badge,
+            "dot_class": dot_class,
+            "status_text": status_text,
+            "candidates_count": len(candidates_list),
+            "has_candidates": bool(candidates_list),
+            "candidates_options": candidates_options,
+            "active_provider": active_provider,
+            "is_favorite": t_id in favorites,
+            "remove_label": remove_label,
+            "auto_disable_after": data.get('auto_disable_after', ''),
+        }
+        channel.update(_channel_watch_fields(t_id, data))
+        return channel
 
-                if (activeTab && document.getElementById('tab-' + activeTab)) switchTab(activeTab);
-                if (activeTab === 'logs') loadLogs();
-                updateCatalogSelectionCount();
-                pollChannelStatus();
-                pollMultiviewStatus();
+    favorites_channels = []
+    other_channels = []
+    for t_id, data in stream_state.items():
+        if data.get('type') == "multiview":
+            continue
+        channel = _build_channel(t_id, data)
+        if channel["is_favorite"]:
+            favorites_channels.append(channel)
+        else:
+            other_channels.append(channel)
 
-                const statusMessages = {{
-                    'jellyfin_success': '✅ Jellyfin connection successful!',
-                    'jellyfin_failed': '❌ Jellyfin connection failed',
-                    'jellyfin_key_required': '❌ Re-enter the API key when changing the Jellyfin server',
-                    'team_added': '✅ Channel added',
-                    'schedule_saved': '✅ Auto-disable date saved',
-                    'schedule_invalid': '❌ Enter a valid date (YYYY-MM-DD)',
-                    'schedule_failed': '❌ Could not save the auto-disable date',
-                    'jellyfin_url_invalid': '❌ Jellyfin URL must be an absolute http(s) URL',
-                    'saved': '✅ Settings saved',
-                    'test_sent': '✅ Test alert sent',
-                    'providers_saved': '✅ Provider domains saved',
-                    'providers_invalid': '❌ One or more provider URLs must be an absolute http(s) URL'
-                }};
-                if (status && statusMessages[status]) {{
-                    showToast(statusMessages[status], 4000, status.includes('failed'));
-                    const statusEl = document.getElementById('jellyfin-status');
-                    if (statusEl && status.includes('jellyfin')) {{
-                        statusEl.textContent = statusMessages[status];
-                        statusEl.style.color = status.includes('success') ? 'var(--success)' : 'var(--danger)';
-                    }}
-                    const newUrl = new URL(window.location);
-                    newUrl.searchParams.delete('status');
-                    window.history.replaceState({{}}, '', newUrl);
-                }}
+    multiview_checkbox_list = [
+        {"team_id": mv_t_id, "name": mv_data.get("name", mv_t_id)}
+        for mv_t_id, mv_data in stream_state.items()
+        if mv_data.get("type") != "multiview"
+    ]
 
-                const currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
-                document.getElementById('theme-toggle').textContent = currentTheme === 'light' ? '☀️' : '🌙';
+    multiview_rows = []
+    for mv_id, mv_data in stream_state.items():
+        if mv_data.get("type") != "multiview":
+            continue
+        mv_entry = _MULTIVIEW_PROCESSES.get(mv_id)
+        mv_running = bool(mv_entry and mv_entry["process"].returncode is None and not mv_entry.get("exited"))
+        member_ids = mv_data.get("member_team_ids", [])
+        member_names = ", ".join(stream_state.get(m, {}).get("name", m) for m in member_ids)
+        audio_options = [
+            {
+                "team_id": m,
+                "name": stream_state.get(m, {}).get("name", m),
+                "selected": m == mv_data.get("active_audio_team_id"),
+            }
+            for m in member_ids
+        ]
+        mv_failure = _MULTIVIEW_FAILURES.get(mv_id)
+        failure = None
+        if not mv_running and mv_failure:
+            failure = {
+                "last_error": mv_failure["last_error"],
+                "count": mv_failure["count"],
+                "retry_in": round(_multiview_cooldown_remaining(mv_id)),
+            }
+        multiview_rows.append({
+            "mv_id": mv_id,
+            "name": mv_data.get("name", mv_id),
+            "layout": mv_data.get("layout", ""),
+            "status": "\U0001f7e2 Running" if mv_running else "⚪ Stopped",
+            "member_names": member_names,
+            "audio_options": audio_options,
+            "failure": failure,
+        })
 
-                const overrideSelect = document.getElementById('global-provider-override');
-                if (overrideSelect) {{
-                    overrideSelect.addEventListener('change', (e) => {{
-                        sessionStorage.setItem('provider-override', e.target.value);
-                        showToast(e.target.value ? `Provider override set to: ${{e.target.value}}` : 'Provider override cleared');
-                        if (window.Jellyfin) {{
-                            window.Jellyfin.mediaManager?.seekTo?.(0);
-                        }}
-                    }});
-                    const saved = sessionStorage.getItem('provider-override');
-                    if (saved) overrideSelect.value = saved;
-                }}
+    multiview = {
+        "ffmpeg_available": FFMPEG_AVAILABLE,
+        "ffmpeg_path": FFMPEG_PATH,
+        "checkbox_list": multiview_checkbox_list,
+        "rows": multiview_rows,
+    }
 
-                if (typeof MediaSession !== 'undefined') {{
-                    navigator.mediaSession.setActionHandler('play', () => {{}});
-                    navigator.mediaSession.setActionHandler('pause', () => {{}});
-                }}
+    context = {
+        "request": request,
+        "tab": tab,
+        "version": __version__,
+        "base_url": base_url,
+        "update_banner": update_banner,
+        "auth_badge": auth_badge,
+        "jellyfin_badge": jellyfin_badge,
+        "webhook_discord_badge": webhook_discord_badge,
+        "webhook_telegram_badge": webhook_telegram_badge,
+        "channels_empty": not any(data.get('type') != "multiview" for data in stream_state.values()),
+        "auth_mode": DASHBOARD_AUTH_MODE,
+        "dashboard_password_file": str(DASHBOARD_PASSWORD_FILE),
+        "catalog_source_text": catalog_source_text,
+        "catalog_entries_count": len(catalog_entries),
+        "active_catalog_count": len(active_catalog_keys),
+        "catalog_groups": catalog_groups,
+        "favorites": favorites_channels,
+        "others": other_channels,
+        "multiview": multiview,
+        "provider_health": provider_health,
+        "failover_stats": failover_stats,
+        "events": events,
+        "provider_url_rows": provider_url_rows,
+        "jellyfin_cfg": jellyfin_cfg,
+        "notif_cfg": notif_cfg,
+        "jellyfin_api_key_secret": _secret_input("jellyfin_api_key", jellyfin_cfg['jellyfin_api_key']),
+        "discord_webhook_secret": _secret_input("discord_webhook_url", notif_cfg['discord_webhook_url']),
+        "telegram_bot_token_secret": _secret_input("telegram_bot_token", notif_cfg['telegram_bot_token']),
+        "advanced_settings_groups": _advanced_settings_html(),
+        "update_check_enabled": update_check_enabled,
+        "show_offseason_channels": SHOW_OFFSEASON_CHANNELS,
+        "provider_rotation_enabled": provider_rotation_enabled,
+        "dashboard_data": {},
+    }
+    return TEMPLATES.TemplateResponse(request, "dashboard.html", context)
 
-                document.querySelectorAll('.team-bulk-select').forEach(checkbox => {{
-                    checkbox.addEventListener('change', updateBulkTeamIds);
-                }});
-
-                statusMessages['advanced_saved'] = '✅ Advanced settings saved';
-                statusMessages['advanced_invalid'] = '❌ A value was not a number; nothing after it was saved';
-
-                if (activeTab === 'performance') {{
-                    async function refreshPerformanceTab(withTopTeams) {{
-                        try {{
-                            const cache = await fetch('/api/cache-metrics').then(r => r.json());
-                            const perf = await fetch('/api/performance-stats').then(r => r.json());
-
-                            const cacheEl = document.getElementById('cache-hit-rate');
-                            const playEl = document.getElementById('playback-sessions');
-                            const failEl = document.getElementById('failover-count');
-                            const dbEl = document.getElementById('db-size');
-                            const rateLimitEl = document.getElementById('rate-limiting-status');
-
-                            if (cacheEl) cacheEl.textContent = (cache.hit_rate || 0).toFixed(1) + '%';
-                            if (playEl) playEl.textContent = perf.playback_sessions_hour || 0;
-                            if (failEl) failEl.textContent = perf.failovers_hour || 0;
-                            if (dbEl) dbEl.textContent = (perf.db_size_mb || 0).toFixed(1) + ' MB';
-
-                            if (rateLimitEl) {{
-                                const health = perf.provider_health || [];
-                                if (!health.length) {{
-                                    rateLimitEl.innerHTML = '<div style="background: var(--surface-2); padding: 0.75rem; border-radius: 6px; border: 1px solid var(--border); color: var(--text-muted);">Not enough recent provider activity yet.</div>';
-                                }} else {{
-                                    rateLimitEl.innerHTML = health.map(p => {{
-                                        if (p.sustained_failure) {{
-                                            return `<div style="background: var(--surface-2); padding: 0.75rem; border-radius: 6px; border: 1px solid var(--danger);"><div style="font-weight:600;">${{escapeHtml(p.provider)}}</div><div style="color: var(--danger);">⛔ Likely dead — 0% over ${{p.samples_5d}} attempts/5d</div></div>`;
-                                        }}
-                                        const color = p.at_risk ? 'var(--danger)' : 'var(--success)';
-                                        const icon = p.at_risk ? '⚠️' : '✅';
-                                        const rateText = p.success_rate === null ? 'no data this hour' : `${{p.success_rate}}% (${{p.samples_hour}} samples/hr)`;
-                                        return `<div style="background: var(--surface-2); padding: 0.75rem; border-radius: 6px; border: 1px solid var(--border);"><div style="font-weight:600;">${{escapeHtml(p.provider)}}</div><div style="color:${{color}};">${{icon}} ${{escapeHtml(rateText)}}</div></div>`;
-                                    }}).join('');
-                                }}
-                            }}
-
-                            if (withTopTeams) {{
-                                const playback = await fetch('/api/playback-stats').then(r => r.json());
-                                const topEl = document.getElementById('top-teams-list');
-                                if (topEl && playback.top_watched_teams) {{
-                                    topEl.innerHTML = playback.top_watched_teams.map(t => `<div style="padding: 0.5rem; background: var(--surface-2); border-radius: 6px; display: flex; justify-content: space-between;"><span>${{escapeHtml(t.team_id)}}</span><span style="color: var(--success);">${{escapeHtml(t.plays)}} plays</span></div>`).join('');
-                                }}
-                            }}
-                        }} catch (e) {{
-                            console.error('Performance load failed', e);
-                        }}
-                    }}
-                    refreshPerformanceTab(true);
-                    setInterval(() => refreshPerformanceTab(false), 5000);
-                }}
-            }});
-        </script>
-    </body>
-    </html>
-    """
-    return html
-
-def _secret_input(name: str, saved_value: str) -> str:
-    """Password-type input that never echoes a saved secret back into the page.
+def _secret_input(name: str, saved_value: str) -> dict:
+    """Data for a password-type input that never echoes a saved secret back
+    into the page (rendered by the dashboard template's secret_input macro).
     Blank on submit keeps the saved value; the checkbox clears it."""
-    if not saved_value:
-        return f'<input type="password" name="{name}" value="" autocomplete="off">'
-    return (
-        f'<input type="password" name="{name}" value="" autocomplete="off" '
-        f'placeholder="Saved (ends {_html(saved_value[-4:])}) - leave blank to keep">'
-        f'<label style="font-size: 0.8rem; color: var(--text-muted); display: flex; gap: 0.35rem; align-items: center; margin-top: 0.35rem;">'
-        f'<input type="checkbox" name="clear_{name}" value="1" style="width: auto;"> Remove saved value</label>'
-    )
+    return {
+        "name": name,
+        "has_value": bool(saved_value),
+        "masked_tail": saved_value[-4:] if saved_value else "",
+    }
 
 
 def _submitted_secret(submitted: str, clear: str, current: str) -> str:
@@ -9481,7 +8672,7 @@ async def toggle_catalog(
 
     await _set_catalog_entry_enabled(entry, enabled)
     _spawn_background_task(trigger_jellyfin_refresh(), "refresh Jellyfin guide after catalog toggle")
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+    return RedirectResponse(url="/?tab=channels&status=catalog_toggled", status_code=303)
 
 
 TEAM_NAME_MAX_LENGTH = 120
@@ -9606,7 +8797,7 @@ async def remove_team(team_id: str, auth: bool = Depends(verify_dashboard_auth))
     if team_id in stream_state:
         await _remove_channel(team_id)
         _spawn_background_task(trigger_jellyfin_refresh(), "refresh Jellyfin guide after team removal")
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+    return RedirectResponse(url="/?tab=channels&status=team_removed", status_code=303)
 
 
 @app.post("/multiview/create")
@@ -9649,7 +8840,7 @@ async def create_multiview(
         **_scrape_lifecycle_defaults(),
     }
     _spawn_background_task(trigger_jellyfin_refresh(), "refresh Jellyfin guide after multiview creation")
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+    return RedirectResponse(url="/?tab=channels&status=multiview_created", status_code=303)
 
 
 @app.post("/multiview/{channel_id}/remove")
@@ -9658,7 +8849,7 @@ async def remove_multiview(channel_id: str, auth: bool = Depends(verify_dashboar
     if data and data.get("type") == "multiview":
         await _remove_channel(channel_id)
         _spawn_background_task(trigger_jellyfin_refresh(), "refresh Jellyfin guide after multiview removal")
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+    return RedirectResponse(url="/?tab=channels&status=multiview_removed", status_code=303)
 
 
 @app.post("/multiview/{channel_id}/stop")
@@ -9668,7 +8859,7 @@ async def stop_multiview(channel_id: str, auth: bool = Depends(verify_dashboard_
         # Cancels a spawn in progress too, and keeps the grid stopped (viewers
         # get No Signal) until a new viewer tunes in or /start is posted.
         await _stop_multiview_manually(channel_id)
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+    return RedirectResponse(url="/?tab=channels&status=multiview_stopped", status_code=303)
 
 
 @app.post("/multiview/{channel_id}/start")
@@ -9682,7 +8873,7 @@ async def start_multiview(channel_id: str, auth: bool = Depends(verify_dashboard
             mapping.pop(channel_id, None)
         _MULTIVIEW_LAST_VIEWER[channel_id] = time.monotonic()
         _request_multiview_start(channel_id)
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+    return RedirectResponse(url="/?tab=channels&status=multiview_started", status_code=303)
 
 
 @app.post("/multiview/{channel_id}/set-audio")
@@ -9707,7 +8898,7 @@ async def set_multiview_audio(
     # output's audio codec (see _resolve_multiview_view_source): same codec
     # continues seamlessly, a different codec becomes a clean discontinuity.
     SESSIONS.poke(channel_id)
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+    return RedirectResponse(url="/?tab=channels&status=multiview_audio_set", status_code=303)
 
 
 @app.get("/api/ffmpeg-status", response_class=JSONResponse)
@@ -9750,12 +8941,12 @@ async def toggle_favorite(team_id: str, auth: bool = Depends(verify_dashboard_au
         await asyncio.to_thread(_toggle_favorite_sync, team_id)
     except Exception as exc:
         _log_failure(f"toggle favorite for {team_id}", exc)
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+    return RedirectResponse(url="/?tab=channels&status=favorite_toggled", status_code=303)
 
 @app.post("/rescrape/{team_id}")
 async def manual_rescrape(team_id: str, auth: bool = Depends(verify_dashboard_auth)):
     _spawn_background_task(trigger_scrape(team_id, force=True), f"manual rescrape {team_id}")
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+    return RedirectResponse(url="/?tab=channels&status=rescrape_started", status_code=303)
 
 
 def _bulk_set_favorite_sync(ids: List[str], is_favorite: bool) -> None:
@@ -9772,7 +8963,7 @@ async def bulk_favorite(team_ids: str = Form(""), auth: bool = Depends(verify_da
         await asyncio.to_thread(_bulk_set_favorite_sync, ids, True)
     except Exception as exc:
         _log_failure("bulk favorite", exc)
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+    return RedirectResponse(url="/?tab=channels&status=bulk_favorited", status_code=303)
 
 @app.post("/bulk-unfavorite")
 async def bulk_unfavorite(team_ids: str = Form(""), auth: bool = Depends(verify_dashboard_auth)):
@@ -9781,7 +8972,7 @@ async def bulk_unfavorite(team_ids: str = Form(""), auth: bool = Depends(verify_
         await asyncio.to_thread(_bulk_set_favorite_sync, ids, False)
     except Exception as exc:
         _log_failure("bulk unfavorite", exc)
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+    return RedirectResponse(url="/?tab=channels&status=bulk_unfavorited", status_code=303)
 
 @app.post("/bulk-remove")
 async def bulk_remove(team_ids: str = Form(""), auth: bool = Depends(verify_dashboard_auth)):
@@ -9792,7 +8983,7 @@ async def bulk_remove(team_ids: str = Form(""), auth: bool = Depends(verify_dash
     except Exception as exc:
         _log_failure("bulk remove", exc)
     _spawn_background_task(trigger_jellyfin_refresh(), "refresh Jellyfin guide after bulk removal")
-    return RedirectResponse(url="/?tab=channels", status_code=303)
+    return RedirectResponse(url="/?tab=channels&status=bulk_removed", status_code=303)
 
 def _export_teams_sync() -> list:
     with _db_session() as conn:
@@ -10023,32 +9214,28 @@ def _advanced_settings_snapshot() -> List[dict]:
     ]
 
 
-def _advanced_settings_html() -> str:
-    groups: Dict[str, List[str]] = {}
+def _advanced_settings_html() -> List[dict]:
+    """Advanced-settings tunables grouped for the dashboard template, one
+    dict per fieldset: {"name": group name, "items": [...]}."""
+    groups: Dict[str, List[dict]] = {}
     for item in _advanced_settings_snapshot():
         overridden = item["value"] != item["default"]
         step = "1" if item["type"] == "int" else "any"
         hint = f"Default {item['default']:g}" if isinstance(item["default"], (int, float)) else ""
         if item["help"]:
             hint = f"{hint}. {item['help']}" if hint else item["help"]
-        groups.setdefault(item["group"], []).append(
-            f'<div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; '
-            f'margin-bottom: 0.35rem;" for="adv-{_html(item["name"])}">{_html(item["label"])}'
-            f'{" <span class=\"badge\">changed</span>" if overridden else ""}</label>'
-            f'<input type="number" id="adv-{_html(item["name"])}" name="{_html(item["name"])}" '
-            f'step="{step}" min="{item["min"]:g}" max="{item["max"]:g}" '
-            f'value="{_html(item["value"] if overridden else "")}" placeholder="{_html(item["default"])}">'
-            f'<p class="hint-text" style="margin: 0.25rem 0 0;">{_html(hint)}</p></div>'
-        )
-    sections = []
-    for group, fields in groups.items():
-        sections.append(
-            f'<fieldset style="border: 1px solid var(--border); border-radius: 8px; padding: 1rem;">'
-            f'<legend style="padding: 0 0.5rem; font-weight: 700;">{_html(group)}</legend>'
-            f'<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem;">'
-            f'{"".join(fields)}</div></fieldset>'
-        )
-    return "".join(sections)
+        groups.setdefault(item["group"], []).append({
+            "name": item["name"],
+            "label": item["label"],
+            "overridden": overridden,
+            "step": step,
+            "min": f'{item["min"]:g}',
+            "max": f'{item["max"]:g}',
+            "value": item["value"] if overridden else "",
+            "default": item["default"],
+            "hint": hint,
+        })
+    return [{"name": group, "fields": fields} for group, fields in groups.items()]
 
 
 @app.get("/api/settings/advanced", response_class=JSONResponse)

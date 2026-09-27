@@ -133,10 +133,28 @@ class DashboardAuthTests(unittest.TestCase):
 
 class SecretSettingsTests(TempDbMixin, unittest.TestCase):
     def test_secret_input_never_echoes_the_value(self):
-        html = main._secret_input("jellyfin_api_key", "abcdef123456")
-        self.assertNotIn("abcdef123456", html)
-        self.assertIn('type="password"', html)
-        self.assertIn("3456", html)  # last four as a hint
+        # _secret_input now returns data for the dashboard template's
+        # secret_input macro (templates/partials/alerts.html) rather than
+        # HTML directly, so the saved value itself is never embedded
+        # anywhere except as a masked last-4-characters hint.
+        data = main._secret_input("jellyfin_api_key", "abcdef123456")
+        self.assertNotIn("abcdef123456", repr(data))
+        self.assertEqual(data["name"], "jellyfin_api_key")
+        self.assertTrue(data["has_value"])
+        self.assertEqual(data["masked_tail"], "3456")  # last four as a hint
+
+        async def exercise():
+            await main.set_setting_async("jellyfin_api_key", "abcdef123456")
+            async with _client() as client:
+                return await client.get("/?tab=alerts")
+
+        with patch.object(main, "DASHBOARD_PASSWORD", ""):
+            response = asyncio.run(exercise())
+        self.assertEqual(response.status_code, 200)
+        body = response.text
+        self.assertNotIn("abcdef123456", body)
+        self.assertIn('type="password"', body)
+        self.assertIn("3456", body)
 
     def test_blank_secret_keeps_saved_value_and_clear_removes_it(self):
         self.assertEqual(main._submitted_secret("", "", "saved"), "saved")
@@ -279,6 +297,50 @@ class DashboardRenderTests(TempDbMixin, unittest.TestCase):
         self.assertNotIn('"><svg onload=alert(3)>', body)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", body)
         self.assertIn("Advanced Settings", body)
+
+    def test_every_tab_renders_with_representative_state(self):
+        """Templates render cleanly (no leftover Jinja syntax) for every tab,
+        with channels that exercise candidates, Multi-View, off-season and
+        exhausted states."""
+        main.stream_state["with_candidates"] = {
+            "name": "Has Candidates", "query": "q",
+            "candidates": [
+                {"provider": "ProviderA", "url": "https://cdn.example/a.m3u8", "match_title": "Game A"},
+                {"provider": "ProviderB", "url": "https://cdn.example/b.m3u8", "match_title": "Game B"},
+            ],
+            "active_index": 0, "is_healthy": True, "category": "nfl", "logo_url": "",
+            "start_time": "", "stop_time": "", **main._scrape_lifecycle_defaults(),
+        }
+        main.stream_state["off_season_team"] = {
+            "name": "Off Season Team", "query": "q", "candidates": [],
+            "active_index": 0, "is_healthy": False, "category": "ncaaf", "logo_url": "",
+            "start_time": "", "stop_time": "", **main._scrape_lifecycle_defaults(),
+        }
+        main.stream_state["off_season_team"]["schedule_status"] = "off_season"
+        main.stream_state["exhausted_team"] = {
+            "name": "Exhausted Team", "query": "q", "candidates": [],
+            "active_index": 0, "is_healthy": False, "category": "nba", "logo_url": "",
+            "start_time": "", "stop_time": "", **main._scrape_lifecycle_defaults(),
+        }
+        main.stream_state["exhausted_team"]["exhausted"] = True
+        main.stream_state["mv_channel"] = {
+            "type": "multiview", "name": "Quad Box", "layout": "grid_2x2",
+            "member_team_ids": ["with_candidates", "off_season_team"],
+            "active_audio_team_id": "with_candidates",
+        }
+
+        async def exercise(tab):
+            async with _client() as client:
+                return await client.get(f"/?tab={tab}")
+
+        with patch.object(main, "DASHBOARD_PASSWORD", ""), \
+                patch.object(main, "get_catalog_entries", return_value=[]):
+            for tab in ["channels", "metrics", "performance", "playback", "alerts", "logs"]:
+                response = asyncio.run(exercise(tab))
+                self.assertEqual(response.status_code, 200, tab)
+                body = response.text
+                self.assertNotIn("{{", body, tab)
+                self.assertNotIn("{%", body, tab)
 
     def test_advanced_settings_apply_live_and_reset(self):
         async def post(data):

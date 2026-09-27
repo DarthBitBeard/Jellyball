@@ -1,0 +1,225 @@
+{% macro channel_card(channel) %}
+<div class="card channel-card" data-team-id="{{ channel.team_id }}" data-channel-name="{{ channel.name }}" data-candidate-count="{{ channel.candidates_count }}" data-active-provider="{{ channel.active_provider }}" style="margin-bottom: 0;">
+    <div style="display: flex; gap: 0.75rem; align-items: flex-start;">
+        <input type="checkbox" class="team-bulk-select" data-team-id="{{ channel.team_id }}" style="margin-top: 0.5rem; cursor: pointer;">
+        <div style="flex: 1;">
+            <div class="team-header">
+                <h4 class="team-name">{{ channel.name }}</h4>
+                <span class="badge">{{ channel.badge }}</span>
+            </div>
+            <div class="status-row" data-role="status-row">
+                <div class="dot {{ channel.dot_class }}" data-role="status-dot"></div>
+                <span data-role="status-text">{{ channel.status_text }}</span>
+                <span
+                    class="badge{{ ' badge-no-signal' if (channel.watching and channel.on_placeholder) else (' badge-watching' if channel.watching else '') }}"
+                    data-role="watching-badge"
+                    style="{{ '' if channel.watching else 'display:none;' }}"
+                >{%- if channel.watching -%}
+                        {%- if channel.on_placeholder -%}
+                            ⛔ No Signal ({{ channel.failover_count }} failover{{ '' if channel.failover_count == 1 else 's' }})
+                        {%- else -%}
+                            ▶ Watching
+                        {%- endif -%}
+                    {%- endif -%}</span>
+            </div>
+            <p class="meta-text" data-role="candidate-count">Backups: {{ channel.candidates_count }}</p>
+            {% if channel.has_candidates %}
+            <form action="/override/{{ channel.team_id }}" method="post" style="margin-top:0.75rem; display:flex; gap:0.5rem; align-items:center;">
+                <select name="candidate_index" style="flex:1; padding:0.55rem; border-radius:6px; background:var(--surface-2); color:#fff; border:1px solid var(--border-strong); font-size:0.85rem;">
+                    {% for opt in channel.candidates_options %}
+                    <option value="{{ opt.idx }}">{{ opt.label }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit" style="width:auto; padding:0.55rem 0.85rem; font-size:0.8rem; background:var(--border-strong); border:1px solid var(--border-soft);">Override</button>
+            </form>
+            {% else %}
+            <p style="font-size:0.85rem; color:var(--text-dim); margin-top:0.75rem;">No candidates available</p>
+            {% endif %}
+            <div style="display: flex; gap: 0.5rem; margin-top: 0.75rem; flex-wrap: wrap;">
+                <form action="/favorite/{{ channel.team_id }}" method="post" style="display: inline;">
+                    <button type="submit" style="width: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; background: {{ 'var(--warning)' if channel.is_favorite else 'var(--surface-3)' }}; border: 1px solid var(--border-strong);">{{ '⭐ Favorited' if channel.is_favorite else '☆ Favorite' }}</button>
+                </form>
+                <form action="/rescrape/{{ channel.team_id }}" method="post" style="display: inline;">
+                    <button type="submit" style="width: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; background: var(--surface-3); border: 1px solid var(--border-strong);">🔄 Rescrape</button>
+                </form>
+                <button type="button" onclick="testTeamStream('{{ channel.team_id }}')" style="width: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; background: var(--surface-3); border: 1px solid var(--border-strong); color: var(--text-soft); border-radius: 6px; cursor: pointer;">🧪 Test Stream</button>
+                <form action="/remove_team/{{ channel.team_id }}" method="post" style="display: inline;" onsubmit="return confirm('{{ channel.remove_label }} {{ channel.name }}?')">
+                    <button class="btn-danger" type="submit" style="width: auto; padding: 0.5rem 0.75rem; margin-top: 0; font-size: 0.8rem;">{{ channel.remove_label }}</button>
+                </form>
+            </div>
+            <p data-role="test-result" style="font-size: 0.8rem; margin: 0.5rem 0 0; min-height: 1.1em;"></p>
+            <details style="margin-top: 0.5rem;">
+                <summary style="font-size: 0.8rem; color: var(--text-muted); cursor: pointer;">⏰ Schedule auto-disable</summary>
+                <form action="/team/{{ channel.team_id }}/schedule-disable" method="post" style="display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem;">
+                    <input type="date" name="disable_date" value="{{ channel.auto_disable_after }}" style="flex: 1; padding: 0.5rem; border-radius: 6px; background: var(--surface-2); color: #fff; border: 1px solid var(--border-strong); font-size: 0.8rem;">
+                    <button type="submit" style="width: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; background: var(--surface-3); border: 1px solid var(--border-strong);">Save</button>
+                </form>
+            </details>
+        </div>
+    </div>
+</div>
+{% endmacro %}
+
+{% if channels_empty %}
+<div class="card first-run-banner">
+    <h3 style="margin-top:0;">👋 Welcome to Jellyball</h3>
+    <p class="hint-text">No channels are enabled yet. Pick teams or always-live sports channels from the <a href="#catalog-section" onclick="document.getElementById('catalog-filter').focus();">Sports Catalog</a> below to get started.</p>
+    <div class="feed-box">
+        <div class="feed-item"><label>M3U Tuner Playlist URL (Click to copy)</label><input type="text" readonly value="{{ base_url }}/playlist.m3u" onclick="copyToClipboard(this.value, 'Playlist URL copied!')" aria-label="Copy M3U playlist URL"></div>
+        <div class="feed-item"><label>XMLTV EPG Guide URL (Click to copy)</label><input type="text" readonly value="{{ base_url }}/epg.xml" onclick="copyToClipboard(this.value, 'EPG URL copied!')" aria-label="Copy XMLTV EPG URL"></div>
+    </div>
+    {% if auth_mode == 'open' %}
+    <p class="hint-text">🔓 The dashboard has no password set, so it only accepts connections from this computer (local-only access).</p>
+    {% elif auth_mode == 'generated' %}
+    <p class="hint-text">🔒 A password was generated for you automatically. Find it in <code>{{ dashboard_password_file }}</code>.</p>
+    {% endif %}
+</div>
+{% endif %}
+<div class="card" style="border-color: var(--accent); background: linear-gradient(180deg, var(--card-bg) 0%, var(--surface-1) 100%);">
+    <h3 style="color: var(--accent-text); margin-bottom: 0.5rem;">Jellyfin Integration Endpoints</h3>
+    <div class="feed-box">
+        <div class="feed-item"><label>M3U Tuner Playlist URL (Click to copy)</label><input type="text" readonly value="{{ base_url }}/playlist.m3u" onclick="copyToClipboard(this.value, 'Playlist URL copied!')" aria-label="Copy M3U playlist URL"></div>
+        <div class="feed-item"><label>XMLTV EPG Guide URL (Click to copy)</label><input type="text" readonly value="{{ base_url }}/epg.xml" onclick="copyToClipboard(this.value, 'EPG URL copied!')" aria-label="Copy XMLTV EPG URL"></div>
+    </div>
+</div>
+<div class="card catalog-card" id="catalog-section">
+    <h3>Sports Catalog</h3>
+    <p class="hint-text">Turn on exact teams or always-live sports channels. Disabled entries are not scraped and do not appear in the Jellyfin playlist.</p>
+    <p class="hint-text">{{ catalog_source_text }} Available entries: {{ catalog_entries_count }}. Select as many entries as needed, then apply them together.</p>
+    <form action="/catalog/apply" method="post" id="catalog-form">
+        <input id="catalog-filter" class="catalog-filter" type="text" placeholder="Filter teams and channels..." oninput="filterCatalog(this.value)">
+        <div class="catalog-list">
+            {% for group in catalog_groups %}
+            <details class="catalog-group">
+                <summary><span>{{ group.label }}</span><span class="badge">{{ group.entries|length }} available</span></summary>
+                <div class="catalog-grid">
+                    {% for entry in group.entries %}
+                    <div class="catalog-item" data-catalog-name="{{ entry.name }}">
+                        <label class="catalog-toggle">
+                            <input type="checkbox" name="catalog_keys" value="{{ entry.catalog_key }}" {{ 'checked' if entry.checked else '' }} onchange="updateCatalogSelectionCount()" aria-label="Enable {{ entry.name }}">
+                            <span class="catalog-name">{{ entry.name }}</span>
+                            {% if entry.always_live %}<span class="badge catalog-live-badge">Always live</span>{% endif %}
+                        </label>
+                    </div>
+                    {% endfor %}
+                </div>
+            </details>
+            {% endfor %}
+        </div>
+        <div class="catalog-actions">
+            <button type="submit">Apply Selected Teams</button>
+            <span class="catalog-selection-count" id="catalog-selection-count">Selected: {{ active_catalog_count }}</span>
+        </div>
+    </form>
+</div>
+<div class="card" style="background: var(--accent-card-bg); border-color: var(--accent);">
+    <div style="display: flex; justify-content: space-between; align-items: center; gap: 1rem;">
+        <div>
+            <h3 style="margin-top: 0; margin-bottom: 0.25rem;">🔄 Bulk Provider Override</h3>
+            <p class="hint-text" style="margin: 0;">Temporarily force all active streams to use a specific provider.</p>
+        </div>
+        <select id="global-provider-override" style="padding: 0.65rem; border-radius: 6px; background: var(--surface-2); color: #fff; border: 1px solid var(--border-strong); font-size: 0.9rem; min-width: 180px; cursor: pointer;">
+            <option value="">No Override (Auto)</option>
+            <option value="iSportSurge">iSportSurge</option>
+            <option value="MyBuffStreams">MyBuffStreams</option>
+            <option value="MethStreams">MethStreams</option>
+            <option value="StreamEast">StreamEast</option>
+            <option value="Footybite">Footybite</option>
+            <option value="1Stream">1Stream</option>
+            <option value="Streamed">Streamed</option>
+            <option value="TopStreams">TopStreams</option>
+            <option value="TheTVApp">TheTVApp</option>
+            <option value="DaddyLive">DaddyLive</option>
+        </select>
+    </div>
+</div>
+<div id="channels-changed-notice" class="channels-changed-notice" onclick="window.location.reload()">Channels changed — click to refresh</div>
+{% if not channels_empty %}
+<input id="channel-filter" class="channel-filter" type="text" placeholder="Filter your channels..." oninput="filterChannels(this.value)" aria-label="Filter enabled channels">
+{% endif %}
+<div class="team-grid">
+    {% if channels_empty %}
+    <div class="card" style="grid-column: 1 / -1; text-align: center; color: var(--text-muted); padding: 3rem;">No channels enabled. Select entries from the catalog above.</div>
+    {% else %}
+    <form id="bulk-actions-form" style="display: none;"><input type="hidden" id="bulk-team-ids" name="team_ids" value=""></form>
+    <div class="card" style="background: var(--accent-card-bg); border-color: var(--accent);">
+        <h3 style="margin-top: 0;">🎛️ Bulk Team Management</h3>
+        <p class="hint-text">Select multiple teams to perform actions on them at once.</p>
+        <div style="display: flex; gap: 0.75rem; flex-wrap: wrap;">
+            <button type="button" onclick="selectAllTeams()" style="width: auto; padding: 0.7rem 1rem; background: var(--surface-3); border: 1px solid var(--border-strong); color: var(--text-soft); border-radius: 6px; cursor: pointer; font-weight: 600;">☑️ Select All</button>
+            <button type="button" onclick="deselectAllTeams()" style="width: auto; padding: 0.7rem 1rem; background: var(--surface-3); border: 1px solid var(--border-strong); color: var(--text-soft); border-radius: 6px; cursor: pointer; font-weight: 600;">☐ Deselect All</button>
+            <button type="button" onclick="bulkFavorite()" style="width: auto; padding: 0.7rem 1rem; background: var(--warning); border: 1px solid var(--warning-border); color: #000; border-radius: 6px; cursor: pointer; font-weight: 600;">⭐ Favorite</button>
+            <button type="button" onclick="bulkUnfavorite()" style="width: auto; padding: 0.7rem 1rem; background: var(--surface-3); border: 1px solid var(--border-strong); color: var(--text-soft); border-radius: 6px; cursor: pointer; font-weight: 600;">☆ Unfavorite</button>
+            <button type="button" onclick="bulkRemove()" style="width: auto; padding: 0.7rem 1rem; background: var(--danger); border: 1px solid var(--danger-border); color: #fff; border-radius: 6px; cursor: pointer; font-weight: 600;">🗑️ Remove</button>
+        </div>
+    </div>
+    <div class="card" style="background: var(--accent-card-bg); border-color: var(--accent);">
+        <h3 style="margin-top: 0;">🖼️ Multi-View Channels</h3>
+        <p class="hint-text">Composite 2 or 4 existing channels into one grid feed using server-side ffmpeg transcoding.</p>
+        {% if not multiview.ffmpeg_available %}
+        <p class="hint-text" style="color:var(--danger-text);">⚠️ ffmpeg was not found at FFMPEG_PATH="{{ multiview.ffmpeg_path }}". Install ffmpeg and restart Jellyball to enable Multi-View channels.</p>
+        {% elif not multiview.checkbox_list %}
+        <p class="hint-text">Add at least two channels above before creating a Multi-View.</p>
+        {% else %}
+        <form action="/multiview/create" method="post" onsubmit="return updateMultiviewTeamIds()">
+            <div style="max-height: 180px; overflow-y: auto; border: 1px solid var(--border-strong); border-radius: 6px; padding: 0.5rem; margin-bottom: 0.75rem;">
+                {% for member in multiview.checkbox_list %}
+                <label style="display:flex; align-items:center; gap:0.5rem; padding:0.25rem 0; font-size:0.85rem;">
+                    <input type="checkbox" class="multiview-member-select" data-team-id="{{ member.team_id }}">{{ member.name }}</label>
+                {% endfor %}
+            </div>
+            <input type="hidden" id="multiview-team-ids" name="member_team_ids" value="">
+            <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center;">
+                <input type="text" name="name" placeholder="Channel name (e.g. NFL Sunday Quad-Box)" required style="flex: 1; min-width: 220px;">
+                <select name="layout" style="padding: 0.6rem; border-radius: 6px; background:var(--surface-2); color:#fff; border:1px solid var(--border-strong);">
+                    <option value="grid_2x2">2x2 Grid (4 channels)</option>
+                    <option value="side_by_side_2">Side-by-Side (2 channels)</option>
+                </select>
+                <button type="submit" style="width: auto; padding: 0.6rem 1rem;">➕ Create Multi-View</button>
+            </div>
+        </form>
+        {% endif %}
+    </div>
+    {% for mv in multiview.rows %}
+    <div class="card multiview-card" data-team-id="{{ mv.mv_id }}" style="margin-bottom: 0.75rem;">
+        <div class="team-header">
+            <h4 class="team-name">{{ mv.name }}</h4>
+            <span class="badge">{{ mv.layout }}</span>
+        </div>
+        <p class="meta-text"><span data-role="mv-status">{{ mv.status }}</span> &middot; Members: {{ mv.member_names }}</p>
+        <div data-role="mv-failure">
+            {% if mv.failure %}
+            <p class="meta-text" style="color:var(--danger-text);">⚠️ {{ mv.failure.last_error }} (failed {{ mv.failure.count }}x, retrying in {{ mv.failure.retry_in }}s)</p>
+            {% endif %}
+        </div>
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; align-items: center;">
+            <form action="/multiview/{{ mv.mv_id }}/set-audio" method="post" style="display:flex; gap:0.5rem; align-items:center;">
+                <select name="active_audio_team_id" style="padding:0.5rem; border-radius:6px; background:var(--surface-2); color:#fff; border:1px solid var(--border-strong); font-size:0.8rem;">
+                    {% for opt in mv.audio_options %}
+                    <option value="{{ opt.team_id }}" {{ 'selected' if opt.selected else '' }}>{{ opt.name }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit" style="width:auto; padding:0.5rem 0.75rem; font-size:0.8rem; background:var(--surface-3); border:1px solid var(--border-strong);">🔊 Set Audio</button>
+            </form>
+            <form action="/multiview/{{ mv.mv_id }}/start" method="post" style="display:inline;">
+                <button type="submit" style="width:auto; padding:0.5rem 0.75rem; font-size:0.8rem; background:var(--surface-3); border:1px solid var(--border-strong);">▶ Start</button>
+            </form>
+            <form action="/multiview/{{ mv.mv_id }}/stop" method="post" style="display:inline;">
+                <button type="submit" style="width:auto; padding:0.5rem 0.75rem; font-size:0.8rem; background:var(--surface-3); border:1px solid var(--border-strong);">⏹️ Stop</button>
+            </form>
+            <form action="/multiview/{{ mv.mv_id }}/remove" method="post" style="display:inline;" onsubmit="return confirm('Remove Multi-View {{ mv.name }}?')">
+                <button class="btn-danger" type="submit" style="width:auto; padding:0.5rem 0.75rem; margin-top:0; font-size:0.8rem;">Remove</button>
+            </form>
+        </div>
+    </div>
+    {% endfor %}
+    {% if favorites %}
+    <h3 style="margin-top: 1.5rem; margin-bottom: 0.75rem; grid-column: 1 / -1;">⭐ Your Favorites</h3>
+    {% for channel in favorites %}{{ channel_card(channel) }}{% endfor %}
+    {% endif %}
+    {% if others %}
+    <h3 style="margin-top: 1.5rem; margin-bottom: 0.75rem; grid-column: 1 / -1;">📺 All Channels</h3>
+    {% for channel in others %}{{ channel_card(channel) }}{% endfor %}
+    {% endif %}
+    {% endif %}
+</div>
