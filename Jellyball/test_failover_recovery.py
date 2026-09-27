@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import main
+import db
+import scrapers
 import state
 import config
 from datetime import datetime, timedelta, timezone
@@ -218,13 +220,13 @@ class ProviderTimeoutTests(unittest.TestCase):
     def test_failures_do_not_ratchet_the_dynamic_timeout(self):
         tmpdir = tempfile.mkdtemp()
         try:
-            with patch.object(main, "DB_FILE", os.path.join(tmpdir, "t.db")):
-                main.init_db()
+            with patch.object(db, "DB_FILE", os.path.join(tmpdir, "t.db")):
+                db.init_db()
                 for _ in range(5):
-                    main._track_provider_response_time_sync("Slow", 90000, False)
-                main._track_provider_response_time_sync("Slow", 10000, True)
-                self.assertEqual(main._dynamic_provider_timeout_sync("Slow"), 30.0)
-                self.assertEqual(main._dynamic_provider_timeout_sync("Unknown"), main.PROVIDER_TIMEOUT_DEFAULT)
+                    scrapers._track_provider_response_time_sync("Slow", 90000, False)
+                scrapers._track_provider_response_time_sync("Slow", 10000, True)
+                self.assertEqual(scrapers._dynamic_provider_timeout_sync("Slow"), 30.0)
+                self.assertEqual(scrapers._dynamic_provider_timeout_sync("Unknown"), scrapers.PROVIDER_TIMEOUT_DEFAULT)
                 closer = getattr(main, "close_all_db_connections", None)
                 if closer:
                     closer()

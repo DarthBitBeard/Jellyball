@@ -13,12 +13,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from main import (
+from scrapers import (
     ACTIVE_PROVIDERS,
     BaseProvider,
     IptvOrgScraper,
     _parse_m3u_playlist,
-    _performance_stats_sync,
     DaddyLiveScraper,
     HtmlAggregatorScraper,
     ISportSurgeScraper,
@@ -30,22 +29,30 @@ from main import (
     OneStreamScraper,
     StreamedSuScraper,
     TopStreamsScraper,
+    _is_playlist_request_url,
+    _providers_for_search,
+    _channel_term_matches,
+    _is_non_english_channel,
+    _stream_matches_requested_event,
+)
+from db import (
+    _performance_stats_sync,
+    save_multiview_channel,
+    load_multiview_channels,
+    delete_multiview_channel,
+)
+from main import (
     _catalog_selection_changes,
     _mark_scrape_finished,
     _mark_scrape_started,
-    _is_playlist_request_url,
-    _providers_for_search,
     _scrape_lifecycle_defaults,
     api_status,
     LRUChunkCache,
     _resolve_espn_team,
-    _channel_term_matches,
-    _is_non_english_channel,
     _chunk_route_for_url,
     _ensure_startup_buffer,
     _manifest_uri_is_playlist,
     _startup_media_urls,
-    _stream_matches_requested_event,
     _chunk_media_type,
     proxy_chunk,
     proxy_substream,
@@ -63,9 +70,6 @@ from main import (
     _multiview_cooldown_remaining,
     _multiview_error_from_log,
     _build_placeholder_ffmpeg_args,
-    save_multiview_channel,
-    load_multiview_channels,
-    delete_multiview_channel,
     generate_m3u,
     generate_xmltv,
     _resolve_schedule_status,
@@ -81,6 +85,8 @@ from sports_catalog import SPECIAL_CHANNELS
 import config
 import state
 import security
+import db
+import scrapers
 
 
 class JellyballChangesTests(unittest.TestCase):
@@ -565,22 +571,22 @@ class JellyballChangesTests(unittest.TestCase):
         # The playlist cache is a module-level global (refreshed at most every
         # IPTV_ORG_REFRESH_SECONDS) so other tests/runs can't leave it populated
         # and cause this test to skip the mocked fetch entirely.
-        original_cache = list(main._IPTV_ORG_CACHE)
-        original_loaded_at = main._IPTV_ORG_CACHE_LOADED_AT
-        main._IPTV_ORG_CACHE = []
-        main._IPTV_ORG_CACHE_LOADED_AT = 0.0
+        original_cache = list(scrapers._IPTV_ORG_CACHE)
+        original_loaded_at = scrapers._IPTV_ORG_CACHE_LOADED_AT
+        scrapers._IPTV_ORG_CACHE = []
+        scrapers._IPTV_ORG_CACHE_LOADED_AT = 0.0
         try:
             async def exercise():
                 scraper = IptvOrgScraper()
                 transport = httpx.MockTransport(lambda request: httpx.Response(200, text=playlist))
                 async with httpx.AsyncClient(transport=transport) as client:
-                    with patch("main.verify_stream_live", return_value=True):
+                    with patch("scrapers.verify_stream_live", return_value=True):
                         return await scraper.search(["espn"], http_client=client)
 
             results = asyncio.run(exercise())
         finally:
-            main._IPTV_ORG_CACHE = original_cache
-            main._IPTV_ORG_CACHE_LOADED_AT = original_loaded_at
+            scrapers._IPTV_ORG_CACHE = original_cache
+            scrapers._IPTV_ORG_CACHE_LOADED_AT = original_loaded_at
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["url"], "https://example.test/espn/index.m3u8")
@@ -814,8 +820,8 @@ class JellyballChangesTests(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         try:
             db_path = os.path.join(tmpdir, "test_multiview.db")
-            with patch.object(main, "DB_FILE", db_path):
-                main.init_db()
+            with patch.object(db, "DB_FILE", db_path):
+                db.init_db()
                 save_multiview_channel(
                     "mv_sunday", "NFL Sunday Quad-Box", "grid_2x2",
                     ["lions", "dolphins", "bucs", "jets"], "bucs",
@@ -847,8 +853,8 @@ class JellyballChangesTests(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         try:
             db_path = os.path.join(tmpdir, "test_perf.db")
-            with patch.object(main, "DB_FILE", db_path):
-                main.init_db()
+            with patch.object(db, "DB_FILE", db_path):
+                db.init_db()
                 conn = sqlite3.connect(db_path)
                 try:
                     # "DeadProvider": 12 failed attempts spread across the last 5 days,

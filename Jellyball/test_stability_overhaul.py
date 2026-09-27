@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import db
+import scrapers
 import security
 
 
@@ -50,7 +52,7 @@ class CandidateMergeTests(unittest.TestCase):
 
     def test_merge_respects_candidate_cap(self):
         fresh = [self._candidate("P", f"https://cdn.test/{i}.m3u8") for i in range(10)]
-        with patch.object(main, "MAX_STREAM_CANDIDATES", 3):
+        with patch.object(scrapers, "MAX_STREAM_CANDIDATES", 3):
             merged, _ = main._merge_stream_candidates([], 0, fresh, keep_active=False)
         self.assertEqual(len(merged), 3)
 
@@ -94,7 +96,7 @@ class GuideRefreshDebounceTests(unittest.IsolatedAsyncioTestCase):
 
 class MetricWriterResilienceTests(unittest.IsolatedAsyncioTestCase):
     async def test_write_failure_does_not_kill_writer(self):
-        writer = main.MetricBatchWriter(max_queue=10, batch_size=5, flush_seconds=0.01)
+        writer = db.MetricBatchWriter(max_queue=10, batch_size=5, flush_seconds=0.01)
         calls = []
 
         def failing_then_ok(items):
@@ -102,7 +104,7 @@ class MetricWriterResilienceTests(unittest.IsolatedAsyncioTestCase):
             if len(calls) == 1:
                 raise RuntimeError("database is locked")
 
-        with patch.object(main.MetricBatchWriter, "_write_batch_sync", staticmethod(failing_then_ok)):
+        with patch.object(db.MetricBatchWriter, "_write_batch_sync", staticmethod(failing_then_ok)):
             await writer.enqueue(("stream_event", ("t", "p", "e", "d"), {}))
             await asyncio.sleep(0.1)
             await writer.enqueue(("stream_event", ("t", "p", "e", "d"), {}))
