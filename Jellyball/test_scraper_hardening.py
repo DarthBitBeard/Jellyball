@@ -25,6 +25,8 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import db
+import scrapers
 import state
 from sports_matcher import get_team_search_terms
 import stream_extractor
@@ -164,13 +166,13 @@ class PlaywrightPageLifecycleTests(unittest.IsolatedAsyncioTestCase):
         Cloudflare-bypass fallback) under a real asyncio.wait_for timeout, the
         exact scenario the audit flagged: a slow page.goto() gets cancelled by
         PROVIDER_SEARCH_TIMEOUT and must not leak the context."""
-        scraper = main.ISportSurgeScraper()
+        scraper = scrapers.ISportSurgeScraper()
         browser = HangingBrowser()
 
         async def fake_fetch_bounded_text(*args, **kwargs):
             return None  # force the Playwright fallback branch
 
-        with patch.object(main, "fetch_bounded_text", fake_fetch_bounded_text):
+        with patch.object(scrapers, "fetch_bounded_text", fake_fetch_bounded_text):
             with self.assertRaises(asyncio.TimeoutError):
                 await asyncio.wait_for(
                     scraper._fetch_index_page(None, "https://isportsurge.ws/cfb/livestreams2", browser),
@@ -239,42 +241,42 @@ class FakePlaywrightClient:
 
 class BrowserRecycleTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self._orig_browser = main.SHARED_BROWSER
-        self._orig_client = main.PLAYWRIGHT_CLIENT
-        self._orig_launch_info = main._BROWSER_LAUNCH_INFO
+        self._orig_browser = scrapers.SHARED_BROWSER
+        self._orig_client = scrapers.PLAYWRIGHT_CLIENT
+        self._orig_launch_info = scrapers._BROWSER_LAUNCH_INFO
 
     async def asyncTearDown(self):
-        main.SHARED_BROWSER = self._orig_browser
-        main.PLAYWRIGHT_CLIENT = self._orig_client
-        main._BROWSER_LAUNCH_INFO = self._orig_launch_info
+        scrapers.SHARED_BROWSER = self._orig_browser
+        scrapers.PLAYWRIGHT_CLIENT = self._orig_client
+        scrapers._BROWSER_LAUNCH_INFO = self._orig_launch_info
 
     async def test_recycles_when_due_and_idle(self):
         old_browser = FakeAsyncBrowser("old")
         new_browser = FakeAsyncBrowser("new")
         chromium = FakeChromium(new_browser)
-        main.SHARED_BROWSER = old_browser
-        main.PLAYWRIGHT_CLIENT = FakePlaywrightClient(chromium)
-        main._BROWSER_LAUNCH_INFO = (id(old_browser), time.monotonic() - 7 * 3600)
+        scrapers.SHARED_BROWSER = old_browser
+        scrapers.PLAYWRIGHT_CLIENT = FakePlaywrightClient(chromium)
+        scrapers._BROWSER_LAUNCH_INFO = (id(old_browser), time.monotonic() - 7 * 3600)
 
-        with patch.object(main, "PLAYWRIGHT_RECYCLE_HOURS", 6.0), \
-             patch.object(main, "playwright_pages_in_use", lambda: 0):
-            result = await main.get_healthy_browser()
+        with patch.object(scrapers, "PLAYWRIGHT_RECYCLE_HOURS", 6.0), \
+             patch.object(scrapers, "playwright_pages_in_use", lambda: 0):
+            result = await scrapers.get_healthy_browser()
 
         self.assertIs(result, new_browser)
         self.assertTrue(old_browser.closed)
         self.assertEqual(chromium.launch_calls, 1)
-        self.assertIs(main.SHARED_BROWSER, new_browser)
+        self.assertIs(scrapers.SHARED_BROWSER, new_browser)
 
     async def test_skips_recycle_while_pages_are_in_use(self):
         old_browser = FakeAsyncBrowser("old")
         chromium = FakeChromium(FakeAsyncBrowser("unused"))
-        main.SHARED_BROWSER = old_browser
-        main.PLAYWRIGHT_CLIENT = FakePlaywrightClient(chromium)
-        main._BROWSER_LAUNCH_INFO = (id(old_browser), time.monotonic() - 7 * 3600)
+        scrapers.SHARED_BROWSER = old_browser
+        scrapers.PLAYWRIGHT_CLIENT = FakePlaywrightClient(chromium)
+        scrapers._BROWSER_LAUNCH_INFO = (id(old_browser), time.monotonic() - 7 * 3600)
 
-        with patch.object(main, "PLAYWRIGHT_RECYCLE_HOURS", 6.0), \
-             patch.object(main, "playwright_pages_in_use", lambda: 1):
-            result = await main.get_healthy_browser()
+        with patch.object(scrapers, "PLAYWRIGHT_RECYCLE_HOURS", 6.0), \
+             patch.object(scrapers, "playwright_pages_in_use", lambda: 1):
+            result = await scrapers.get_healthy_browser()
 
         self.assertIs(result, old_browser)
         self.assertFalse(old_browser.closed)
@@ -283,13 +285,13 @@ class BrowserRecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_recycle_before_due(self):
         old_browser = FakeAsyncBrowser("old")
         chromium = FakeChromium(FakeAsyncBrowser("unused"))
-        main.SHARED_BROWSER = old_browser
-        main.PLAYWRIGHT_CLIENT = FakePlaywrightClient(chromium)
-        main._BROWSER_LAUNCH_INFO = (id(old_browser), time.monotonic())
+        scrapers.SHARED_BROWSER = old_browser
+        scrapers.PLAYWRIGHT_CLIENT = FakePlaywrightClient(chromium)
+        scrapers._BROWSER_LAUNCH_INFO = (id(old_browser), time.monotonic())
 
-        with patch.object(main, "PLAYWRIGHT_RECYCLE_HOURS", 6.0), \
-             patch.object(main, "playwright_pages_in_use", lambda: 0):
-            result = await main.get_healthy_browser()
+        with patch.object(scrapers, "PLAYWRIGHT_RECYCLE_HOURS", 6.0), \
+             patch.object(scrapers, "playwright_pages_in_use", lambda: 0):
+            result = await scrapers.get_healthy_browser()
 
         self.assertIs(result, old_browser)
         self.assertFalse(old_browser.closed)
@@ -298,13 +300,13 @@ class BrowserRecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_recycle_disabled_when_hours_is_zero(self):
         old_browser = FakeAsyncBrowser("old")
         chromium = FakeChromium(FakeAsyncBrowser("unused"))
-        main.SHARED_BROWSER = old_browser
-        main.PLAYWRIGHT_CLIENT = FakePlaywrightClient(chromium)
-        main._BROWSER_LAUNCH_INFO = (id(old_browser), time.monotonic() - 1000 * 3600)
+        scrapers.SHARED_BROWSER = old_browser
+        scrapers.PLAYWRIGHT_CLIENT = FakePlaywrightClient(chromium)
+        scrapers._BROWSER_LAUNCH_INFO = (id(old_browser), time.monotonic() - 1000 * 3600)
 
-        with patch.object(main, "PLAYWRIGHT_RECYCLE_HOURS", 0.0), \
-             patch.object(main, "playwright_pages_in_use", lambda: 0):
-            result = await main.get_healthy_browser()
+        with patch.object(scrapers, "PLAYWRIGHT_RECYCLE_HOURS", 0.0), \
+             patch.object(scrapers, "playwright_pages_in_use", lambda: 0):
+            result = await scrapers.get_healthy_browser()
 
         self.assertIs(result, old_browser)
         self.assertFalse(old_browser.closed)
@@ -315,12 +317,12 @@ class BrowserRecycleTests(unittest.IsolatedAsyncioTestCase):
 # --------------------------------------------------------------------------- #
 class IndexCacheTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        main._SCRAPE_INDEX_CACHE.clear()
-        main._SCRAPE_INDEX_INFLIGHT.clear()
+        scrapers._SCRAPE_INDEX_CACHE.clear()
+        scrapers._SCRAPE_INDEX_INFLIGHT.clear()
 
     async def asyncTearDown(self):
-        main._SCRAPE_INDEX_CACHE.clear()
-        main._SCRAPE_INDEX_INFLIGHT.clear()
+        scrapers._SCRAPE_INDEX_CACHE.clear()
+        scrapers._SCRAPE_INDEX_INFLIGHT.clear()
 
     async def test_cache_hit_avoids_refetch(self):
         calls = 0
@@ -330,10 +332,10 @@ class IndexCacheTests(unittest.IsolatedAsyncioTestCase):
             calls += 1
             return "<html>ok</html>"
 
-        with patch.object(main, "SCRAPE_INDEX_CACHE_SECONDS", 60.0), \
-             patch.object(main, "_SCRAPE_INDEX_FAILURE_CACHE_SECONDS", 5.0):
-            first = await main._get_cached_index_html("https://example.test/idx1", fetcher)
-            second = await main._get_cached_index_html("https://example.test/idx1", fetcher)
+        with patch.object(scrapers, "SCRAPE_INDEX_CACHE_SECONDS", 60.0), \
+             patch.object(scrapers, "_SCRAPE_INDEX_FAILURE_CACHE_SECONDS", 5.0):
+            first = await scrapers._get_cached_index_html("https://example.test/idx1", fetcher)
+            second = await scrapers._get_cached_index_html("https://example.test/idx1", fetcher)
 
         self.assertEqual(first, "<html>ok</html>")
         self.assertEqual(second, "<html>ok</html>")
@@ -347,11 +349,11 @@ class IndexCacheTests(unittest.IsolatedAsyncioTestCase):
             calls += 1
             return f"<html>{calls}</html>"
 
-        with patch.object(main, "SCRAPE_INDEX_CACHE_SECONDS", 0.01), \
-             patch.object(main, "_SCRAPE_INDEX_FAILURE_CACHE_SECONDS", 0.01):
-            first = await main._get_cached_index_html("https://example.test/idx2", fetcher)
+        with patch.object(scrapers, "SCRAPE_INDEX_CACHE_SECONDS", 0.01), \
+             patch.object(scrapers, "_SCRAPE_INDEX_FAILURE_CACHE_SECONDS", 0.01):
+            first = await scrapers._get_cached_index_html("https://example.test/idx2", fetcher)
             await asyncio.sleep(0.05)
-            second = await main._get_cached_index_html("https://example.test/idx2", fetcher)
+            second = await scrapers._get_cached_index_html("https://example.test/idx2", fetcher)
 
         self.assertEqual(calls, 2)
         self.assertNotEqual(first, second)
@@ -367,11 +369,11 @@ class IndexCacheTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
             return "<html>shared</html>"
 
-        with patch.object(main, "SCRAPE_INDEX_CACHE_SECONDS", 60.0):
+        with patch.object(scrapers, "SCRAPE_INDEX_CACHE_SECONDS", 60.0):
             results = await asyncio.gather(
-                main._get_cached_index_html("https://example.test/idx3", fetcher),
-                main._get_cached_index_html("https://example.test/idx3", fetcher),
-                main._get_cached_index_html("https://example.test/idx3", fetcher),
+                scrapers._get_cached_index_html("https://example.test/idx3", fetcher),
+                scrapers._get_cached_index_html("https://example.test/idx3", fetcher),
+                scrapers._get_cached_index_html("https://example.test/idx3", fetcher),
             )
 
         self.assertEqual(calls, 1)
@@ -385,12 +387,12 @@ class IndexCacheTests(unittest.IsolatedAsyncioTestCase):
             calls += 1
             return None
 
-        with patch.object(main, "SCRAPE_INDEX_CACHE_SECONDS", 60.0), \
-             patch.object(main, "_SCRAPE_INDEX_FAILURE_CACHE_SECONDS", 0.01):
-            first = await main._get_cached_index_html("https://example.test/idx4", fetcher)
-            second = await main._get_cached_index_html("https://example.test/idx4", fetcher)
+        with patch.object(scrapers, "SCRAPE_INDEX_CACHE_SECONDS", 60.0), \
+             patch.object(scrapers, "_SCRAPE_INDEX_FAILURE_CACHE_SECONDS", 0.01):
+            first = await scrapers._get_cached_index_html("https://example.test/idx4", fetcher)
+            second = await scrapers._get_cached_index_html("https://example.test/idx4", fetcher)
             await asyncio.sleep(0.05)
-            third = await main._get_cached_index_html("https://example.test/idx4", fetcher)
+            third = await scrapers._get_cached_index_html("https://example.test/idx4", fetcher)
 
         self.assertIsNone(first)
         self.assertIsNone(second)
@@ -401,13 +403,13 @@ class IndexCacheTests(unittest.IsolatedAsyncioTestCase):
         async def fetcher():
             return "<html>x</html>"
 
-        with patch.object(main, "SCRAPE_INDEX_CACHE_SECONDS", 60.0), \
-             patch.object(main, "_SCRAPE_INDEX_CACHE_MAX_ENTRIES", 2):
-            await main._get_cached_index_html("https://example.test/a", fetcher)
-            await main._get_cached_index_html("https://example.test/b", fetcher)
-            await main._get_cached_index_html("https://example.test/c", fetcher)
+        with patch.object(scrapers, "SCRAPE_INDEX_CACHE_SECONDS", 60.0), \
+             patch.object(scrapers, "_SCRAPE_INDEX_CACHE_MAX_ENTRIES", 2):
+            await scrapers._get_cached_index_html("https://example.test/a", fetcher)
+            await scrapers._get_cached_index_html("https://example.test/b", fetcher)
+            await scrapers._get_cached_index_html("https://example.test/c", fetcher)
 
-        self.assertLessEqual(len(main._SCRAPE_INDEX_CACHE), 2)
+        self.assertLessEqual(len(scrapers._SCRAPE_INDEX_CACHE), 2)
 
 
 # --------------------------------------------------------------------------- #
@@ -417,7 +419,7 @@ class IndexCacheTests(unittest.IsolatedAsyncioTestCase):
 # --------------------------------------------------------------------------- #
 class ParseHelperRegressionTests(unittest.TestCase):
     def test_html_aggregator_parses_matching_anchor(self):
-        scraper = main.HtmlAggregatorScraper("TestAgg", "https://agg.example.test", ["/cfb"], ["/watch/"])
+        scraper = scrapers.HtmlAggregatorScraper("TestAgg", "https://agg.example.test", ["/cfb"], ["/watch/"])
         page_url = "https://agg.example.test/cfb"
         # Each anchor sits in its own wrapping <div>, like real aggregator
         # cards, so _anchor_context()'s parent-text fallback doesn't bleed
@@ -440,17 +442,17 @@ class ParseHelperRegressionTests(unittest.TestCase):
         self.assertEqual(len(matches), 1)
 
     def test_html_aggregator_respects_cumulative_event_cutoff(self):
-        scraper = main.HtmlAggregatorScraper("TestAgg", "https://agg.example.test", ["/cfb"], ["/watch/"])
+        scraper = scrapers.HtmlAggregatorScraper("TestAgg", "https://agg.example.test", ["/cfb"], ["/watch/"])
         html = "".join(f"<a href='/watch/game-{i}'>Florida Gators vs Team {i}</a>" for i in range(10))
         search_terms = get_team_search_terms("Florida Gators", "Florida Gators")
         matches = []
         seen = set()
-        with patch.object(main, "MAX_PROVIDER_EVENTS", 3):
+        with patch.object(scrapers, "MAX_PROVIDER_EVENTS", 3):
             scraper._parse_matches_from_html(html, "https://agg.example.test/cfb", search_terms, matches, seen)
         self.assertEqual(len(matches), 3)
 
     def test_thetvapp_finds_most_specific_channel(self):
-        scraper = main.TheTVAppScraper()
+        scraper = scrapers.TheTVAppScraper()
         html = (
             "<div><a href='/watch/espn'>ESPN</a></div>"
             "<div><a href='/watch/espn2'>ESPN2</a></div>"
@@ -468,7 +470,7 @@ class ParseHelperRegressionTests(unittest.TestCase):
         self.assertEqual(set(best_title.split()), {"ESPN"})
 
     def test_daddylive_filters_non_english_and_matches_channel(self):
-        scraper = main.DaddyLiveScraper()
+        scraper = scrapers.DaddyLiveScraper()
         page_url = urllib.parse.urljoin(scraper.base_url, "/24-7-channels.php")
         html = (
             "<a href='watch.php?id=1' data-title='ESPN USA'>ESPN USA</a>"
@@ -513,16 +515,16 @@ class StreamExtractorParseHelperTests(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class ProviderPriorityAsyncTests(unittest.IsolatedAsyncioTestCase):
     def test_is_a_coroutine_function(self):
-        self.assertTrue(asyncio.iscoroutinefunction(main._get_active_provider_priority))
+        self.assertTrue(asyncio.iscoroutinefunction(scrapers._get_active_provider_priority))
 
     async def test_default_priority_reads_via_async_wrapper(self):
         tmpdir = tempfile.mkdtemp()
         try:
             db_path = os.path.join(tmpdir, "test_priority.db")
-            with patch.object(main, "DB_FILE", db_path):
-                main.init_db()
-                result = await main._get_active_provider_priority()
-            self.assertEqual(result, main._provider_priority)
+            with patch.object(db, "DB_FILE", db_path):
+                db.init_db()
+                result = await scrapers._get_active_provider_priority()
+            self.assertEqual(result, scrapers._provider_priority)
         finally:
             gc.collect()
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -531,11 +533,11 @@ class ProviderPriorityAsyncTests(unittest.IsolatedAsyncioTestCase):
         tmpdir = tempfile.mkdtemp()
         try:
             db_path = os.path.join(tmpdir, "test_priority_rotate.db")
-            with patch.object(main, "DB_FILE", db_path):
-                main.init_db()
-                main.set_setting("provider_rotation_mode", "1")
-                result = await main._get_active_provider_priority()
-            names = {p.name for p in main.ACTIVE_PROVIDERS}
+            with patch.object(db, "DB_FILE", db_path):
+                db.init_db()
+                db.set_setting("provider_rotation_mode", "1")
+                result = await scrapers._get_active_provider_priority()
+            names = {p.name for p in scrapers.ACTIVE_PROVIDERS}
             self.assertEqual(set(result.keys()), names)
         finally:
             gc.collect()
@@ -559,34 +561,34 @@ class FakeCappingProvider:
                 "referer": "",
                 "origin": "",
             }
-            for i in range(main.MAX_STREAM_CANDIDATES + 10)
+            for i in range(scrapers.MAX_STREAM_CANDIDATES + 10)
         ]
 
 
 class CandidateCapTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        main._PROVIDER_BREAKERS.pop(FakeCappingProvider.name, None)
+        scrapers._PROVIDER_BREAKERS.pop(FakeCappingProvider.name, None)
 
     async def asyncTearDown(self):
-        main._PROVIDER_BREAKERS.pop(FakeCappingProvider.name, None)
+        scrapers._PROVIDER_BREAKERS.pop(FakeCappingProvider.name, None)
 
     async def test_master_scrape_caps_candidates(self):
         tmpdir = tempfile.mkdtemp()
         try:
             db_path = os.path.join(tmpdir, "test_cap.db")
-            with patch.object(main, "DB_FILE", db_path):
-                main.init_db()
+            with patch.object(db, "DB_FILE", db_path):
+                db.init_db()
                 provider = FakeCappingProvider()
-                with patch.object(main, "_providers_for_search", lambda always_live=False: [provider]), \
-                     patch.object(main, "get_healthy_browser", AsyncMock(return_value=None)), \
+                with patch.object(scrapers, "_providers_for_search", lambda always_live=False: [provider]), \
+                     patch.object(scrapers, "get_healthy_browser", AsyncMock(return_value=None)), \
                      patch.object(state, "SHARED_HTTP_CLIENT", None):
-                    result = await main.master_scrape(
+                    result = await scrapers.master_scrape(
                         "Test Team", team_name="Test Team", team_id="test_team", always_live=True
                     )
             # More than MAX_STREAM_CANDIDATES unique URLs were returned by the
             # provider; master_scrape must trim them itself rather than rely on
             # a downstream merge step to do it.
-            self.assertEqual(len(result), main.MAX_STREAM_CANDIDATES)
+            self.assertEqual(len(result), scrapers.MAX_STREAM_CANDIDATES)
         finally:
             gc.collect()
             shutil.rmtree(tmpdir, ignore_errors=True)

@@ -33,6 +33,8 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import db
+import scrapers
 import security
 import threading
 import stream_extractor
@@ -99,12 +101,12 @@ class _TempDbCase(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp()
         self._db_path = os.path.join(self._tmpdir, "test.db")
-        self._db_patch = patch.object(main, "DB_FILE", self._db_path)
+        self._db_patch = patch.object(db, "DB_FILE", self._db_path)
         self._db_patch.start()
 
     def tearDown(self):
         self._db_patch.stop()
-        main.close_all_db_connections()
+        db.close_all_db_connections()
         gc.collect()
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
@@ -114,11 +116,11 @@ class _ProviderOverrideCase(unittest.TestCase):
     global state across the whole test process (and across test files)."""
 
     def setUp(self):
-        self._overrides_snapshot = dict(main._PROVIDER_BASE_URL_OVERRIDES)
+        self._overrides_snapshot = dict(scrapers._PROVIDER_BASE_URL_OVERRIDES)
 
     def tearDown(self):
-        main._PROVIDER_BASE_URL_OVERRIDES.clear()
-        main._PROVIDER_BASE_URL_OVERRIDES.update(self._overrides_snapshot)
+        scrapers._PROVIDER_BASE_URL_OVERRIDES.clear()
+        scrapers._PROVIDER_BASE_URL_OVERRIDES.update(self._overrides_snapshot)
 
 
 # --------------------------------------------------------------------------- #
@@ -126,31 +128,31 @@ class _ProviderOverrideCase(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class ProviderUrlOverrideTests(_ProviderOverrideCase):
     def _provider(self):
-        for provider in main.ACTIVE_PROVIDERS:
-            if isinstance(provider, main.HtmlAggregatorScraper):
+        for provider in scrapers.ACTIVE_PROVIDERS:
+            if isinstance(provider, scrapers.HtmlAggregatorScraper):
                 return provider
         raise AssertionError("no HtmlAggregatorScraper in ACTIVE_PROVIDERS")
 
     def test_defaults_to_env_url_with_no_override(self):
         provider = self._provider()
-        main._PROVIDER_BASE_URL_OVERRIDES.pop(provider.name, None)
+        scrapers._PROVIDER_BASE_URL_OVERRIDES.pop(provider.name, None)
         self.assertEqual(provider.base_url, provider._default_base_url)
 
     def test_set_override_applies_live(self):
         provider = self._provider()
-        main._set_provider_url_override(provider, "https://overridden.example.test")
+        scrapers._set_provider_url_override(provider, "https://overridden.example.test")
         self.assertEqual(provider.base_url, "https://overridden.example.test")
 
     def test_blank_override_resets_to_default(self):
         provider = self._provider()
-        main._set_provider_url_override(provider, "https://overridden.example.test")
-        main._set_provider_url_override(provider, "")
+        scrapers._set_provider_url_override(provider, "https://overridden.example.test")
+        scrapers._set_provider_url_override(provider, "")
         self.assertEqual(provider.base_url, provider._default_base_url)
 
     def test_get_scan_urls_reflects_override_without_reconstruction(self):
         provider = self._provider()
         original_scan_urls = provider.get_scan_urls()
-        main._set_provider_url_override(provider, "https://overridden.example.test")
+        scrapers._set_provider_url_override(provider, "https://overridden.example.test")
         new_scan_urls = provider.get_scan_urls()
         self.assertNotEqual(original_scan_urls, new_scan_urls)
         self.assertTrue(new_scan_urls[0].startswith("https://overridden.example.test"))
@@ -160,28 +162,28 @@ class ProviderUrlOverrideTests(_ProviderOverrideCase):
         old_base = provider.base_url
         stale_key = f"{old_base}/some/page"
         other_key = "https://totally-unrelated.example.test/page"
-        main._SCRAPE_INDEX_CACHE[stale_key] = (1e18, "<html>stale</html>")
-        main._SCRAPE_INDEX_CACHE[other_key] = (1e18, "<html>unrelated</html>")
+        scrapers._SCRAPE_INDEX_CACHE[stale_key] = (1e18, "<html>stale</html>")
+        scrapers._SCRAPE_INDEX_CACHE[other_key] = (1e18, "<html>unrelated</html>")
         try:
-            main._set_provider_url_override(provider, "https://new-domain.example.test")
-            self.assertNotIn(stale_key, main._SCRAPE_INDEX_CACHE)
-            self.assertIn(other_key, main._SCRAPE_INDEX_CACHE)
+            scrapers._set_provider_url_override(provider, "https://new-domain.example.test")
+            self.assertNotIn(stale_key, scrapers._SCRAPE_INDEX_CACHE)
+            self.assertIn(other_key, scrapers._SCRAPE_INDEX_CACHE)
         finally:
-            main._SCRAPE_INDEX_CACHE.pop(stale_key, None)
-            main._SCRAPE_INDEX_CACHE.pop(other_key, None)
+            scrapers._SCRAPE_INDEX_CACHE.pop(stale_key, None)
+            scrapers._SCRAPE_INDEX_CACHE.pop(other_key, None)
 
     def test_load_provider_url_overrides_reads_from_db(self):
         provider = self._provider()
         tmpdir = tempfile.mkdtemp()
         try:
             db_path = os.path.join(tmpdir, "test_overrides.db")
-            with patch.object(main, "DB_FILE", db_path):
-                main.init_db()
-                main.set_setting(main._provider_url_setting_key(provider.name), "https://from-db.example.test")
-                main._load_provider_url_overrides()
+            with patch.object(db, "DB_FILE", db_path):
+                db.init_db()
+                db.set_setting(scrapers._provider_url_setting_key(provider.name), "https://from-db.example.test")
+                scrapers._load_provider_url_overrides()
                 self.assertEqual(provider.base_url, "https://from-db.example.test")
         finally:
-            main.close_all_db_connections()
+            db.close_all_db_connections()
             gc.collect()
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -191,15 +193,15 @@ class ProviderUrlOverrideTests(_ProviderOverrideCase):
         keeps tests (and successive real starts against different DBs)
         isolated from each other."""
         provider = self._provider()
-        main._PROVIDER_BASE_URL_OVERRIDES[provider.name] = "https://leftover.example.test"
+        scrapers._PROVIDER_BASE_URL_OVERRIDES[provider.name] = "https://leftover.example.test"
         tmpdir = tempfile.mkdtemp()
         try:
             db_path = os.path.join(tmpdir, "fresh.db")
-            with patch.object(main, "DB_FILE", db_path):
-                main.init_db()  # calls _load_provider_url_overrides() itself
+            with patch.object(db, "DB_FILE", db_path):
+                db.init_db()  # calls _load_provider_url_overrides() itself
             self.assertEqual(provider.base_url, provider._default_base_url)
         finally:
-            main.close_all_db_connections()
+            db.close_all_db_connections()
             gc.collect()
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -219,11 +221,11 @@ class ProviderSettingsRouteTests(_TempDbCase, _ProviderOverrideCase):
     def setUp(self):
         _TempDbCase.setUp(self)
         _ProviderOverrideCase.setUp(self)
-        main.init_db()
+        db.init_db()
         self._password_patch = patch.object(security, "DASHBOARD_PASSWORD", "")
         self._password_patch.start()
         self._provider = next(
-            p for p in main.ACTIVE_PROVIDERS if isinstance(p, main.HtmlAggregatorScraper)
+            p for p in scrapers.ACTIVE_PROVIDERS if isinstance(p, scrapers.HtmlAggregatorScraper)
         )
 
     def tearDown(self):
@@ -244,7 +246,7 @@ class ProviderSettingsRouteTests(_TempDbCase, _ProviderOverrideCase):
         self.assertIn("providers_saved", response.headers["location"])
         self.assertEqual(self._provider.base_url, "https://new-domain.example.test")
         self.assertEqual(
-            main.get_setting(main._provider_url_setting_key(self._provider.name)),
+            db.get_setting(scrapers._provider_url_setting_key(self._provider.name)),
             "https://new-domain.example.test",
         )
 
@@ -259,7 +261,7 @@ class ProviderSettingsRouteTests(_TempDbCase, _ProviderOverrideCase):
         response = asyncio.run(exercise())
         self.assertEqual(response.status_code, 303)
         self.assertIn("providers_invalid", response.headers["location"])
-        self.assertEqual(main.get_setting(main._provider_url_setting_key(self._provider.name)), "")
+        self.assertEqual(db.get_setting(scrapers._provider_url_setting_key(self._provider.name)), "")
         self.assertEqual(self._provider.base_url, self._provider._default_base_url)
 
     def test_rejects_private_host_url(self):
@@ -274,8 +276,8 @@ class ProviderSettingsRouteTests(_TempDbCase, _ProviderOverrideCase):
         self.assertIn("providers_invalid", response.headers["location"])
 
     def test_blank_field_resets_to_default(self):
-        main._set_provider_url_override(self._provider, "https://was-overridden.example.test")
-        main.set_setting(main._provider_url_setting_key(self._provider.name), "https://was-overridden.example.test")
+        scrapers._set_provider_url_override(self._provider, "https://was-overridden.example.test")
+        db.set_setting(scrapers._provider_url_setting_key(self._provider.name), "https://was-overridden.example.test")
 
         async def exercise():
             async with _dashboard_client() as client:
@@ -285,14 +287,14 @@ class ProviderSettingsRouteTests(_TempDbCase, _ProviderOverrideCase):
         self.assertEqual(response.status_code, 303)
         self.assertIn("providers_saved", response.headers["location"])
         self.assertEqual(self._provider.base_url, self._provider._default_base_url)
-        self.assertEqual(main.get_setting(main._provider_url_setting_key(self._provider.name)), "")
+        self.assertEqual(db.get_setting(scrapers._provider_url_setting_key(self._provider.name)), "")
 
     def test_one_invalid_field_blocks_the_whole_save(self):
         """All-or-nothing: a second, valid field in the same submission must
         not be saved when another field in it fails validation."""
         other_provider = next(
-            p for p in main.ACTIVE_PROVIDERS
-            if isinstance(p, main.HtmlAggregatorScraper) and p is not self._provider
+            p for p in scrapers.ACTIVE_PROVIDERS
+            if isinstance(p, scrapers.HtmlAggregatorScraper) and p is not self._provider
         )
 
         async def exercise():
@@ -307,7 +309,7 @@ class ProviderSettingsRouteTests(_TempDbCase, _ProviderOverrideCase):
 
         response = asyncio.run(exercise())
         self.assertIn("providers_invalid", response.headers["location"])
-        self.assertEqual(main.get_setting(main._provider_url_setting_key(self._provider.name)), "")
+        self.assertEqual(db.get_setting(scrapers._provider_url_setting_key(self._provider.name)), "")
         self.assertNotEqual(self._provider.base_url, "https://good.example.test")
 
 
@@ -322,39 +324,39 @@ class SharedFetchHtmlTests(unittest.IsolatedAsyncioTestCase):
         _reset_playwright_page_globals()
 
     async def test_http_first_short_circuits_playwright(self):
-        scraper = main.ISportSurgeScraper()
+        scraper = scrapers.ISportSurgeScraper()
         browser = _FakeBrowser(_FakePage("<html>should not be used</html>"))
 
         async def fake_fetch_bounded_text(*args, **kwargs):
             return "<html>from http</html>"
 
-        with patch.object(main, "fetch_bounded_text", fake_fetch_bounded_text):
+        with patch.object(scrapers, "fetch_bounded_text", fake_fetch_bounded_text):
             result = await scraper._fetch_html(None, "https://isportsurge.ws/cfb/livestreams2", browser)
         self.assertEqual(result, "<html>from http</html>")
 
     async def test_playwright_fallback_waits_for_networkidle_by_default(self):
-        scraper = main.ISportSurgeScraper()
+        scraper = scrapers.ISportSurgeScraper()
         page = _FakePage("<html>rendered</html>")
         browser = _FakeBrowser(page)
 
         async def fake_fetch_bounded_text(*args, **kwargs):
             return None
 
-        with patch.object(main, "fetch_bounded_text", fake_fetch_bounded_text):
+        with patch.object(scrapers, "fetch_bounded_text", fake_fetch_bounded_text):
             result = await scraper._fetch_html(None, "https://isportsurge.ws/x", browser)
         self.assertEqual(result, "<html>rendered</html>")
         self.assertTrue(page.waited_networkidle)
         self.assertEqual(page.goto_calls[0]["timeout"], 35000)
 
     async def test_playwright_fallback_settle_seconds_skips_networkidle_wait(self):
-        scraper = main.ISportSurgeScraper()
+        scraper = scrapers.ISportSurgeScraper()
         page = _FakePage("<html>settled</html>")
         browser = _FakeBrowser(page)
 
         async def fake_fetch_bounded_text(*args, **kwargs):
             return None
 
-        with patch.object(main, "fetch_bounded_text", fake_fetch_bounded_text), \
+        with patch.object(scrapers, "fetch_bounded_text", fake_fetch_bounded_text), \
                 patch.object(asyncio, "sleep", AsyncMockNoOp()) as sleep_mock:
             result = await scraper._fetch_html(
                 None, "https://isportsurge.ws/x", browser, settle_seconds=2, goto_timeout=25000
@@ -365,28 +367,28 @@ class SharedFetchHtmlTests(unittest.IsolatedAsyncioTestCase):
         sleep_mock.assert_awaited_once_with(2)
 
     async def test_fetch_index_page_delegates_to_fetch_html_with_base_defaults(self):
-        scraper = main.ISportSurgeScraper()
+        scraper = scrapers.ISportSurgeScraper()
         page = _FakePage("<html>index</html>")
         browser = _FakeBrowser(page)
 
         async def fake_fetch_bounded_text(*args, **kwargs):
             return None
 
-        with patch.object(main, "fetch_bounded_text", fake_fetch_bounded_text):
+        with patch.object(scrapers, "fetch_bounded_text", fake_fetch_bounded_text):
             result = await scraper._fetch_index_page(None, "https://isportsurge.ws/x", browser)
         self.assertEqual(result, "<html>index</html>")
         self.assertTrue(page.waited_networkidle)
         self.assertEqual(page.goto_calls[0]["timeout"], 35000)
 
     async def test_daddylive_fetch_directory_page_uses_settle_and_shorter_timeout(self):
-        scraper = main.DaddyLiveScraper()
+        scraper = scrapers.DaddyLiveScraper()
         page = _FakePage("<html>directory</html>")
         browser = _FakeBrowser(page)
 
         async def fake_fetch_bounded_text(*args, **kwargs):
             return None
 
-        with patch.object(main, "fetch_bounded_text", fake_fetch_bounded_text), \
+        with patch.object(scrapers, "fetch_bounded_text", fake_fetch_bounded_text), \
                 patch.object(asyncio, "sleep", AsyncMockNoOp()) as sleep_mock:
             result = await scraper._fetch_directory_page(None, "https://dlhd.pk/x", browser)
         self.assertEqual(result, "<html>directory</html>")
@@ -401,7 +403,7 @@ class SharedFetchHtmlTests(unittest.IsolatedAsyncioTestCase):
         _get_cached_index_html already swallows a `fetch_page` exception on
         its own, so this exercises catch_page_errors via the loop's outer
         try/except the same way the original per-page try/except did.)"""
-        scraper = main.ISportSurgeScraper()
+        scraper = scrapers.ISportSurgeScraper()
 
         async def boom(client, url, browser):
             raise RuntimeError("boom")
@@ -415,7 +417,7 @@ class SharedFetchHtmlTests(unittest.IsolatedAsyncioTestCase):
         _get_cached_index_html), a *parse* error only reaches _find_matches's
         own try/except -- this is where catch_page_errors=True actually
         matters for the base class."""
-        scraper = main.ISportSurgeScraper()
+        scraper = scrapers.ISportSurgeScraper()
 
         async def fake_fetch_index_page(client, url, browser):
             return "<html></html>"
@@ -434,7 +436,7 @@ class SharedFetchHtmlTests(unittest.IsolatedAsyncioTestCase):
         catch_page_errors=False. (A fetch-step exception is already absorbed
         by _get_cached_index_html for both provider types, so this has to
         come from the parse step to exercise the actual difference.)"""
-        scraper = main.DaddyLiveScraper()
+        scraper = scrapers.DaddyLiveScraper()
 
         async def fake_fetch_directory_page(client, url, browser):
             return "<html></html>"
@@ -469,18 +471,18 @@ class AsyncMockNoOp:
 # --------------------------------------------------------------------------- #
 class ExtraNonEnglishMarkersTests(unittest.TestCase):
     def test_defaults_still_work_with_no_env_var(self):
-        with patch.object(main, "_EXTRA_NON_ENGLISH_MARKERS", frozenset()):
-            self.assertFalse(main._is_non_english_channel("ESPN USA"))
-            self.assertTrue(main._is_non_english_channel("ESPN DE"))
+        with patch.object(scrapers, "_EXTRA_NON_ENGLISH_MARKERS", frozenset()):
+            self.assertFalse(scrapers._is_non_english_channel("ESPN USA"))
+            self.assertTrue(scrapers._is_non_english_channel("ESPN DE"))
 
     def test_extra_single_word_marker_extends_detection(self):
-        with patch.object(main, "_EXTRA_NON_ENGLISH_MARKERS", frozenset({"klingon"})):
-            self.assertTrue(main._is_non_english_channel("Sports Klingon Feed"))
-            self.assertFalse(main._is_non_english_channel("ESPN USA"))
+        with patch.object(scrapers, "_EXTRA_NON_ENGLISH_MARKERS", frozenset({"klingon"})):
+            self.assertTrue(scrapers._is_non_english_channel("Sports Klingon Feed"))
+            self.assertFalse(scrapers._is_non_english_channel("ESPN USA"))
 
     def test_extra_multi_word_marker_matches_as_substring(self):
-        with patch.object(main, "_EXTRA_NON_ENGLISH_MARKERS", frozenset({"feed alt lang"})):
-            self.assertTrue(main._is_non_english_channel("Some Feed Alt Lang Channel"))
+        with patch.object(scrapers, "_EXTRA_NON_ENGLISH_MARKERS", frozenset({"feed alt lang"})):
+            self.assertTrue(scrapers._is_non_english_channel("Some Feed Alt Lang Channel"))
 
 
 # --------------------------------------------------------------------------- #
@@ -488,11 +490,11 @@ class ExtraNonEnglishMarkersTests(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class SchemaMigrationTests(_TempDbCase):
     def test_fresh_db_records_every_migration_and_gets_new_indexes(self):
-        main.init_db()
+        db.init_db()
         conn = sqlite3.connect(self._db_path)
         try:
             versions = {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
-            self.assertEqual(versions, {version for version, _ in main.SCHEMA_MIGRATIONS})
+            self.assertEqual(versions, {version for version, _ in db.SCHEMA_MIGRATIONS})
             index_names = {row[1] for row in conn.execute("PRAGMA index_list(teams)")}
             self.assertIn("idx_teams_catalog_key", index_names)
             self.assertIn("idx_teams_is_favorite", index_names)
@@ -510,7 +512,7 @@ class SchemaMigrationTests(_TempDbCase):
         finally:
             conn.close()
 
-        main.init_db()
+        db.init_db()
 
         conn = sqlite3.connect(self._db_path)
         try:
@@ -529,21 +531,21 @@ class SchemaMigrationTests(_TempDbCase):
             conn.close()
 
     def test_init_db_is_idempotent_when_run_twice(self):
-        main.init_db()
-        main.init_db()  # must not raise (duplicate ALTER/duplicate migration row)
+        db.init_db()
+        db.init_db()  # must not raise (duplicate ALTER/duplicate migration row)
         conn = sqlite3.connect(self._db_path)
         try:
             rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
-            self.assertEqual(sorted(r[0] for r in rows), sorted(v for v, _ in main.SCHEMA_MIGRATIONS))
+            self.assertEqual(sorted(r[0] for r in rows), sorted(v for v, _ in db.SCHEMA_MIGRATIONS))
         finally:
             conn.close()
 
     def test_migration_function_is_idempotent_when_columns_already_exist(self):
-        main.init_db()
-        with main._db_session() as conn:
+        db.init_db()
+        with db._db_session() as conn:
             # Must not raise even though every column from migration 1 is
             # already present (a fresh CREATE TABLE already declares them).
-            main._migrate_add_team_columns(conn)
+            db._migrate_add_team_columns(conn)
 
 
 # --------------------------------------------------------------------------- #
@@ -551,59 +553,59 @@ class SchemaMigrationTests(_TempDbCase):
 # --------------------------------------------------------------------------- #
 class ConnectionCacheTests(_TempDbCase):
     def test_same_thread_same_path_reuses_connection(self):
-        first = main._connect_db()
-        second = main._connect_db()
+        first = db._connect_db()
+        second = db._connect_db()
         self.assertIs(first, second)
 
     def test_different_db_path_on_same_thread_gets_its_own_connection(self):
-        first = main._connect_db()
+        first = db._connect_db()
         other_path = os.path.join(self._tmpdir, "other.db")
-        with patch.object(main, "DB_FILE", other_path):
-            other = main._connect_db()
+        with patch.object(db, "DB_FILE", other_path):
+            other = db._connect_db()
             self.assertIsNot(first, other)
             other.execute("SELECT 1")
         # Switching DB_FILE back returns the original cached connection.
-        again = main._connect_db()
+        again = db._connect_db()
         self.assertIs(first, again)
 
     def test_reconnects_after_underlying_connection_is_closed(self):
-        first = main._connect_db()
+        first = db._connect_db()
         first.close()
-        second = main._connect_db()
+        second = db._connect_db()
         self.assertIsNot(first, second)
         # Must be a live, usable connection, not another closed one.
         second.execute("SELECT 1")
 
     def test_close_all_db_connections_clears_the_cache(self):
-        conn = main._connect_db()
-        self.assertIn((threading.get_ident(), main.DB_FILE), main._DB_CONNECTIONS)
-        main.close_all_db_connections()
-        self.assertEqual(main._DB_CONNECTIONS, {})
+        conn = db._connect_db()
+        self.assertIn((threading.get_ident(), db.DB_FILE), db._DB_CONNECTIONS)
+        db.close_all_db_connections()
+        self.assertEqual(db._DB_CONNECTIONS, {})
         # A later call transparently opens a fresh connection.
-        fresh = main._connect_db()
+        fresh = db._connect_db()
         fresh.execute("SELECT 1")
 
     def test_db_session_commits_without_closing_the_reused_connection(self):
-        main.init_db()
-        with main._db_session() as conn:
+        db.init_db()
+        with db._db_session() as conn:
             conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('k', 'v')")
         # The connection used inside the `with` block must still be open and
         # usable afterward (proof it wasn't closed), and the write must have
         # been committed (proof commit doesn't depend on close).
-        cached = main._connect_db()
+        cached = db._connect_db()
         cached.execute("SELECT 1")
-        self.assertEqual(main.get_setting("k"), "v")
+        self.assertEqual(db.get_setting("k"), "v")
 
     def test_db_session_rolls_back_on_exception_without_closing(self):
-        main.init_db()
-        main.set_setting("rollback_key", "before")
+        db.init_db()
+        db.set_setting("rollback_key", "before")
         with self.assertRaises(ValueError):
-            with main._db_session() as conn:
+            with db._db_session() as conn:
                 conn.execute("UPDATE app_settings SET value='after' WHERE key='rollback_key'")
                 raise ValueError("boom")
-        self.assertEqual(main.get_setting("rollback_key"), "before")
+        self.assertEqual(db.get_setting("rollback_key"), "before")
         # Connection still usable after the rollback (not closed).
-        main._connect_db().execute("SELECT 1")
+        db._connect_db().execute("SELECT 1")
 
 
 # --------------------------------------------------------------------------- #

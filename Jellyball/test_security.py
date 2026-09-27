@@ -12,6 +12,7 @@ from unittest.mock import patch
 import httpx
 
 import main
+import db
 import security
 import state
 import config
@@ -29,9 +30,9 @@ class TempDbMixin:
     def setUp(self):
         super().setUp()
         self._tmpdir = tempfile.mkdtemp()
-        self._db_patch = patch.object(main, "DB_FILE", os.path.join(self._tmpdir, "test.db"))
+        self._db_patch = patch.object(db, "DB_FILE", os.path.join(self._tmpdir, "test.db"))
         self._db_patch.start()
-        main.init_db()
+        db.init_db()
         self._state_backup = dict(state.stream_state)
         state.stream_state.clear()
 
@@ -147,7 +148,7 @@ class SecretSettingsTests(TempDbMixin, unittest.TestCase):
         self.assertEqual(data["masked_tail"], "3456")  # last four as a hint
 
         async def exercise():
-            await main.set_setting_async("jellyfin_api_key", "abcdef123456")
+            await db.set_setting_async("jellyfin_api_key", "abcdef123456")
             async with _client() as client:
                 return await client.get("/?tab=alerts")
 
@@ -166,8 +167,8 @@ class SecretSettingsTests(TempDbMixin, unittest.TestCase):
 
     def test_changing_jellyfin_host_requires_the_key_again(self):
         async def exercise():
-            await main.set_setting_async("jellyfin_url", "http://192.168.1.10:8096")
-            await main.set_setting_async("jellyfin_api_key", "secret-key")
+            await db.set_setting_async("jellyfin_url", "http://192.168.1.10:8096")
+            await db.set_setting_async("jellyfin_api_key", "secret-key")
             response = await main.update_jellyfin_settings(
                 jellyfin_url="https://attacker.example", jellyfin_api_key="",
                 jellyfin_task_id="", clear_jellyfin_api_key="", auth=True,
@@ -181,8 +182,8 @@ class SecretSettingsTests(TempDbMixin, unittest.TestCase):
 
     def test_same_host_keeps_saved_key(self):
         async def exercise():
-            await main.set_setting_async("jellyfin_url", "http://192.168.1.10:8096")
-            await main.set_setting_async("jellyfin_api_key", "secret-key")
+            await db.set_setting_async("jellyfin_url", "http://192.168.1.10:8096")
+            await db.set_setting_async("jellyfin_api_key", "secret-key")
             await main.update_jellyfin_settings(
                 jellyfin_url="http://192.168.1.10:8096/", jellyfin_api_key="",
                 jellyfin_task_id="task", clear_jellyfin_api_key="", auth=True,
@@ -358,7 +359,7 @@ class DashboardRenderTests(TempDbMixin, unittest.TestCase):
                 self.assertEqual(main.IDLE_HEALTH_INTERVAL, 45.0)
                 # Clamped to the tunable's maximum and applied to live sessions.
                 self.assertEqual(main.SESSIONS.config.stale_min_seconds, 300.0)
-                self.assertEqual(main.get_setting("tunable:IDLE_HEALTH_INTERVAL"), "45.0")
+                self.assertEqual(db.get_setting("tunable:IDLE_HEALTH_INTERVAL"), "45.0")
 
                 main.IDLE_HEALTH_INTERVAL = 1.0
                 main._load_tunable_overrides()

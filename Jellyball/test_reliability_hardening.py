@@ -10,6 +10,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import db
+import scrapers
 import network_safety
 from network_safety import clear_dns_cache, validate_http_url, validate_http_url_async
 
@@ -117,15 +119,15 @@ class ReliabilityHardeningTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_provider_breaker_opens_and_recovers_after_cooldown(self):
         provider = "test-provider"
-        with patch.object(main, "PROVIDER_BREAKER_FAILURES", 2), patch.object(main, "PROVIDER_BREAKER_COOLDOWN", 0.01):
-            main._PROVIDER_BREAKERS.pop(provider, None)
-            main._provider_breaker_failure(provider)
-            self.assertFalse(main._provider_breaker_open(provider))
-            main._provider_breaker_failure(provider)
-            self.assertTrue(main._provider_breaker_open(provider))
+        with patch.object(scrapers, "PROVIDER_BREAKER_FAILURES", 2), patch.object(scrapers, "PROVIDER_BREAKER_COOLDOWN", 0.01):
+            scrapers._PROVIDER_BREAKERS.pop(provider, None)
+            scrapers._provider_breaker_failure(provider)
+            self.assertFalse(scrapers._provider_breaker_open(provider))
+            scrapers._provider_breaker_failure(provider)
+            self.assertTrue(scrapers._provider_breaker_open(provider))
             await asyncio.sleep(0.02)
-            self.assertFalse(main._provider_breaker_open(provider))
-            main._provider_breaker_success(provider)
+            self.assertFalse(scrapers._provider_breaker_open(provider))
+            scrapers._provider_breaker_success(provider)
 
     async def test_startup_buffer_task_reference_is_removed(self):
         task = asyncio.create_task(asyncio.sleep(0))
@@ -134,7 +136,7 @@ class ReliabilityHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("test-key", main._STARTUP_BUFFER_TASKS)
 
     async def test_metric_writer_is_bounded(self):
-        writer = main.MetricBatchWriter(max_queue=1, batch_size=2, flush_seconds=0.01)
+        writer = db.MetricBatchWriter(max_queue=1, batch_size=2, flush_seconds=0.01)
         await writer.enqueue(("stream_event", ("team", "provider", "test", "details"), {}))
         await writer.enqueue(("stream_event", ("team", "provider", "test", "details"), {}))
         self.assertLessEqual(writer.queue.qsize(), 1)
