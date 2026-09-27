@@ -17,6 +17,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import ffmpeg_proc
+import placeholder
 import state
 import config
 import shutil
@@ -139,47 +141,49 @@ def live_entry(run_id=1, output_dir=Path("/fake/run1"), audio_count=2, **extra):
 class MultiviewStateTestCase(unittest.TestCase):
     """Snapshot/restore the module-level state these tests touch."""
 
-    DICTS = (
+    # (owning module, global name): each global lives in the module whose code uses it.
+    DICTS = tuple((main, name) for name in (
         "_MULTIVIEW_PROCESSES", "_MULTIVIEW_FAILURES", "_MULTIVIEW_HOLDS", "_MULTIVIEW_REFUSALS",
         "_MULTIVIEW_RESTARTS", "_MULTIVIEW_MANUAL_STOPS", "_MULTIVIEW_START_TASKS", "_MULTIVIEW_LAST_VIEWER",
-        "_LAST_PLAYBACK_EVENT",
-    )
-    SETS = ("_MULTIVIEW_SLOT_RESERVATIONS", "_MULTIVIEW_PENDING_RUN_DIRS", "_PLACEHOLDER_PENDING_DIRS")
+    )) + ((main, "_LAST_PLAYBACK_EVENT"),)
+    SETS = ((main, "_MULTIVIEW_SLOT_RESERVATIONS"), (main, "_MULTIVIEW_PENDING_RUN_DIRS"),
+            (placeholder, "_PLACEHOLDER_PENDING_DIRS"))
     SCALARS = (
-        "_HW_ENCODER_FAILED_AT", "_CUDA_DECODE_FAILED_AT", "_PLACEHOLDER_STATE", "_PLACEHOLDER_FAILURE",
-        "_PLACEHOLDER_DRAWTEXT_OK", "_PLACEHOLDER_RUN_COUNTER", "_MULTIVIEW_RUN_COUNTER", "FFMPEG_AVAILABLE",
-        "_PLACEHOLDER_START_TASK",
+        (main, "_HW_ENCODER_FAILED_AT"), (main, "_CUDA_DECODE_FAILED_AT"), (main, "_MULTIVIEW_RUN_COUNTER"),
+        (placeholder, "_PLACEHOLDER_STATE"), (placeholder, "_PLACEHOLDER_FAILURE"),
+        (placeholder, "_PLACEHOLDER_DRAWTEXT_OK"), (placeholder, "_PLACEHOLDER_RUN_COUNTER"),
+        (ffmpeg_proc, "FFMPEG_AVAILABLE"), (main, "_PLACEHOLDER_START_TASK"),
     )
 
     def setUp(self):
         self._saved = {}
-        for name in self.DICTS:
-            self._saved[name] = dict(getattr(main, name))
-            getattr(main, name).clear()
-        for name in self.SETS:
-            self._saved[name] = set(getattr(main, name))
-            getattr(main, name).clear()
-        for name in self.SCALARS:
-            self._saved[name] = getattr(main, name)
+        for module, name in self.DICTS:
+            self._saved[name] = dict(getattr(module, name))
+            getattr(module, name).clear()
+        for module, name in self.SETS:
+            self._saved[name] = set(getattr(module, name))
+            getattr(module, name).clear()
+        for module, name in self.SCALARS:
+            self._saved[name] = getattr(module, name)
         main._HW_ENCODER_FAILED_AT = None
         main._CUDA_DECODE_FAILED_AT = None
-        main._PLACEHOLDER_STATE = None
-        main._PLACEHOLDER_FAILURE = None
-        main._PLACEHOLDER_DRAWTEXT_OK = True
+        placeholder._PLACEHOLDER_STATE = None
+        placeholder._PLACEHOLDER_FAILURE = None
+        placeholder._PLACEHOLDER_DRAWTEXT_OK = True
         main._PLACEHOLDER_START_TASK = None
         state_patch = patch.dict(state.stream_state, {}, clear=True)
         state_patch.start()
         self.addCleanup(state_patch.stop)
 
     def tearDown(self):
-        for name in self.DICTS:
-            getattr(main, name).clear()
-            getattr(main, name).update(self._saved[name])
-        for name in self.SETS:
-            getattr(main, name).clear()
-            getattr(main, name).update(self._saved[name])
-        for name in self.SCALARS:
-            setattr(main, name, self._saved[name])
+        for module, name in self.DICTS:
+            getattr(module, name).clear()
+            getattr(module, name).update(self._saved[name])
+        for module, name in self.SETS:
+            getattr(module, name).clear()
+            getattr(module, name).update(self._saved[name])
+        for module, name in self.SCALARS:
+            setattr(module, name, self._saved[name])
 
 
 class NewestSegmentAgeTests(unittest.TestCase):
@@ -287,8 +291,8 @@ class RestartTests(MultiviewStateTestCase):
 
     def test_restart_backoff_builds_in_rolling_window_and_alerts_once(self):
         with patch.object(main, "MULTIVIEW_RESTART_BURST", 2), \
-                patch.object(main, "MULTIVIEW_BACKOFF_BASE_SECONDS", 15.0), \
-                patch.object(main, "MULTIVIEW_BACKOFF_MAX_SECONDS", 300.0), \
+                patch.object(ffmpeg_proc, "MULTIVIEW_BACKOFF_BASE_SECONDS", 15.0), \
+                patch.object(ffmpeg_proc, "MULTIVIEW_BACKOFF_MAX_SECONDS", 300.0), \
                 patch.object(main, "send_alert", MagicMock(return_value=None)) as alert, \
                 patch.object(main, "_spawn_background_task") as spawn:
             delays = [main._note_multiview_restart("mv", "output stalled")[1] for _ in range(7)]
@@ -319,7 +323,7 @@ class RestartTests(MultiviewStateTestCase):
 
 class SlotReservationTests(MultiviewStateTestCase):
     def test_simultaneous_starts_cannot_exceed_cap(self):
-        main.FFMPEG_AVAILABLE = True
+        ffmpeg_proc.FFMPEG_AVAILABLE = True
         data1, data2 = multiview_data(), multiview_data()
         state.stream_state.update({"mv1": data1, "mv2": data2})
         started = []
@@ -340,7 +344,7 @@ class SlotReservationTests(MultiviewStateTestCase):
         self.assertEqual(main._MULTIVIEW_SLOT_RESERVATIONS, set())
 
     def test_reservation_released_when_spawn_fails(self):
-        main.FFMPEG_AVAILABLE = True
+        ffmpeg_proc.FFMPEG_AVAILABLE = True
         data = multiview_data()
         state.stream_state["mv"] = data
 
@@ -356,7 +360,7 @@ class SlotReservationTests(MultiviewStateTestCase):
 
 class RefusalTests(MultiviewStateTestCase):
     def test_refusal_logs_once_per_hold_and_view_gets_placeholder(self):
-        main.FFMPEG_AVAILABLE = True
+        ffmpeg_proc.FFMPEG_AVAILABLE = True
         state.stream_state["mv"] = multiview_data()
         main._MULTIVIEW_PROCESSES["other"] = live_entry()
 
@@ -382,7 +386,7 @@ class RefusalTests(MultiviewStateTestCase):
         self.assertEqual(delays, [5.0, 10.0, 20.0, 40.0, 60.0, 60.0])
 
     def test_no_ffmpeg_is_a_refusal_not_a_failure(self):
-        main.FFMPEG_AVAILABLE = False
+        ffmpeg_proc.FFMPEG_AVAILABLE = False
         data = multiview_data()
         state.stream_state["mv"] = data
         with patch.object(config.LOGGER, "warning"):
@@ -530,9 +534,9 @@ class SourceKeyTests(MultiviewStateTestCase):
                 "output_dir": Path(f"/p/run{run_id}"), "last_access": 0.0,
             }
 
-        main._PLACEHOLDER_STATE = state(4)
+        placeholder._PLACEHOLDER_STATE = state(4)
         first = main._placeholder_source()
-        main._PLACEHOLDER_STATE = state(5)
+        placeholder._PLACEHOLDER_STATE = state(5)
         second = main._placeholder_source()
         self.assertEqual(first.key, ("placeholder", 4))
         self.assertNotEqual(first.key, second.key)
@@ -561,9 +565,9 @@ class SweepTests(MultiviewStateTestCase):
                 os.utime(path, (old, old))
             main._MULTIVIEW_PROCESSES["mv1"] = live_entry(output_dir=live_run)
             main._MULTIVIEW_PENDING_RUN_DIRS.add(pending_run)
-            main._PLACEHOLDER_STATE = {"process": FakeProcess(), "output_dir": placeholder_live}
+            placeholder._PLACEHOLDER_STATE = {"process": FakeProcess(), "output_dir": placeholder_live}
             with patch.object(main, "MULTIVIEW_OUTPUT_ROOT", root), \
-                    patch.object(main, "PLACEHOLDER_OUTPUT_DIR", placeholder_root):
+                    patch.object(placeholder, "PLACEHOLDER_OUTPUT_DIR", placeholder_root):
                 removed = asyncio.run(main._sweep_output_dirs(min_age=60.0))
             for path in (live_run, pending_run, fresh_run, placeholder_live):
                 self.assertTrue(path.exists(), path)
@@ -583,13 +587,13 @@ class SweepTests(MultiviewStateTestCase):
             target = Path(tmp) / "run1"
             target.mkdir()
             with patch.object(shutil, "rmtree", flaky_rmtree):
-                self.assertTrue(main._rmtree_with_retries(target, attempts=5, delay=0.01))
+                self.assertTrue(ffmpeg_proc._rmtree_with_retries(target, attempts=5, delay=0.01))
         self.assertEqual(len(calls), 3)
 
 
 class ManualStopTests(MultiviewStateTestCase):
     def test_stop_cancels_spawn_and_suppresses_auto_start_until_new_viewer(self):
-        main.FFMPEG_AVAILABLE = True
+        ffmpeg_proc.FFMPEG_AVAILABLE = True
         state.stream_state["mv"] = multiview_data()
         registry = FakeRegistry()
 
@@ -624,7 +628,7 @@ class ManualStopTests(MultiviewStateTestCase):
         self.assertIn("mv", registry.poked)
 
     def test_spawn_gives_up_when_channel_removed_during_warmup(self):
-        main.FFMPEG_AVAILABLE = True
+        ffmpeg_proc.FFMPEG_AVAILABLE = True
         data = multiview_data()
         state.stream_state["mv"] = data
 
@@ -707,7 +711,7 @@ class RemoveChannelTests(MultiviewStateTestCase):
 
 class PlaceholderTests(MultiviewStateTestCase):
     def test_spawn_failure_backs_off_instead_of_respawning_every_poll(self):
-        main.FFMPEG_AVAILABLE = True
+        ffmpeg_proc.FFMPEG_AVAILABLE = True
         launches = []
 
         async def failing_exec(*args, **kwargs):
@@ -715,12 +719,12 @@ class PlaceholderTests(MultiviewStateTestCase):
             raise OSError("cannot run ffmpeg")
 
         async def scenario():
-            first = await main._ensure_placeholder_running()
-            second = await main._ensure_placeholder_running()
+            first = await placeholder._ensure_placeholder_running()
+            second = await placeholder._ensure_placeholder_running()
             return first, second
 
         with tempfile.TemporaryDirectory() as tmp, \
-                patch.object(main, "PLACEHOLDER_OUTPUT_DIR", Path(tmp)), \
+                patch.object(placeholder, "PLACEHOLDER_OUTPUT_DIR", Path(tmp)), \
                 patch.object(asyncio, "create_subprocess_exec", failing_exec), \
                 patch.object(config.LOGGER, "error") as error_log:
             self.assertEqual(asyncio.run(scenario()), (False, False))
@@ -729,10 +733,10 @@ class PlaceholderTests(MultiviewStateTestCase):
             spawn.assert_not_called()
         self.assertEqual(len(launches), 1)
         self.assertEqual(error_log.call_count, 1)
-        self.assertGreater(main._placeholder_cooldown_remaining(), 0.0)
+        self.assertGreater(placeholder._placeholder_cooldown_remaining(), 0.0)
 
     def test_drawtext_failure_retries_without_caption(self):
-        main.FFMPEG_AVAILABLE = True
+        ffmpeg_proc.FFMPEG_AVAILABLE = True
         attempts = []
 
         async def fake_launch(drawtext):
@@ -741,22 +745,22 @@ class PlaceholderTests(MultiviewStateTestCase):
                 return False, ["[Parsed_drawtext_2 @ 0x1] Cannot find a valid font for the family Sans"]
             return True, []
 
-        with patch.object(main, "_launch_placeholder_run", fake_launch), patch.object(config.LOGGER, "warning"):
-            self.assertTrue(asyncio.run(main._ensure_placeholder_running()))
+        with patch.object(placeholder, "_launch_placeholder_run", fake_launch), patch.object(config.LOGGER, "warning"):
+            self.assertTrue(asyncio.run(placeholder._ensure_placeholder_running()))
         self.assertEqual(attempts, [True, False])
-        self.assertFalse(main._PLACEHOLDER_DRAWTEXT_OK)
-        self.assertIsNone(main._PLACEHOLDER_FAILURE)
+        self.assertFalse(placeholder._PLACEHOLDER_DRAWTEXT_OK)
+        self.assertIsNone(placeholder._PLACEHOLDER_FAILURE)
 
     def test_placeholder_args_font_and_caption_free_variant(self):
-        args = main._build_placeholder_ffmpeg_args(Path("/x"))
+        args = placeholder._build_placeholder_ffmpeg_args(Path("/x"))
         video_filter = args[args.index("-vf") + 1]
         self.assertIn("No Signal", video_filter)
         if sys.platform == "win32":
             self.assertIn("fontfile='C\\:/", video_filter)
             self.assertNotIn("font='Sans'", video_filter)
-        plain = main._build_placeholder_ffmpeg_args(Path("/x"), drawtext=False)
+        plain = placeholder._build_placeholder_ffmpeg_args(Path("/x"), drawtext=False)
         self.assertNotIn("drawtext", plain[plain.index("-vf") + 1])
-        self.assertEqual(main._ffmpeg_filter_path(Path(r"C:\Windows\Fonts\arial.ttf")).replace("\\\\", "\\"),
+        self.assertEqual(ffmpeg_proc._ffmpeg_filter_path(Path(r"C:\Windows\Fonts\arial.ttf")).replace("\\\\", "\\"),
                          "C\\:/Windows/Fonts/arial.ttf")
 
 
@@ -802,12 +806,12 @@ class ProcessControlTests(unittest.TestCase):
 
         with patch.object(asyncio, "create_subprocess_exec", fake_exec):
             with self.assertRaises(asyncio.TimeoutError):
-                asyncio.run(main._probe_ffmpeg_version("ffmpeg", timeout=0.05))
+                asyncio.run(ffmpeg_proc._probe_ffmpeg_version("ffmpeg", timeout=0.05))
         self.assertTrue(process.killed)
 
     @unittest.skipUnless(sys.platform == "win32", "Windows process control")
     def test_ffmpeg_runs_below_normal_priority_without_a_window(self):
-        flags = main._ffmpeg_creationflags()
+        flags = ffmpeg_proc._ffmpeg_creationflags()
         self.assertTrue(flags & subprocess.BELOW_NORMAL_PRIORITY_CLASS)
         self.assertTrue(flags & subprocess.CREATE_NO_WINDOW)
 
@@ -815,7 +819,7 @@ class ProcessControlTests(unittest.TestCase):
     def test_kernel32_prototypes_return_full_handles(self):
         from ctypes import wintypes
 
-        api = main._win32_process_api()
+        api = ffmpeg_proc._win32_process_api()
         for name in ("CreateJobObjectW", "OpenProcess"):
             self.assertIs(getattr(api.k32, name).restype, wintypes.HANDLE)
         self.assertIsNotNone(api.k32.TerminateJobObject.argtypes)
@@ -824,11 +828,11 @@ class ProcessControlTests(unittest.TestCase):
     def test_run_job_terminates_the_process(self):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
-            job = main._create_run_job(child.pid)
+            job = ffmpeg_proc._create_run_job(child.pid)
             self.assertTrue(job)
             entry = {"process": FakeProcess(returncode=None, pid=child.pid), "job": job}
-            with patch.object(main, "_taskkill_tree", AsyncMock()) as taskkill:
-                asyncio.run(main._terminate_ffmpeg(entry, "test", kill_timeout=0.1))
+            with patch.object(ffmpeg_proc, "_taskkill_tree", AsyncMock()) as taskkill:
+                asyncio.run(ffmpeg_proc._terminate_ffmpeg(entry, "test", kill_timeout=0.1))
             self.assertIsNotNone(child.wait(timeout=10))
             entry["process"].kill.assert_not_called()  # the job did it
             taskkill.assert_not_awaited()
@@ -840,14 +844,14 @@ class ProcessControlTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "win32", "Windows process control")
     def test_no_taskkill_for_a_process_asyncio_saw_exit(self):
         entry = {"process": FakeProcess(returncode=0)}
-        with patch.object(main, "_taskkill_tree", AsyncMock()) as taskkill:
-            asyncio.run(main._terminate_ffmpeg(entry, "test", kill_timeout=0.1))
+        with patch.object(ffmpeg_proc, "_taskkill_tree", AsyncMock()) as taskkill:
+            asyncio.run(ffmpeg_proc._terminate_ffmpeg(entry, "test", kill_timeout=0.1))
         entry["process"].kill.assert_not_called()
         taskkill.assert_not_awaited()
 
     @unittest.skipUnless(sys.platform == "win32", "Windows process control")
     def test_startup_kills_orphans_only_when_creation_time_matches(self):
-        api = main._win32_process_api()
+        api = ffmpeg_proc._win32_process_api()
         orphan = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
@@ -856,13 +860,13 @@ class ProcessControlTests(unittest.TestCase):
                 orphan_dir, bystander_dir = root / "mv" / "run1", placeholder_root / "run2"
                 orphan_dir.mkdir(parents=True)
                 bystander_dir.mkdir(parents=True)
-                (orphan_dir / main.RUN_PID_FILE).write_text(json.dumps(
+                (orphan_dir / ffmpeg_proc.RUN_PID_FILE).write_text(json.dumps(
                     {"pid": orphan.pid, "created": api.process_creation_time(orphan.pid)}), encoding="utf-8")
                 # Same pid, different creation time: a reused pid, must survive.
-                (bystander_dir / main.RUN_PID_FILE).write_text(json.dumps(
+                (bystander_dir / ffmpeg_proc.RUN_PID_FILE).write_text(json.dumps(
                     {"pid": bystander.pid, "created": api.process_creation_time(bystander.pid) + 1}), encoding="utf-8")
                 with patch.object(main, "MULTIVIEW_OUTPUT_ROOT", root), \
-                        patch.object(main, "PLACEHOLDER_OUTPUT_DIR", placeholder_root), \
+                        patch.object(placeholder, "PLACEHOLDER_OUTPUT_DIR", placeholder_root), \
                         patch.object(config.LOGGER, "warning"):
                     self.assertEqual(main._kill_orphaned_ffmpeg(), 1)
             self.assertIsNotNone(orphan.wait(timeout=10))
@@ -878,10 +882,10 @@ class ProcessControlTests(unittest.TestCase):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                main._write_run_pid_file(Path(tmp), child.pid)
-                record = json.loads((Path(tmp) / main.RUN_PID_FILE).read_text(encoding="utf-8"))
+                ffmpeg_proc._write_run_pid_file(Path(tmp), child.pid)
+                record = json.loads((Path(tmp) / ffmpeg_proc.RUN_PID_FILE).read_text(encoding="utf-8"))
             self.assertEqual(record["pid"], child.pid)
-            self.assertEqual(record["created"], main._win32_process_api().process_creation_time(child.pid))
+            self.assertEqual(record["created"], ffmpeg_proc._win32_process_api().process_creation_time(child.pid))
         finally:
             child.kill()
             child.wait(timeout=10)

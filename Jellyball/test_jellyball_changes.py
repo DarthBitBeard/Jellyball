@@ -51,15 +51,13 @@ from main import (
     _build_multiview_ffmpeg_args,
     _multiview_bufsize,
     _multiview_member_validation,
-    _wait_for_first_segment,
-    _multiview_backoff_seconds,
     _multiview_cooldown_remaining,
-    _multiview_error_from_log,
-    _build_placeholder_ffmpeg_args,
     generate_m3u,
     generate_xmltv,
     _resolve_schedule_status,
 )
+from ffmpeg_proc import _wait_for_first_segment, _multiview_backoff_seconds, _multiview_error_from_log
+from placeholder import _build_placeholder_ffmpeg_args
 from legacy_proxy import (
     LRUChunkCache,
     _chunk_route_for_url,

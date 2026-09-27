@@ -42,7 +42,7 @@ class TempDbMixin:
         state.stream_state.clear()
         state.stream_state.update(self._state_backup)
         self._db_patch.stop()
-        closer = getattr(main, "close_all_db_connections", None)
+        closer = getattr(db, "close_all_db_connections", None)
         if closer:
             closer()
         shutil.rmtree(self._tmpdir, ignore_errors=True)
