@@ -12,6 +12,7 @@ from unittest.mock import patch
 import httpx
 
 import main
+import legacy_proxy
 import alerts
 import db
 import security
@@ -407,7 +408,7 @@ class RelaySigningTests(unittest.TestCase):
         import urllib.parse
 
         manifest = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nseg1.m4s\n"
-        rewritten = main.rewrite_m3u8(manifest, "https://cdn.example.test/live/index.m3u8",
+        rewritten = legacy_proxy.rewrite_m3u8(manifest, "https://cdn.example.test/live/index.m3u8",
                                       "https://site.example.test/", "http://127.0.0.1:8000")
         uri = [line for line in rewritten.splitlines() if line and not line.startswith("#")][0]
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(uri).query)

@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import legacy_proxy
 import db
 import scrapers
 import network_safety
@@ -24,7 +25,7 @@ class ReliabilityHardeningTests(unittest.IsolatedAsyncioTestCase):
         clear_dns_cache()
 
     async def test_cache_expiry_is_removed_during_put(self):
-        cache = main.LRUChunkCache(capacity=4, max_bytes=1024)
+        cache = legacy_proxy.LRUChunkCache(capacity=4, max_bytes=1024)
         await cache.put("expired", b"old", 0.001)
         await asyncio.sleep(0.01)
         await cache.put("new", b"new", 10)
@@ -131,9 +132,9 @@ class ReliabilityHardeningTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_startup_buffer_task_reference_is_removed(self):
         task = asyncio.create_task(asyncio.sleep(0))
-        main._STARTUP_BUFFER_TASKS["test-key"] = task
-        main._remove_startup_buffer_task(task)
-        self.assertNotIn("test-key", main._STARTUP_BUFFER_TASKS)
+        legacy_proxy._STARTUP_BUFFER_TASKS["test-key"] = task
+        legacy_proxy._remove_startup_buffer_task(task)
+        self.assertNotIn("test-key", legacy_proxy._STARTUP_BUFFER_TASKS)
 
     async def test_metric_writer_is_bounded(self):
         writer = db.MetricBatchWriter(max_queue=1, batch_size=2, flush_seconds=0.01)
@@ -157,7 +158,7 @@ class FailureInjectionTests(unittest.TestCase):
 @unittest.skipUnless(os.getenv("JELLYBALL_LOAD_TESTS") == "1", "opt-in load/soak test")
 class LocalLoadAndSoakTests(unittest.IsolatedAsyncioTestCase):
     async def test_cache_repeated_access(self):
-        cache = main.LRUChunkCache(capacity=256, max_bytes=4 * 1024 * 1024)
+        cache = legacy_proxy.LRUChunkCache(capacity=256, max_bytes=4 * 1024 * 1024)
         started = time.perf_counter()
         for index in range(1000):
             await cache.put(str(index % 32), b"payload", 60)
@@ -165,7 +166,7 @@ class LocalLoadAndSoakTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(time.perf_counter() - started, 10)
 
     async def test_cache_soak_expiration(self):
-        cache = main.LRUChunkCache(capacity=32, max_bytes=1024)
+        cache = legacy_proxy.LRUChunkCache(capacity=32, max_bytes=1024)
         for _ in range(100):
             await cache.put("same", b"payload", 0.01)
             await asyncio.sleep(0.001)
