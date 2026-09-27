@@ -1,224 +1,96 @@
-import os
-import sys
-import logging
-import re
-import queue
-from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
-import subprocess
-import webbrowser
-import socket
-import shutil
-from pathlib import Path
-from html import escape as html_escape
-from typing import Optional
-
-# Resolve configuration and writable data independently of the current directory.
-# This is important when the application is launched from a Jellyfin service or a shortcut.
-APP_DIR = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
-BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
-
-
-def _get_writable_data_dir() -> Path:
-    # Explicit override first: the Windows service uses %ProgramData%\Jellyball,
-    # Docker uses the mounted volume, tests use a temp dir.
-    override = os.getenv("JELLYBALL_DATA_DIR", "").strip()
-    if override:
-        candidate = Path(override).expanduser()
-        candidate.mkdir(parents=True, exist_ok=True)
-        return candidate
-    if os.name == "nt":
-        roots = [os.getenv("LOCALAPPDATA"), os.getenv("APPDATA"), str(Path.home())]
-    else:
-        roots = [os.getenv("XDG_DATA_HOME"), str(Path.home() / ".local" / "share")]
-
-    for root in roots:
-        if not root:
-            continue
-        candidate = Path(root) / "Jellyball"
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-            return candidate
-        except OSError:
-            continue
-
-    fallback = Path(os.getenv("TEMP", ".")) / "Jellyball"
-    fallback.mkdir(parents=True, exist_ok=True)
-    return fallback
-
-
-DATA_DIR = _get_writable_data_dir()
-USER_ENV_FILE = DATA_DIR / ".env"
-LOG_FILE = DATA_DIR / "jellyball.log"
-LOGGER = logging.getLogger("jellyball")
-SQLITE_BUSY_TIMEOUT_MS = 5000
-
-# Size-capped rotation (5 x 10 MB) so a noisy day can't fill the disk of a box
-# that runs for months. Records go through a queue so the event loop never
-# blocks on file I/O; a background thread does the writing.
-_log_handler = RotatingFileHandler(
-    filename=str(LOG_FILE),
-    maxBytes=10 * 1024 * 1024,
-    backupCount=5,
-    encoding="utf-8",
-    delay=True,
-)
-_log_handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s"))
-_sink_handlers: list = [_log_handler]
-# The windowed exe and the Windows service have no stdout (sys.stdout is None);
-# a StreamHandler there fails on every record.
-if sys.stdout is not None:
-    _console_handler = logging.StreamHandler(sys.stdout)
-    _console_handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s"))
-    _sink_handlers.append(_console_handler)
-
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-_LOG_LISTENER: Optional["QueueListener"] = None
-if not root_logger.handlers:
-    _log_queue: "queue.SimpleQueue" = queue.SimpleQueue()
-    root_logger.addHandler(QueueHandler(_log_queue))
-    _LOG_LISTENER = QueueListener(_log_queue, *_sink_handlers, respect_handler_level=True)
-    _LOG_LISTENER.start()
-LOGGER.setLevel(logging.INFO)
-
-# httpx/httpcore log one INFO line per HTTP request by default — with many active
-# channels that's every provider probe and every HLS segment fetch, drowning real
-# diagnostics. uvicorn.access would log every segment request (with the full
-# tokenized upstream URL in the query string for legacy /chunk requests).
-for _noisy_logger in ("httpx", "httpcore", "uvicorn.access", "hpack", "h2"):
-    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
-
-
-_URL_IN_TEXT_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+")
-
-
-def _safe_exception_detail(exc: BaseException, limit: int = 160) -> str:
-    """Exception text with URLs (tokens, webhook secrets) cut down to their host."""
-    def _host_only(match) -> str:
-        text = match.group(0)
-        scheme, _, rest = text.partition("://")
-        host = rest.split("/", 1)[0].split("?", 1)[0].rsplit("@", 1)[-1]
-        return f"{scheme}://{host}/..."
-
-    detail = _URL_IN_TEXT_RE.sub(_host_only, str(exc)).replace("\n", " ").strip()
-    return detail[:limit]
-
-
-def _log_failure(operation: str, exc: BaseException, level: int = logging.WARNING) -> None:
-    """Log a failure with its type and a URL-scrubbed detail (URLs carry tokens)."""
-    detail = _safe_exception_detail(exc)
-    if detail:
-        LOGGER.log(level, "%s failed (%s: %s)", operation, type(exc).__name__, detail)
-    else:
-        LOGGER.log(level, "%s failed (%s)", operation, type(exc).__name__)
-
-
-def _bootstrap_runtime_files() -> None:
-    """Create safe, user-writable first-run files without overwriting user data."""
-    if not USER_ENV_FILE.exists():
-        template = (
-            "# Jellyball settings. Add secrets here; this file is stored per Windows user.\n"
-            "PORT=8000\n"
-            "# DASHBOARD_PASSWORD=change-this-password\n"
-            "# STREAM_PROVIDER_PRIORITY=iSportSurge,MyBuffStreams\n"
-            "# ACTIVE_HEALTH_INTERVAL=3\n"
-            "# STANDBY_HEALTH_INTERVAL=45\n"
-            "# PREFETCH_CHUNK_COUNT=5\n"
-            "# STREAM_STARTUP_BUFFER_SECONDS=15\n"
-        )
-        try:
-            USER_ENV_FILE.write_text(template, encoding="utf-8")
-            try:
-                USER_ENV_FILE.chmod(0o600)
-            except OSError:
-                pass
-        except OSError as exc:
-            _log_failure("create first-run environment file", exc, logging.ERROR)
-
-
-# TheTVAppScraper and DaddyLiveScraper are defined later after HtmlAggregatorScraper
-# to ensure the base class is available. See their definitions near the other
-# aggregator classes.
-
-_bootstrap_runtime_files()
-
-_PLAYWRIGHT_PATH_SET_BY_APP = not os.getenv("PLAYWRIGHT_BROWSERS_PATH")
-if _PLAYWRIGHT_PATH_SET_BY_APP:
-    if getattr(sys, "frozen", False):
-        bundled_browser_dir = BUNDLE_DIR / "playwright_browsers"
-        browser_dir = bundled_browser_dir if bundled_browser_dir.exists() else DATA_DIR / "playwright_browsers"
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_dir)
-    else:
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+# First: config resolves DATA_DIR, loads .env and starts logging before anything else.
+import config  # noqa: F401
 
 import asyncio
-
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-
-import httpx
-import re
-import urllib.parse
-import sqlite3
-import json
-import math
 import hashlib
 import hmac
 import ipaddress
-import secrets
-import time
+import json
+import logging
+import math
+import os
 import random
+import re
+import secrets
+import shutil
+import socket
+import sqlite3
+import subprocess
+import sys
 import threading
-from collections import OrderedDict, deque
+import time
+import urllib.parse
+import webbrowser
+from collections import deque, OrderedDict
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from xml.sax.saxutils import escape as xml_escape
-from dotenv import load_dotenv
-from fastapi import FastAPI, Form, Request, Depends, HTTPException, status
+from pathlib import Path
+from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple
+
+import httpx
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.responses import PlainTextResponse, Response, HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from typing import Callable, Dict, List, Optional, Tuple, Set
-from playwright.async_api import async_playwright, Browser, Playwright, Page
-# pystray/PIL are imported lazily in tray mode only: on a headless Linux host
-# `import pystray` tries to open an X display at import time and crashes.
+from playwright.async_api import async_playwright, Browser, Page, Playwright
 
-from version import __version__
-
-from sports_matcher import get_team_search_terms, match_team, clean_sports_text, canonical_team_name
+from config import (
+    _clean_label,
+    _find_available_port,
+    _log_failure,
+    _LOG_LISTENER,
+    _m3u_attribute,
+    _m3u_title,
+    _PLAYWRIGHT_PATH_SET_BY_APP,
+    _positive_env_number,
+    _public_base_url,
+    _resource_path,
+    _safe_team_id,
+    _upstream_media_headers,
+    _validate_upstream_url,
+    _xml_attr,
+    _xml_text,
+    BUNDLE_DIR,
+    DATA_DIR,
+    LOG_FILE,
+    LOGGER,
+)
+from hls_session import FetchResult, SessionConfig, SessionHooks, SessionRegistry, SourceSpec
+from network_safety import bounded_float, bounded_int, validate_http_url, validate_http_url_async
 from sports_catalog import (
     ESPN_DIRECTORY_ENDPOINTS,
+    parse_espn_team_directory,
     SEASON_WINDOWS,
     SPECIAL_CHANNELS,
     STATIC_TEAM_RECORDS,
     TeamSlug,
-    parse_espn_team_directory,
 )
+from sports_matcher import canonical_team_name, clean_sports_text, get_team_search_terms, match_team
 from stream_extractor import (
-    fetch_streams_from_page,
+    DEFAULT_USER_AGENT,
     fetch_bounded_text,
+    fetch_streams_from_page,
+    is_ignored_url,
+    make_soup,
     playwright_intercept_streams,
     playwright_page,
     playwright_pages_in_use,
-    make_soup,
-    verify_stream_live,
-    DEFAULT_USER_AGENT,
     rank_streams,
-    is_ignored_url,
+    verify_stream_live,
 )
-from network_safety import bounded_float, bounded_int, validate_http_url, validate_http_url_async
-from hls_session import FetchResult, SessionConfig, SessionHooks, SessionRegistry, SourceSpec
+from version import __version__
 
-# Precedence: real environment variables > the data directory's .env (per-user
-# for the tray app, %ProgramData%\Jellyball\.env for the service, written by the
-# installer) > a .env beside the executable (package-wide defaults). Previously
-# the file beside the exe overrode everything, including the environment a
-# service manager or Docker passed in.
-load_dotenv(dotenv_path=USER_ENV_FILE)
-load_dotenv(dotenv_path=APP_DIR / ".env")
-PORT = bounded_int(os.getenv("PORT", "8000"), 8000, 1, 65535)
+
+SQLITE_BUSY_TIMEOUT_MS = 5000
 _configured_db = Path(os.getenv("DB_FILE", "sports_proxy.db"))
 DB_FILE = str(_configured_db if _configured_db.is_absolute() else DATA_DIR / _configured_db)
 _provider_priority = {
@@ -226,18 +98,6 @@ _provider_priority = {
     for index, name in enumerate(os.getenv("STREAM_PROVIDER_PRIORITY", "").split(","))
     if name.strip()
 }
-
-
-def _find_available_port(preferred_port: int) -> int:
-    candidates = list(range(preferred_port, 65536)) + list(range(1, preferred_port))
-    for candidate in candidates:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                probe.bind(("127.0.0.1", candidate))
-            return candidate
-        except OSError:
-            continue
-    raise OSError("No available local TCP port found")
 
 
 _DB_CONNECTIONS_LOCK = threading.Lock()
@@ -320,46 +180,6 @@ def _db_session():
     except Exception:
         conn.rollback()
         raise
-
-
-def _validate_upstream_url(value: str, *, allow_private: Optional[bool] = None) -> Optional[str]:
-    """Allow safe absolute HTTP(S) upstream URLs for proxy endpoints."""
-    return validate_http_url(value, allow_private=allow_private)
-
-
-def _upstream_media_headers(referer: str = "", origin: str = "") -> Dict[str, str]:
-    headers = {
-        "User-Agent": DEFAULT_USER_AGENT,
-        "Accept": "*/*",
-    }
-    if referer:
-        headers["Referer"] = referer
-    if origin:
-        safe_origin = _validate_upstream_url(origin)
-        if safe_origin:
-            parsed_origin = urllib.parse.urlsplit(safe_origin)
-            headers["Origin"] = f"{parsed_origin.scheme}://{parsed_origin.netloc}"
-    return headers
-
-
-def _html(value: object) -> str:
-    """Escape dynamic values before inserting them into dashboard HTML."""
-    return html_escape(str(value or ""), quote=True)
-
-
-def _safe_team_id(value: str) -> str:
-    """Create a stable, non-empty route/database identifier for a team name."""
-    team_id = re.sub(r"[^a-zA-Z0-9_]+", "_", (value or "").lower()).strip("_")
-    return team_id[:80] or f"team_{secrets.token_hex(4)}"
-
-
-def _resource_path(relative_path: str) -> Path:
-    """Resolve a packaged resource or a source-tree resource."""
-    bundle_dir = Path(getattr(sys, "_MEIPASS", APP_DIR))
-    bundled = bundle_dir / relative_path
-    if bundled.exists():
-        return bundled
-    return APP_DIR / relative_path
 
 # --- OPTIONAL DEPENDENCIES FALLBACKS ---
 try:
@@ -2566,49 +2386,6 @@ def _channel_logo_url(data: dict) -> str:
     )
 
 
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")
-# Characters XML 1.0 forbids outright (xml_escape leaves them in and the guide
-# then fails to parse).
-_XML_INVALID_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
-
-
-def _clean_label(value: object, max_length: int = 120) -> str:
-    """Single-line, bounded text for names/queries that end up in the M3U, EPG and UI."""
-    text = _CONTROL_CHARS_RE.sub(" ", str(value or ""))
-    return re.sub(r"\s+", " ", text).strip()[:max_length].strip()
-
-
-def _m3u_attribute(value: str) -> str:
-    # A newline here would start a new playlist line (a planted channel/URL).
-    return _CONTROL_CHARS_RE.sub(" ", str(value or "")).replace('"', "&quot;")
-
-
-def _m3u_title(value: str) -> str:
-    return _CONTROL_CHARS_RE.sub(" ", str(value or "")).strip()
-
-
-def _xml_text(value: object) -> str:
-    return xml_escape(_XML_INVALID_RE.sub("", str(value or "")))
-
-
-def _xml_attr(value: object) -> str:
-    return xml_escape(_XML_INVALID_RE.sub("", str(value or "")), {'"': "&quot;"})
-
-
-_SAFE_HOST_HEADER_RE = re.compile(r"^[A-Za-z0-9.\-]+(:\d{1,5})?$|^\[[0-9A-Fa-f:.]+\](:\d{1,5})?$")
-
-
-def _public_base_url(request: Optional[Request]) -> str:
-    """Base URL for links we hand out (M3U entries, dashboard copy boxes).
-    Falls back to loopback when the Host header is missing or malformed."""
-    host = (request.headers.get("host") or "").strip() if request is not None else ""
-    if not _SAFE_HOST_HEADER_RE.match(host):
-        host = f"127.0.0.1:{PORT}"
-    scheme = getattr(getattr(request, "url", None), "scheme", "http")
-    scheme = scheme if scheme in ("http", "https") else "http"
-    return f"{scheme}://{host}"
-
-
 def _catalog_search_terms(record: TeamSlug, source_id: str) -> List[str]:
     values = [record.canonical, *record.aliases, source_id, record.slug.replace("-", " ")]
     terms = {str(value).strip() for value in values if str(value).strip()}
@@ -2771,10 +2548,6 @@ async def _stop_team_scrape_loop(team_id: str) -> None:
 
 
 CACHE_TTL_SECONDS = 120.0
-
-
-def _positive_env_number(name: str, default: float) -> float:
-    return bounded_float(os.getenv(name, str(default)), default, 0.001, 86400.0)
 
 
 ACTIVE_HEALTH_INTERVAL = _positive_env_number("ACTIVE_HEALTH_INTERVAL", 3.0)
@@ -5305,7 +5078,7 @@ def _internal_base_url() -> str:
     host = (os.getenv("JELLYBALL_HOST") or "127.0.0.1").strip()
     if host in ("", "0.0.0.0", "::", "[::]", "localhost"):
         host = "127.0.0.1"
-    return f"http://{host}:{PORT}"
+    return f"http://{host}:{config.PORT}"
 
 
 def _multiview_input_url(team_id: str) -> str:
@@ -5992,9 +5765,6 @@ def _multiview_audio_index(data: dict) -> int:
 def _multiview_member_label(team_id: str) -> str:
     member = stream_state.get(team_id)
     return str(member.get("name") or team_id) if member else f"{team_id} (removed)"
-
-
-from typing import NamedTuple  # noqa: E402 (kept local to the Multi-View section)
 
 
 class _MultiviewInput(NamedTuple):
@@ -8133,7 +7903,7 @@ async def api_status(auth: bool = Depends(verify_dashboard_auth)):
 
     return {
         "status": "ok",
-        "port": PORT,
+        "port": config.PORT,
         "channels": channels,
         "channel_count": len(channels),
     }
@@ -9161,12 +8931,24 @@ TUNABLES: Tuple[Tunable, ...] = (
             1, 600, "STREAM_CHUNK_CACHE_TTL", db_key="stream_chunk_cache_ttl"),
 )
 _TUNABLES_BY_NAME = {t.name: t for t in TUNABLES}
+# A non-session Tunable.target is a global of the module whose code reads it.
+# It must be rebound on that module - a `from x import NAME` copy elsewhere
+# would not see the change - so these are the modules that own the targets.
+_TUNABLE_TARGET_MODULES = (sys.modules[__name__],)
+
+
+def _tunable_module(tunable: Tunable):
+    """The module that owns `tunable.target` (a plain module global)."""
+    for module in _TUNABLE_TARGET_MODULES:
+        if hasattr(module, tunable.target):
+            return module
+    raise LookupError(f"no module owns tunable target {tunable.target}")
 
 
 def _tunable_value(tunable: Tunable):
     if tunable.target.startswith("session."):
         return getattr(SESSIONS.config, tunable.target.split(".", 1)[1])
-    return globals()[tunable.target]
+    return getattr(_tunable_module(tunable), tunable.target)
 
 
 _TUNABLE_DEFAULTS = {t.name: _tunable_value(t) for t in TUNABLES}
@@ -9190,7 +8972,7 @@ def _apply_tunable(tunable: Tunable, value) -> None:
         # sessions pick the change up on their next poll.
         setattr(SESSIONS.config, tunable.target.split(".", 1)[1], value)
     else:
-        globals()[tunable.target] = value
+        setattr(_tunable_module(tunable), tunable.target, value)
 
 
 def _load_tunable_overrides() -> None:
@@ -9611,17 +9393,17 @@ def run_headless(stop_event: Optional[threading.Event] = None) -> int:
         LOGGER.error("Jellyball must run with a single worker (WEB_CONCURRENCY=1)")
         return 2
     host = _headless_host()
-    if not _wait_for_port(host, PORT, PORT_BIND_WAIT_SECONDS):
-        LOGGER.error("Port %s on %s is in use; refusing to start on a different port", PORT, host)
+    if not _wait_for_port(host, config.PORT, PORT_BIND_WAIT_SECONDS):
+        LOGGER.error("Port %s on %s is in use; refusing to start on a different port", config.PORT, host)
         return 3
-    server = build_server(host, PORT)
+    server = build_server(host, config.PORT)
     if stop_event is not None:
         def _watch_stop() -> None:
             stop_event.wait()
             server.should_exit = True
 
         threading.Thread(target=_watch_stop, name="jellyball-stop-watch", daemon=True).start()
-    LOGGER.info("Jellyball %s running headless at http://%s:%s", __version__, host, PORT)
+    LOGGER.info("Jellyball %s running headless at http://%s:%s", __version__, host, config.PORT)
     try:
         server.run()
     finally:
@@ -9650,7 +9432,7 @@ class TrayApplication:
         )
 
     def open_gui(self, icon, item):
-        webbrowser.open(f"http://127.0.0.1:{PORT}/")
+        webbrowser.open(f"http://127.0.0.1:{config.PORT}/")
 
     def quit(self, icon, item):
         if self.server:
@@ -9680,7 +9462,7 @@ class TrayApplication:
             # broken .env edit), keep this tray alive and bring the server back.
             deadline = time.monotonic() + 45.0
             while time.monotonic() < deadline:
-                if _existing_jellyball_instance(PORT):
+                if _existing_jellyball_instance(config.PORT):
                     self.icon.stop()
                     return
                 if child.poll() is not None:
@@ -9707,41 +9489,40 @@ class TrayApplication:
         self._pending_notices.clear()
 
     def _start_server(self) -> None:
-        self.server = build_server(self.host, PORT)
+        self.server = build_server(self.host, config.PORT)
         self.server_thread = threading.Thread(target=self.server.run, name="jellyball-server", daemon=True)
         self.server_thread.start()
 
     def run(self):
-        global PORT
         host = os.getenv("JELLYBALL_HOST", "127.0.0.1").strip() or "127.0.0.1"
         self.host = host
-        if not _port_is_free(host, PORT):
-            if _existing_jellyball_instance(PORT):
+        if not _port_is_free(host, config.PORT):
+            if _existing_jellyball_instance(config.PORT):
                 # The Windows service (or another tray instance) already runs
                 # Jellyball here: just open its dashboard.
-                LOGGER.info("Jellyball already running on port %s; opening its dashboard", PORT)
-                webbrowser.open(f"http://127.0.0.1:{PORT}/")
+                LOGGER.info("Jellyball already running on port %s; opening its dashboard", config.PORT)
+                webbrowser.open(f"http://127.0.0.1:{config.PORT}/")
                 return
-            if not _wait_for_port(host, PORT, 10.0):
-                selected_port = _find_available_port(PORT)
+            if not _wait_for_port(host, config.PORT, 10.0):
+                selected_port = _find_available_port(config.PORT)
                 LOGGER.warning(
                     "Configured port %s is in use by another program; using %s for this desktop session "
                     "(Jellyfin tuner URLs pointing at %s will not work until it is free)",
-                    PORT, selected_port, PORT,
+                    config.PORT, selected_port, config.PORT,
                 )
                 self._pending_notices.append(
-                    f"Port {PORT} is in use, so Jellyball is on port {selected_port} for now. "
-                    f"Jellyfin URLs using port {PORT} won't work until it's free."
+                    f"Port {config.PORT} is in use, so Jellyball is on port {selected_port} for now. "
+                    f"Jellyfin URLs using port {config.PORT} won't work until it's free."
                 )
-                PORT = selected_port
+                config.PORT = selected_port
 
         self._start_server()
         if DASHBOARD_AUTH_MODE == "generated":
             self._pending_notices.append(
                 f"Dashboard password generated (user {DASHBOARD_USERNAME}); it is in {DASHBOARD_PASSWORD_FILE}."
             )
-        LOGGER.info("Jellyball %s web GUI available at http://127.0.0.1:%s", __version__, PORT)
-        threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}/")).start()
+        LOGGER.info("Jellyball %s web GUI available at http://127.0.0.1:%s", __version__, config.PORT)
+        threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{config.PORT}/")).start()
         try:
             self.icon.run(setup=self._on_icon_ready)
         finally:

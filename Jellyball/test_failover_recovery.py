@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import main
+import config
+from datetime import datetime, timedelta, timezone
 
 
 def _candidate(provider, url, **extra):
@@ -232,7 +234,7 @@ class ProviderTimeoutTests(unittest.TestCase):
 class LogScrubbingTests(unittest.TestCase):
     def test_exception_detail_keeps_only_url_hosts(self):
         exc = RuntimeError("POST https://api.telegram.org/bot123:SECRET/sendMessage failed")
-        detail = main._safe_exception_detail(exc)
+        detail = config._safe_exception_detail(exc)
         self.assertNotIn("SECRET", detail)
         self.assertIn("api.telegram.org", detail)
 
@@ -249,8 +251,8 @@ class OffSeasonGuideTests(StateMixin, unittest.TestCase):
             self.assertFalse(main._channel_listed(main.stream_state["t"]))
         with patch.object(main, "SHOW_OFFSEASON_CHANNELS", True):
             self.assertTrue(main._channel_listed(main.stream_state["t"]))
-            now = main.datetime.now(main.timezone.utc)
-            blocks = main._channel_programmes("t", main.stream_state["t"], now, now + main.timedelta(days=1), {})
+            now = datetime.now(timezone.utc)
+            blocks = main._channel_programmes("t", main.stream_state["t"], now, now + timedelta(days=1), {})
             self.assertEqual(len(blocks), 1)
             self.assertIn("Off-season", blocks[0]["title"])
 

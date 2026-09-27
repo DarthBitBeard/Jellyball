@@ -33,6 +33,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import threading
 import stream_extractor
 
 
@@ -353,7 +354,7 @@ class SharedFetchHtmlTests(unittest.IsolatedAsyncioTestCase):
             return None
 
         with patch.object(main, "fetch_bounded_text", fake_fetch_bounded_text), \
-                patch.object(main.asyncio, "sleep", AsyncMockNoOp()) as sleep_mock:
+                patch.object(asyncio, "sleep", AsyncMockNoOp()) as sleep_mock:
             result = await scraper._fetch_html(
                 None, "https://isportsurge.ws/x", browser, settle_seconds=2, goto_timeout=25000
             )
@@ -385,7 +386,7 @@ class SharedFetchHtmlTests(unittest.IsolatedAsyncioTestCase):
             return None
 
         with patch.object(main, "fetch_bounded_text", fake_fetch_bounded_text), \
-                patch.object(main.asyncio, "sleep", AsyncMockNoOp()) as sleep_mock:
+                patch.object(asyncio, "sleep", AsyncMockNoOp()) as sleep_mock:
             result = await scraper._fetch_directory_page(None, "https://dlhd.pk/x", browser)
         self.assertEqual(result, "<html>directory</html>")
         self.assertFalse(page.waited_networkidle)
@@ -574,7 +575,7 @@ class ConnectionCacheTests(_TempDbCase):
 
     def test_close_all_db_connections_clears_the_cache(self):
         conn = main._connect_db()
-        self.assertIn((main.threading.get_ident(), main.DB_FILE), main._DB_CONNECTIONS)
+        self.assertIn((threading.get_ident(), main.DB_FILE), main._DB_CONNECTIONS)
         main.close_all_db_connections()
         self.assertEqual(main._DB_CONNECTIONS, {})
         # A later call transparently opens a fresh connection.
@@ -620,7 +621,7 @@ class WebhookRetryTests(unittest.IsolatedAsyncioTestCase):
 
         client = await self._client_with(handler)
         async with client:
-            with patch.object(main.asyncio, "sleep", AsyncMockNoOp()):
+            with patch.object(asyncio, "sleep", AsyncMockNoOp()):
                 await main._post_webhook_with_retries(client, "Discord", "https://discord.example/webhook")
         self.assertEqual(len(calls), 1)
 
@@ -636,7 +637,7 @@ class WebhookRetryTests(unittest.IsolatedAsyncioTestCase):
         client = await self._client_with(handler)
         sleep_mock = AsyncMockNoOp()
         async with client:
-            with patch.object(main.asyncio, "sleep", sleep_mock):
+            with patch.object(asyncio, "sleep", sleep_mock):
                 await main._post_webhook_with_retries(client, "Discord", "https://discord.example/webhook")
         self.assertEqual(len(calls), 2)
         self.assertEqual(len(sleep_mock.calls), 1)
@@ -648,7 +649,7 @@ class WebhookRetryTests(unittest.IsolatedAsyncioTestCase):
 
         client = await self._client_with(handler)
         async with client:
-            with patch.object(main.asyncio, "sleep", AsyncMockNoOp()):
+            with patch.object(asyncio, "sleep", AsyncMockNoOp()):
                 with self.assertLogs("jellyball", level="WARNING") as cm:
                     await main._post_webhook_with_retries(
                         client, "Discord", "https://discord.example/webhook/supersecrettoken"
@@ -667,7 +668,7 @@ class WebhookRetryTests(unittest.IsolatedAsyncioTestCase):
 
         client = await self._client_with(handler)
         async with client:
-            with patch.object(main.asyncio, "sleep", AsyncMockNoOp()) as sleep_mock:
+            with patch.object(asyncio, "sleep", AsyncMockNoOp()) as sleep_mock:
                 await main._post_webhook_with_retries(client, "Telegram", "https://telegram.example/webhook")
         self.assertEqual(len(calls), 1)
         self.assertEqual(sleep_mock.calls, [])
@@ -684,7 +685,7 @@ class WebhookRetryTests(unittest.IsolatedAsyncioTestCase):
         client = await self._client_with(handler)
         sleep_mock = AsyncMockNoOp()
         async with client:
-            with patch.object(main.asyncio, "sleep", sleep_mock):
+            with patch.object(asyncio, "sleep", sleep_mock):
                 await main._post_webhook_with_retries(client, "Discord", "https://discord.example/webhook")
         self.assertEqual(len(calls), 2)
         self.assertEqual(sleep_mock.calls[0][0], (5.0,))
@@ -701,7 +702,7 @@ class WebhookRetryTests(unittest.IsolatedAsyncioTestCase):
         client = await self._client_with(handler)
         sleep_mock = AsyncMockNoOp()
         async with client:
-            with patch.object(main.asyncio, "sleep", sleep_mock):
+            with patch.object(asyncio, "sleep", sleep_mock):
                 await main._post_webhook_with_retries(client, "Discord", "https://discord.example/webhook")
         self.assertEqual(sleep_mock.calls[0][0], (10.0,))
 
@@ -717,7 +718,7 @@ class WebhookRetryTests(unittest.IsolatedAsyncioTestCase):
         client = await self._client_with(handler)
         sleep_mock = AsyncMockNoOp()
         async with client:
-            with patch.object(main.asyncio, "sleep", sleep_mock):
+            with patch.object(asyncio, "sleep", sleep_mock):
                 await main._post_webhook_with_retries(client, "Discord", "https://discord.example/webhook")
         self.assertEqual(len(calls), 2)
         self.assertEqual(sleep_mock.calls[0][0], (1.0,))
@@ -748,8 +749,8 @@ class WebhookRetryTests(unittest.IsolatedAsyncioTestCase):
             "telegram_bot_token": "",
             "telegram_chat_id": "",
         })):
-            with patch.object(main.httpx, "AsyncClient", counting_client_factory):
-                with patch.object(main.asyncio, "sleep", AsyncMockNoOp()):
+            with patch.object(httpx, "AsyncClient", counting_client_factory):
+                with patch.object(asyncio, "sleep", AsyncMockNoOp()):
                     await main.send_alert("Title", "Message", "warning")
 
         self.assertEqual(len(created_clients), 1)

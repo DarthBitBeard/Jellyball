@@ -12,6 +12,7 @@ from unittest.mock import patch
 import httpx
 
 import main
+import config
 
 
 def _client(host: str = "127.0.0.1:8000") -> httpx.AsyncClient:
@@ -221,15 +222,15 @@ class OutputEscapingTests(unittest.TestCase):
     def test_malformed_host_header_falls_back_to_loopback(self):
         main.stream_state["t"] = {"name": "T", "query": "t", "candidates": [], "category": "custom"}
         playlist = asyncio.run(main.generate_m3u(self._request(b"evil.example/<script>")))
-        self.assertIn(f"http://127.0.0.1:{main.PORT}/stream/t.m3u8", playlist)
+        self.assertIn(f"http://127.0.0.1:{config.PORT}/stream/t.m3u8", playlist)
 
     def test_xml_attributes_escape_quotes_and_drop_invalid_chars(self):
-        self.assertEqual(main._xml_attr('a"b<c'), "a&quot;b&lt;c")
-        self.assertEqual(main._xml_text("ok\x00\x07text"), "oktext")
+        self.assertEqual(config._xml_attr('a"b<c'), "a&quot;b&lt;c")
+        self.assertEqual(config._xml_text("ok\x00\x07text"), "oktext")
 
     def test_clean_label(self):
-        self.assertEqual(main._clean_label("  A\r\nB\tC  "), "A B C")
-        self.assertEqual(len(main._clean_label("x" * 500, 120)), 120)
+        self.assertEqual(config._clean_label("  A\r\nB\tC  "), "A B C")
+        self.assertEqual(len(config._clean_label("x" * 500, 120)), 120)
 
 
 class ImportConfigTests(TempDbMixin, unittest.TestCase):

@@ -48,7 +48,6 @@ from main import (
     _startup_media_urls,
     _stream_matches_requested_event,
     _chunk_media_type,
-    _upstream_media_headers,
     proxy_chunk,
     proxy_substream,
     rewrite_m3u8,
@@ -73,11 +72,13 @@ from main import (
     _resolve_schedule_status,
     xmltv_ts,
 )
+from config import _upstream_media_headers
 
 from stream_extractor import extract_streams_from_text, verify_stream_live
 from network_safety import validate_http_url
 from starlette.requests import Request
 from sports_catalog import SPECIAL_CHANNELS
+import config
 
 
 class JellyballChangesTests(unittest.TestCase):
@@ -753,7 +754,7 @@ class JellyballChangesTests(unittest.TestCase):
             "active_audio_team_id": "bucs",
         }
         members = {team: {"name": team.title()} for team in ("lions", "dolphins", "bucs")}
-        with patch.object(main, "PORT", 8000), patch.dict(main.stream_state, members, clear=True),                 patch.dict(os.environ, {"JELLYBALL_HOST": ""}):
+        with patch.object(config, "PORT", 8000), patch.dict(main.stream_state, members, clear=True),                 patch.dict(os.environ, {"JELLYBALL_HOST": ""}):
             args = _build_multiview_ffmpeg_args("mv_test", data, Path("/fake/out"), [True, True, False, True], "nvenc")
 
         self.assertEqual(args.count("-reconnect"), 4)
