@@ -64,6 +64,14 @@ from config import (
     LOG_FILE,
     LOGGER,
 )
+import state
+from state import (
+    _cancel_background_tasks,
+    _media_client,
+    _spawn_background_task,
+    PLACEHOLDER_SESSION_ID,
+    stream_state,
+)
 from hls_session import FetchResult, SessionConfig, SessionHooks, SessionRegistry, SourceSpec
 from network_safety import bounded_float, bounded_int, validate_http_url, validate_http_url_async
 from sports_catalog import (
@@ -91,6 +99,7 @@ from version import __version__
 
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
+
 _configured_db = Path(os.getenv("DB_FILE", "sports_proxy.db"))
 DB_FILE = str(_configured_db if _configured_db.is_absolute() else DATA_DIR / _configured_db)
 _provider_priority = {
@@ -98,7 +107,6 @@ _provider_priority = {
     for index, name in enumerate(os.getenv("STREAM_PROVIDER_PRIORITY", "").split(","))
     if name.strip()
 }
-
 
 _DB_CONNECTIONS_LOCK = threading.Lock()
 # Keyed by (thread id, DB path) rather than just thread id, so a thread that
@@ -180,6 +188,7 @@ def _db_session():
     except Exception:
         conn.rollback()
         raise
+
 
 # --- OPTIONAL DEPENDENCIES FALLBACKS ---
 try:
@@ -2154,7 +2163,7 @@ ACTIVE_PROVIDERS = [
     IptvOrgScraper(),
 ]
 LINEAR_PROVIDERS = tuple(provider for provider in ACTIVE_PROVIDERS if provider.name in {"TheTVApp", "DaddyLive", "IPTV-Org"})
-stream_state: Dict[str, dict] = {}
+
 _SCRAPE_IN_FLIGHT: Set[str] = set()
 
 CATALOG_REFRESH_SECONDS = bounded_float(os.getenv("CATALOG_REFRESH_SECONDS", "3600"), 3600.0, 60.0, 86400.0)
@@ -2164,8 +2173,6 @@ _CATALOG_REMOTE_LOADED = False
 _CATALOG_LOCK = asyncio.Lock()
 CATALOG_FAILURE_RETRY_SECONDS = bounded_float(os.getenv("CATALOG_FAILURE_RETRY_SECONDS", "120"), 120.0, 30.0, 1800.0)
 
-SHARED_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
-MEDIA_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 PLAYWRIGHT_CLIENT: Optional[Playwright] = None
 SHARED_BROWSER: Optional[Browser] = None
 _PLAYWRIGHT_LOCK = asyncio.Lock()
@@ -2177,7 +2184,7 @@ _PLAYWRIGHT_LOCK = asyncio.Lock()
 # whenever the browser object actually changes instead of trusting stale state.
 PLAYWRIGHT_RECYCLE_HOURS = bounded_float(os.getenv("PLAYWRIGHT_RECYCLE_HOURS", "6"), 6.0, 0.0, 168.0)
 _BROWSER_LAUNCH_INFO: Optional[Tuple[int, float]] = None
-_BACKGROUND_TASKS: Set[asyncio.Task] = set()
+
 _TEAM_SCRAPE_TASKS: Dict[str, asyncio.Task] = {}
 _TEAM_SCRAPE_WAKE_EVENTS: Dict[str, asyncio.Event] = {}
 _TEAM_STATE_LOCKS: Dict[str, asyncio.Lock] = {}
@@ -2248,8 +2255,8 @@ async def get_team_catalog() -> Dict[str, Tuple[TeamSlug, ...]]:
         previous_catalog = dict(_CATALOG_CACHE)
         was_remote_loaded = _CATALOG_REMOTE_LOADED
 
-        owns_client = SHARED_HTTP_CLIENT is None
-        client = SHARED_HTTP_CLIENT or httpx.AsyncClient(
+        owns_client = state.SHARED_HTTP_CLIENT is None
+        client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(
             timeout=10.0,
             follow_redirects=True,
             http2=True,
@@ -2483,34 +2490,6 @@ async def get_healthy_browser() -> Optional[Browser]:
             return None
 
 
-def _spawn_background_task(coroutine, operation: str) -> asyncio.Task:
-    """Track fire-and-forget work so failures are logged and shutdown is clean."""
-    task = asyncio.create_task(coroutine, name=operation)
-    _BACKGROUND_TASKS.add(task)
-
-    def _task_finished(done: asyncio.Task) -> None:
-        _BACKGROUND_TASKS.discard(done)
-        if done.cancelled():
-            return
-        try:
-            exception = done.exception()
-        except asyncio.CancelledError:
-            return
-        if exception:
-            _log_failure(operation, exception, logging.ERROR)
-
-    task.add_done_callback(_task_finished)
-    return task
-
-
-async def _cancel_background_tasks() -> None:
-    tasks = list(_BACKGROUND_TASKS)
-    for task in tasks:
-        task.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
 def _start_team_scrape_loop(team_id: str, initial_delay: float = 0.0) -> asyncio.Task:
     existing = _TEAM_SCRAPE_TASKS.get(team_id)
     if existing and not existing.done():
@@ -2548,7 +2527,6 @@ async def _stop_team_scrape_loop(team_id: str) -> None:
 
 
 CACHE_TTL_SECONDS = 120.0
-
 
 ACTIVE_HEALTH_INTERVAL = _positive_env_number("ACTIVE_HEALTH_INTERVAL", 3.0)
 STANDBY_HEALTH_INTERVAL = _positive_env_number("STANDBY_HEALTH_INTERVAL", 45.0)
@@ -2766,8 +2744,8 @@ async def fetch_espn_team_schedule(
         "soccer": timedelta(hours=2.5),
     }
     upcoming = []
-    owns_client = SHARED_HTTP_CLIENT is None
-    client = SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=8.0, follow_redirects=True, http2=True)
+    owns_client = state.SHARED_HTTP_CLIENT is None
+    client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=8.0, follow_redirects=True, http2=True)
     try:
         resp = await client.get(url)
         if resp.status_code != 200:
@@ -2922,8 +2900,8 @@ async def master_scrape(
     LOGGER.info("Starting stream search for team=%s terms=%s", display_title, search_terms[:4])
     providers = _providers_for_search(always_live)
 
-    owns_client = SHARED_HTTP_CLIENT is None
-    client = SHARED_HTTP_CLIENT or httpx.AsyncClient(
+    owns_client = state.SHARED_HTTP_CLIENT is None
+    client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(
         limits=httpx.Limits(max_keepalive_connections=50, max_connections=150),
         timeout=12.0,
         follow_redirects=True,
@@ -3691,8 +3669,8 @@ async def emergency_rescrape(team_id: str) -> None:
 
 
 async def check_stream_health(url: str, referer: str, origin: str = "", probe_state: Optional[dict] = None) -> bool:
-    owns_client = SHARED_HTTP_CLIENT is None
-    client = SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=5.0, follow_redirects=True, http2=True)
+    owns_client = state.SHARED_HTTP_CLIENT is None
+    client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=5.0, follow_redirects=True, http2=True)
     try:
         # Origin must be forwarded: streams captured with one (Playwright-intercepted
         # providers) play through the proxy, which sends it, but failed every probe
@@ -3907,7 +3885,7 @@ def _install_loop_exception_filter() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global SHARED_HTTP_CLIENT, MEDIA_HTTP_CLIENT, PLAYWRIGHT_CLIENT, SHARED_BROWSER, _PREFETCH_SEMAPHORE
+    global PLAYWRIGHT_CLIENT, SHARED_BROWSER, _PREFETCH_SEMAPHORE
 
     _install_loop_exception_filter()
     init_db()
@@ -3940,7 +3918,7 @@ async def lifespan(app: FastAPI):
         PLAYWRIGHT_CLIENT = None
         SHARED_BROWSER = None
     
-    SHARED_HTTP_CLIENT = httpx.AsyncClient(
+    state.SHARED_HTTP_CLIENT = httpx.AsyncClient(
         limits=httpx.Limits(max_keepalive_connections=50, max_connections=150),
         timeout=12.0,
         follow_redirects=True,
@@ -3951,7 +3929,7 @@ async def lifespan(app: FastAPI):
     # keepalive because segment polls are 2-6s apart (the 5s default expired
     # between polls, paying a new TCP+TLS handshake on most requests). Redirects
     # are followed manually so every hop is SSRF-validated.
-    MEDIA_HTTP_CLIENT = httpx.AsyncClient(
+    state.MEDIA_HTTP_CLIENT = httpx.AsyncClient(
         limits=httpx.Limits(max_keepalive_connections=64, max_connections=200, keepalive_expiry=60.0),
         timeout=httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=3.0),
         follow_redirects=False,
@@ -4085,18 +4063,18 @@ async def lifespan(app: FastAPI):
             await PLAYWRIGHT_CLIENT.stop()
         except Exception as exc:
             _log_failure("stop Playwright", exc)
-    if SHARED_HTTP_CLIENT:
+    if state.SHARED_HTTP_CLIENT:
         try:
-            await SHARED_HTTP_CLIENT.aclose()
+            await state.SHARED_HTTP_CLIENT.aclose()
         except Exception as exc:
             _log_failure("close shared HTTP client", exc)
-        SHARED_HTTP_CLIENT = None
-    if MEDIA_HTTP_CLIENT:
+        state.SHARED_HTTP_CLIENT = None
+    if state.MEDIA_HTTP_CLIENT:
         try:
-            await MEDIA_HTTP_CLIENT.aclose()
+            await state.MEDIA_HTTP_CLIENT.aclose()
         except Exception as exc:
             _log_failure("close media HTTP client", exc)
-        MEDIA_HTTP_CLIENT = None
+        state.MEDIA_HTTP_CLIENT = None
     SHARED_BROWSER = None
     PLAYWRIGHT_CLIENT = None
     _PREFETCH_SEMAPHORE = None
@@ -5654,7 +5632,7 @@ MULTIVIEW_WATCHDOG_INTERVAL = bounded_float(os.getenv("MULTIVIEW_WATCHDOG_INTERV
 MULTIVIEW_AUDIO_CHANNELS = os.getenv("MULTIVIEW_AUDIO_CHANNELS", "1").strip().lower() not in ("0", "false", "no")
 # Extra wait for the placeholder session when a member has to be replaced by it.
 MULTIVIEW_STANDIN_WAIT_SECONDS = 10.0
-PLACEHOLDER_SESSION_ID = "__placeholder__"
+
 # MPEG-TS stream_type ffmpeg writes for AAC (ADTS): the generated silent track.
 _MULTIVIEW_SILENCE_AUDIO_TYPE = 0x0F
 # Monotonic time of the last GPU encoder / CUDA device failure (None = none yet).
@@ -6697,11 +6675,6 @@ HLS_MEDIA_TYPE = "application/vnd.apple.mpegurl"
 _PLACEHOLDER_START_TASK: Optional[asyncio.Task] = None
 
 
-def _media_client() -> Optional[httpx.AsyncClient]:
-    """Dedicated pool for playlists/segments so scrape bursts can't starve playback."""
-    return MEDIA_HTTP_CLIENT or SHARED_HTTP_CLIENT
-
-
 async def _session_fetch(url: str, headers: Dict[str, str], max_bytes: int, timeout_seconds: float) -> Optional[FetchResult]:
     client = _media_client()
     if client is None:
@@ -7464,8 +7437,8 @@ async def _fetch_tvguide_epg() -> Dict[str, List[dict]]:
         "User-Agent": DEFAULT_USER_AGENT,
         "Referer": "https://www.tvguide.com/",
     }
-    client = SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=10.0, follow_redirects=True)
-    owns_client = SHARED_HTTP_CLIENT is None
+    client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=10.0, follow_redirects=True)
+    owns_client = state.SHARED_HTTP_CLIENT is None
     try:
         resp = await client.get(url, headers=headers)
         if resp.status_code == 200:

@@ -12,6 +12,7 @@ from unittest.mock import patch
 import httpx
 
 import main
+import state
 import config
 
 
@@ -30,12 +31,12 @@ class TempDbMixin:
         self._db_patch = patch.object(main, "DB_FILE", os.path.join(self._tmpdir, "test.db"))
         self._db_patch.start()
         main.init_db()
-        self._state_backup = dict(main.stream_state)
-        main.stream_state.clear()
+        self._state_backup = dict(state.stream_state)
+        state.stream_state.clear()
 
     def tearDown(self):
-        main.stream_state.clear()
-        main.stream_state.update(self._state_backup)
+        state.stream_state.clear()
+        state.stream_state.update(self._state_backup)
         self._db_patch.stop()
         closer = getattr(main, "close_all_db_connections", None)
         if closer:
@@ -194,12 +195,12 @@ class SecretSettingsTests(TempDbMixin, unittest.TestCase):
 
 class OutputEscapingTests(unittest.TestCase):
     def setUp(self):
-        self._state_backup = dict(main.stream_state)
-        main.stream_state.clear()
+        self._state_backup = dict(state.stream_state)
+        state.stream_state.clear()
 
     def tearDown(self):
-        main.stream_state.clear()
-        main.stream_state.update(self._state_backup)
+        state.stream_state.clear()
+        state.stream_state.update(self._state_backup)
 
     def _request(self, host=b"127.0.0.1:8000"):
         from starlette.requests import Request
@@ -210,7 +211,7 @@ class OutputEscapingTests(unittest.TestCase):
         })
 
     def test_newline_in_name_cannot_plant_playlist_lines(self):
-        main.stream_state["evil"] = {
+        state.stream_state["evil"] = {
             "name": 'Evil"\n#EXTINF:-1,Planted\nhttp://attacker.example/x.m3u8',
             "query": "evil", "candidates": [], "category": "custom",
         }
@@ -220,7 +221,7 @@ class OutputEscapingTests(unittest.TestCase):
         self.assertFalse(any(line.startswith("http://attacker.example") for line in lines))
 
     def test_malformed_host_header_falls_back_to_loopback(self):
-        main.stream_state["t"] = {"name": "T", "query": "t", "candidates": [], "category": "custom"}
+        state.stream_state["t"] = {"name": "T", "query": "t", "candidates": [], "category": "custom"}
         playlist = asyncio.run(main.generate_m3u(self._request(b"evil.example/<script>")))
         self.assertIn(f"http://127.0.0.1:{config.PORT}/stream/t.m3u8", playlist)
 
@@ -261,8 +262,8 @@ class ImportConfigTests(TempDbMixin, unittest.TestCase):
         result = json.loads(response.body)
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["skipped"], 2)
-        self.assertEqual(list(main.stream_state), ["evil_id"])
-        entry = main.stream_state["evil_id"]
+        self.assertEqual(list(state.stream_state), ["evil_id"])
+        entry = state.stream_state["evil_id"]
         self.assertEqual(entry["name"], "Evil Name")
         self.assertEqual(entry["logo_url"], "")  # link-local metadata address rejected
         start_loop.assert_called_once_with("evil_id")
@@ -276,7 +277,7 @@ class ImportConfigTests(TempDbMixin, unittest.TestCase):
 
 class DashboardRenderTests(TempDbMixin, unittest.TestCase):
     def test_dashboard_renders_and_escapes_hostile_names(self):
-        main.stream_state["evil"] = {
+        state.stream_state["evil"] = {
             "name": '<script>alert(1)</script>', "query": "q", "candidates": [
                 {"provider": "<img src=x onerror=alert(2)>", "url": "https://cdn.example/a.m3u8",
                  "match_title": '"><svg onload=alert(3)>'},
@@ -303,7 +304,7 @@ class DashboardRenderTests(TempDbMixin, unittest.TestCase):
         """Templates render cleanly (no leftover Jinja syntax) for every tab,
         with channels that exercise candidates, Multi-View, off-season and
         exhausted states."""
-        main.stream_state["with_candidates"] = {
+        state.stream_state["with_candidates"] = {
             "name": "Has Candidates", "query": "q",
             "candidates": [
                 {"provider": "ProviderA", "url": "https://cdn.example/a.m3u8", "match_title": "Game A"},
@@ -312,19 +313,19 @@ class DashboardRenderTests(TempDbMixin, unittest.TestCase):
             "active_index": 0, "is_healthy": True, "category": "nfl", "logo_url": "",
             "start_time": "", "stop_time": "", **main._scrape_lifecycle_defaults(),
         }
-        main.stream_state["off_season_team"] = {
+        state.stream_state["off_season_team"] = {
             "name": "Off Season Team", "query": "q", "candidates": [],
             "active_index": 0, "is_healthy": False, "category": "ncaaf", "logo_url": "",
             "start_time": "", "stop_time": "", **main._scrape_lifecycle_defaults(),
         }
-        main.stream_state["off_season_team"]["schedule_status"] = "off_season"
-        main.stream_state["exhausted_team"] = {
+        state.stream_state["off_season_team"]["schedule_status"] = "off_season"
+        state.stream_state["exhausted_team"] = {
             "name": "Exhausted Team", "query": "q", "candidates": [],
             "active_index": 0, "is_healthy": False, "category": "nba", "logo_url": "",
             "start_time": "", "stop_time": "", **main._scrape_lifecycle_defaults(),
         }
-        main.stream_state["exhausted_team"]["exhausted"] = True
-        main.stream_state["mv_channel"] = {
+        state.stream_state["exhausted_team"]["exhausted"] = True
+        state.stream_state["mv_channel"] = {
             "type": "multiview", "name": "Quad Box", "layout": "grid_2x2",
             "member_team_ids": ["with_candidates", "off_season_team"],
             "active_audio_team_id": "with_candidates",

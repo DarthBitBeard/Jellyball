@@ -8,6 +8,7 @@ import httpx
 from starlette.requests import Request
 
 import main
+import state
 
 
 def _request(path="/chunk.ts"):
@@ -29,7 +30,7 @@ class LegacyRelayTests(unittest.TestCase):
         async def exercise():
             client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
             try:
-                with patch.object(main, "SHARED_HTTP_CLIENT", client), \
+                with patch.object(state, "SHARED_HTTP_CLIENT", client), \
                         patch.object(main, "PREFETCH_CHUNK_COUNT", 0), \
                         patch.object(main, "_open_upstream_media", side_effect=boom):
                     with self.assertRaises(RuntimeError):
@@ -49,7 +50,7 @@ class LegacyRelayTests(unittest.TestCase):
         async def exercise():
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
             try:
-                with patch.object(main, "SHARED_HTTP_CLIENT", client), \
+                with patch.object(state, "SHARED_HTTP_CLIENT", client), \
                         patch.object(main, "PREFETCH_CHUNK_COUNT", 0), \
                         patch.object(main, "validate_http_url_async", side_effect=lambda u, **k: u):
                     return await main.proxy_chunk(_request(), url=url, sig=main._relay_signature(url))

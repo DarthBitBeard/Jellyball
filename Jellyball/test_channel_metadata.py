@@ -17,6 +17,7 @@ from main import (
     generate_xmltv,
 )
 from sports_catalog import SPECIAL_CHANNELS, STATIC_TEAM_RECORDS
+import state
 
 
 class ChannelMetadataTests(unittest.TestCase):
@@ -59,10 +60,10 @@ class ChannelMetadataTests(unittest.TestCase):
     def test_m3u_contains_special_channel_branding(self):
         import main
 
-        original_state = dict(main.stream_state)
+        original_state = dict(state.stream_state)
         try:
-            main.stream_state.clear()
-            main.stream_state["special_espn"] = {
+            state.stream_state.clear()
+            state.stream_state["special_espn"] = {
                 "name": "ESPN",
                 "catalog_key": "special:espn",
                 "category": "special",
@@ -72,8 +73,8 @@ class ChannelMetadataTests(unittest.TestCase):
             request = SimpleNamespace(headers={"host": "127.0.0.1:8000"})
             playlist = asyncio.run(generate_m3u(request))
         finally:
-            main.stream_state.clear()
-            main.stream_state.update(original_state)
+            state.stream_state.clear()
+            state.stream_state.update(original_state)
 
         self.assertIn('tvg-id="ESPN.us"', playlist)
         self.assertIn('tvg-name="ESPN"', playlist)
@@ -84,10 +85,10 @@ class ChannelMetadataTests(unittest.TestCase):
     def test_xmltv_uses_same_special_channel_id_and_logo(self):
         import main
 
-        original_state = dict(main.stream_state)
+        original_state = dict(state.stream_state)
         try:
-            main.stream_state.clear()
-            main.stream_state["special_espn"] = {
+            state.stream_state.clear()
+            state.stream_state["special_espn"] = {
                 "name": "ESPN",
                 "catalog_key": "special:espn",
                 "category": "special",
@@ -96,8 +97,8 @@ class ChannelMetadataTests(unittest.TestCase):
             }
             guide = asyncio.run(generate_xmltv())
         finally:
-            main.stream_state.clear()
-            main.stream_state.update(original_state)
+            state.stream_state.clear()
+            state.stream_state.update(original_state)
 
         self.assertIn('<channel id="ESPN.us">', guide)
         self.assertIn('<programme channel="ESPN.us"', guide)
