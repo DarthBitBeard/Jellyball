@@ -110,6 +110,18 @@ datas = [
     for path in ASSETS_DIR.iterdir()
     if path.is_file()
 ]
+
+# Dashboard templates/static assets (see main.py's TEMPLATES/StaticFiles
+# setup, resolved at runtime via _resource_path so this bundle and the
+# source tree both work). Walked recursively to preserve the templates/
+# partials/ subfolder.
+for _dashboard_dir_name in ("templates", "static"):
+    _dashboard_dir = ROOT / _dashboard_dir_name
+    if _dashboard_dir.is_dir():
+        for _path in _dashboard_dir.rglob("*"):
+            if _path.is_file():
+                datas.append((str(_path), str(Path(_dashboard_dir_name) / _path.relative_to(_dashboard_dir).parent)))
+
 binaries = []
 hiddenimports = [
     "sports_catalog",
@@ -138,6 +150,8 @@ hiddenimports = [
     "h2",
     "lxml",
     "lxml.etree",
+    "jinja2",
+    "markupsafe",
     "cryptography",
     # pywin32 service support (jellyball_launcher.py --service)
     "win32timezone",

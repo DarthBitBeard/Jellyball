@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="dark light"><title>Jellyball Sports Manager</title>
+    <script>
+        (function() {
+            try {
+                var t = localStorage.getItem('theme');
+                if (!t) { t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'; }
+                document.documentElement.setAttribute('data-theme', t);
+            } catch (e) {}
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-controls">
+                <button type="button" class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle Dark/Light Mode" aria-label="Toggle dark or light mode">🌙</button>
+            </div>
+            <h1>Jellyball Sports Manager</h1>
+            <p>Multi-Aggregator Scraper &amp; Jellyfin Live TV Gateway</p>
+            <div class="status-badges">
+                <span class="badge" title="{{ auth_badge.title }}">{{ auth_badge.text }}</span>
+                <span class="badge">{{ jellyfin_badge.text }}</span>
+                <span class="badge">{{ webhook_discord_badge.text }}</span>
+                <span class="badge">{{ webhook_telegram_badge.text }}</span>
+            </div>
+        </header>
+        {% if update_banner %}
+        <div class="card" role="status" style="border-color: var(--success);">
+            ⬆️ Jellyball {{ update_banner.latest }} is available (you are running {{ version }}).
+            {% if update_banner.url %} <a href="{{ update_banner.url }}" target="_blank" rel="noopener noreferrer">Release notes</a>{% endif %}
+        </div>
+        {% endif %}
+        <div class="tabs-nav">
+            <button type="button" class="tab-btn {{ 'active' if tab == 'channels' else '' }}" id="btn-channels" onclick="switchTab('channels')">📺 Channels &amp; Streams</button>
+            <button type="button" class="tab-btn {{ 'active' if tab == 'metrics' else '' }}" id="btn-metrics" onclick="switchTab('metrics')">📊 Stability Metrics</button>
+            <button type="button" class="tab-btn {{ 'active' if tab == 'performance' else '' }}" id="btn-performance" onclick="switchTab('performance')">⚡ Performance</button>
+            <button type="button" class="tab-btn {{ 'active' if tab == 'playback' else '' }}" id="btn-playback" onclick="switchTab('playback')">⚙️ Settings</button>
+            <button type="button" class="tab-btn {{ 'active' if tab == 'alerts' else '' }}" id="btn-alerts" onclick="switchTab('alerts')">🔔 Alerts &amp; Integrations</button>
+            <button type="button" class="tab-btn {{ 'active' if tab == 'logs' else '' }}" id="btn-logs" onclick="switchTab('logs')">📜 Logs</button>
+        </div>
+        <div id="tab-channels" class="tab-pane {{ 'active' if tab == 'channels' else '' }}">
+            {% include "partials/channels.html" %}
+        </div>
+        <div id="tab-metrics" class="tab-pane {{ 'active' if tab == 'metrics' else '' }}">
+            {% include "partials/metrics.html" %}
+        </div>
+        <div id="tab-performance" class="tab-pane {{ 'active' if tab == 'performance' else '' }}">
+            {% include "partials/performance.html" %}
+        </div>
+        <div id="tab-logs" class="tab-pane {{ 'active' if tab == 'logs' else '' }}">
+            {% include "partials/logs.html" %}
+        </div>
+        <div id="tab-playback" class="tab-pane {{ 'active' if tab == 'playback' else '' }}">
+            {% include "partials/playback.html" %}
+        </div>
+        <div id="tab-alerts" class="tab-pane {{ 'active' if tab == 'alerts' else '' }}">
+            {% include "partials/alerts.html" %}
+        </div>
+    </div>
+    <script id="dashboard-data" type="application/json">{{ dashboard_data|tojson }}</script>
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>
