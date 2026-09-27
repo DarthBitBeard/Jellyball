@@ -260,3 +260,15 @@ class OffSeasonGuideTests(StateMixin, unittest.TestCase):
         with patch.object(main, "SHOW_OFFSEASON_CHANNELS", True):
             on = main._guide_signature()
         self.assertNotEqual(off, on)
+
+
+class UpdateCheckTests(unittest.TestCase):
+    def test_version_comparison(self):
+        with patch.dict(main._UPDATE_STATE, {"latest": "2.1.0"}):
+            with patch.object(main, "__version__", "2.0.0"):
+                self.assertTrue(main._update_available())
+            with patch.object(main, "__version__", "2.1.0"):
+                self.assertFalse(main._update_available())
+        with patch.dict(main._UPDATE_STATE, {"latest": ""}):
+            self.assertFalse(main._update_available())
+        self.assertGreater(main._version_tuple("v10.0.0"), main._version_tuple("9.9.9"))
