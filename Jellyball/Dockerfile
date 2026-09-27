@@ -1,4 +1,6 @@
-FROM python:3.12-slim
+# Pinned to a Debian release so a rebuild doesn't silently move to a new base OS.
+# Playwright's Chromium is only published for amd64 and arm64 Linux.
+FROM python:3.12-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -40,14 +42,15 @@ USER jellyball
 
 EXPOSE 8000
 
-# /playlist.m3u is unauthenticated and cheap (in-memory only, no DB/network I/O),
-# unlike /epg.xml which can trigger an EPG fetch — and unlike an authenticated route,
-# it stays a valid healthcheck target even when DASHBOARD_PASSWORD is set.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:${PORT}/playlist.m3u || exit 1
+# /healthz is unauthenticated, in-memory and made for this.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS http://localhost:${PORT}/healthz || exit 1
 
 # main.py runs headless automatically here (JELLYBALL_HEADLESS=1 above): no system
 # tray (pystray needs a display this container doesn't have) and bound to 0.0.0.0
-# so the EXPOSE'd port is actually reachable from outside the container.
+# so the EXPOSE'd port is actually reachable from outside the container. Because
+# that is a network bind, the dashboard requires a password: set
+# DASHBOARD_PASSWORD, or use the one generated on first start (printed in
+# `docker logs jellyball`, saved to /app/data/dashboard-password.txt).
 CMD ["python", "main.py"]
 

@@ -9,6 +9,9 @@ services:
       - "${PORT:-8000}:8000"
     volumes:
       - ./data:/app/data
+    # Every setting in Jellyball/README.md's configuration table can go in a
+    # .env file next to this compose file (copy .env.example). The entries under
+    # `environment:` below are container plumbing and a few common overrides.
     env_file:
       - path: .env
         required: false
@@ -20,6 +23,7 @@ services:
       - JELLYBALL_HOST=0.0.0.0
       - MULTIVIEW_HWACCEL=${MULTIVIEW_HWACCEL:-none}
       - DASHBOARD_USERNAME=${DASHBOARD_USERNAME:-admin}
+      # Leave empty to have Jellyball generate one (see `docker logs jellyball`).
       - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
