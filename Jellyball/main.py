@@ -3708,7 +3708,7 @@ async def request_failover(team_id: str, source_key: tuple, reason: str, incompa
     health probes (unwatched channels). A no-op if the active candidate already
     changed, so concurrent reporters can't double-advance."""
     data = stream_state.get(team_id)
-    if not data or data.get("type") == "multiview" or tuple(source_key) == PLACEHOLDER_SOURCE_KEY:
+    if not data or data.get("type") == "multiview" or _is_placeholder_key(source_key):
         return False
     candidates = data.get("candidates") or []
     if not candidates:
@@ -7075,7 +7075,7 @@ def _resolve_session_source(channel_id: str) -> Optional[SourceSpec]:
 
 
 def _on_session_failure(channel_id: str, source_key: tuple, reason: str) -> None:
-    if tuple(source_key) == PLACEHOLDER_SOURCE_KEY:
+    if _is_placeholder_key(source_key):
         return
     if _multiview_view_for_session(channel_id) is not None:
         _on_multiview_view_failure(channel_id, source_key, reason)
