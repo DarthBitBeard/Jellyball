@@ -676,13 +676,16 @@ class ChannelSession:
         limit = max(1, min(self.cfg.live_edge_segments, len(segments)))
         if gap is None:
             return limit  # cold start: a few segments of buffer for the player
+        # Cover the outage as closely as possible: always rounding up added up
+        # to a segment of replayed content per failover (the soak test saw the
+        # viewer drift ~2 s behind live per failover).
         covered = 0.0
         count = 0
         for segment in reversed(segments[-limit:]):
+            if count and covered + segment.duration / 2.0 > gap:
+                break
             count += 1
             covered += segment.duration
-            if covered >= gap:
-                break
         return count
 
     def _switch_source(self, spec: SourceSpec) -> None:
