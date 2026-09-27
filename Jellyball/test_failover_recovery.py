@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import main
+import state
 import config
 from datetime import datetime, timedelta, timezone
 
@@ -22,8 +23,8 @@ def _candidate(provider, url, **extra):
 class StateMixin:
     def setUp(self):
         super().setUp()
-        self._state_backup = dict(main.stream_state)
-        main.stream_state.clear()
+        self._state_backup = dict(state.stream_state)
+        state.stream_state.clear()
         self._alerts = patch.object(main, "send_alert", new=AsyncMock())
         self._alerts.start()
         self._metric = patch.object(main, "log_metric_event_async", new=AsyncMock())
@@ -32,8 +33,8 @@ class StateMixin:
     def tearDown(self):
         self._alerts.stop()
         self._metric.stop()
-        main.stream_state.clear()
-        main.stream_state.update(self._state_backup)
+        state.stream_state.clear()
+        state.stream_state.update(self._state_backup)
         super().tearDown()
 
 
@@ -46,7 +47,7 @@ class ExhaustedRecoveryTests(StateMixin, unittest.IsolatedAsyncioTestCase):
                 _candidate("B", "https://b.example/live.m3u8", last_health_ok=False, consecutive_failures=4),
             ],
         }
-        main.stream_state["t"] = data
+        state.stream_state["t"] = data
 
         async def health(url, referer, origin="", **kwargs):
             return url.startswith("https://b.")
@@ -64,7 +65,7 @@ class ExhaustedRecoveryTests(StateMixin, unittest.IsolatedAsyncioTestCase):
         data = {"name": "Team", "exhausted": True, "active_index": 0,
                 "candidates": [_candidate("A", "https://a.example/live.m3u8")],
                 "start_time": "", "stop_time": "", "always_live": True}
-        main.stream_state["t"] = data
+        state.stream_state["t"] = data
         with patch.object(main, "_spawn_background_task") as spawn, \
                 patch.object(main, "_probe_exhausted_candidates", new=lambda *a: None):
             main._failover_monitor_tick()
@@ -78,12 +79,12 @@ class FailoverCountersTests(StateMixin, unittest.IsolatedAsyncioTestCase):
         a = _candidate("A", "https://a.example/live.m3u8")
         b = _candidate("B", "https://b.example/live.m3u8", consecutive_failures=2, last_health_ok=True,
                        last_health_check=time.time())
-        main.stream_state["t"] = {"name": "Team", "candidates": [a, b], "active_index": 0}
+        state.stream_state["t"] = {"name": "Team", "candidates": [a, b], "active_index": 0}
         moved = await main.request_failover("t", main.candidate_source_key(a), "health probe failed")
         self.assertTrue(moved)
-        self.assertEqual(main.stream_state["t"]["active_index"], 1)
+        self.assertEqual(state.stream_state["t"]["active_index"], 1)
         self.assertEqual(b["consecutive_failures"], 0)
-        self.assertEqual(main.stream_state["t"]["failover_count"], 1)
+        self.assertEqual(state.stream_state["t"]["failover_count"], 1)
 
     async def test_good_standby_probe_clears_its_failure_count(self):
         standby = _candidate("B", "https://b.example/live.m3u8", consecutive_failures=3)
@@ -95,7 +96,7 @@ class FailoverCountersTests(StateMixin, unittest.IsolatedAsyncioTestCase):
     async def test_single_source_is_retried_before_no_signal(self):
         only = _candidate("A", "https://a.example/live.m3u8")
         data = {"name": "Team", "candidates": [only], "active_index": 0}
-        main.stream_state["t"] = data
+        state.stream_state["t"] = data
         key = main.candidate_source_key(only)
         with patch.object(main, "_handle_candidates_exhausted") as exhausted:
             for _ in range(main.SELF_RETRY_LIMIT):
@@ -109,7 +110,7 @@ class FailoverCountersTests(StateMixin, unittest.IsolatedAsyncioTestCase):
         a = _candidate("A", "https://a.example/live.m3u8")
         b = _candidate("B", "https://b.example/live.m3u8")
         data = {"name": "Team", "candidates": [a, b], "active_index": 0}
-        main.stream_state["t"] = data
+        state.stream_state["t"] = data
         with patch.object(main, "_spawn_background_task") as spawn:
             for _ in range(4):
                 active = data["candidates"][data["active_index"]]
@@ -128,7 +129,7 @@ class FailoverCountersTests(StateMixin, unittest.IsolatedAsyncioTestCase):
     async def test_forbidden_playlist_triggers_token_refresh(self):
         a = _candidate("A", "https://a.example/live.m3u8")
         b = _candidate("B", "https://b.example/live.m3u8")
-        main.stream_state["t"] = {"name": "Team", "candidates": [a, b], "active_index": 0}
+        state.stream_state["t"] = {"name": "Team", "candidates": [a, b], "active_index": 0}
         with patch.object(main, "_trigger_scrape", new=AsyncMock()) as rescrape:
             await main.request_failover("t", main.candidate_source_key(a), "playlist forbidden")
             await asyncio.sleep(0)
@@ -183,32 +184,32 @@ class SessionHookTests(StateMixin, unittest.TestCase):
     def test_incompatible_hook_reports_whether_an_alternative_exists(self):
         a = _candidate("A", "https://a.example/1.m3u8")
         b = _candidate("B", "https://b.example/1.m3u8")
-        main.stream_state["t"] = {"name": "Team", "candidates": [a, b], "active_index": 0}
+        state.stream_state["t"] = {"name": "Team", "candidates": [a, b], "active_index": 0}
         with patch.object(main, "_spawn_background_task") as spawn:
             self.assertTrue(main._on_session_incompatible("t", main.candidate_source_key(a), "fMP4"))
             self.assertFalse(a.get("session_compatible", True))
-            main.stream_state["solo"] = {"name": "Solo", "candidates": [dict(a)], "active_index": 0}
+            state.stream_state["solo"] = {"name": "Solo", "candidates": [dict(a)], "active_index": 0}
             self.assertFalse(main._on_session_incompatible("solo", main.candidate_source_key(a), "fMP4"))
         for call in spawn.call_args_list:
             call.args[0].close()
 
     def test_startup_placeholder_window_serves_no_signal(self):
-        main.stream_state["t"] = {
+        state.stream_state["t"] = {
             "name": "Team", "candidates": [_candidate("A", "https://a.example/1.m3u8")], "active_index": 0,
             "startup_placeholder_until": time.monotonic() + 30,
         }
         sentinel = object()
         with patch.object(main, "_placeholder_source", return_value=sentinel):
             self.assertIs(main._resolve_session_source("t"), sentinel)
-            main.stream_state["t"]["startup_placeholder_until"] = 0.0
+            state.stream_state["t"]["startup_placeholder_until"] = 0.0
             self.assertIsNot(main._resolve_session_source("t"), sentinel)
 
     def test_override_clears_exhaustion(self):
         a = _candidate("A", "https://a.example/1.m3u8")
-        main.stream_state["t"] = {"name": "Team", "candidates": [a], "active_index": 0, "exhausted": True}
+        state.stream_state["t"] = {"name": "Team", "candidates": [a], "active_index": 0, "exhausted": True}
         with patch.object(main, "_spawn_background_task") as spawn:
             asyncio.run(main.override_stream("t", candidate_index=0, auth=True))
-        self.assertFalse(main.stream_state["t"]["exhausted"])
+        self.assertFalse(state.stream_state["t"]["exhausted"])
         for call in spawn.call_args_list:
             call.args[0].close()
 
@@ -245,14 +246,14 @@ if __name__ == "__main__":
 
 class OffSeasonGuideTests(StateMixin, unittest.TestCase):
     def test_off_season_channels_hidden_by_default_and_listed_when_enabled(self):
-        main.stream_state["t"] = {"name": "Team", "query": "t", "candidates": [], "category": "nfl",
+        state.stream_state["t"] = {"name": "Team", "query": "t", "candidates": [], "category": "nfl",
                                   "schedule_status": "off_season"}
         with patch.object(main, "SHOW_OFFSEASON_CHANNELS", False):
-            self.assertFalse(main._channel_listed(main.stream_state["t"]))
+            self.assertFalse(main._channel_listed(state.stream_state["t"]))
         with patch.object(main, "SHOW_OFFSEASON_CHANNELS", True):
-            self.assertTrue(main._channel_listed(main.stream_state["t"]))
+            self.assertTrue(main._channel_listed(state.stream_state["t"]))
             now = datetime.now(timezone.utc)
-            blocks = main._channel_programmes("t", main.stream_state["t"], now, now + timedelta(days=1), {})
+            blocks = main._channel_programmes("t", state.stream_state["t"], now, now + timedelta(days=1), {})
             self.assertEqual(len(blocks), 1)
             self.assertIn("Off-season", blocks[0]["title"])
 

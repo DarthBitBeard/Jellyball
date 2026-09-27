@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import state
 from main import (
     generate_m3u,
     generate_xmltv,
@@ -109,7 +110,7 @@ class MultiviewMemberProgrammeTests(unittest.TestCase):
     def test_removed_member_shows_no_signal(self):
         base = datetime(2026, 1, 1, tzinfo=timezone.utc)
         guide_start, guide_end = base, base + timedelta(hours=4)
-        with patch.dict(main.stream_state, {}, clear=True):
+        with patch.dict(state.stream_state, {}, clear=True):
             programmes = _multiview_member_programmes(
                 ["ghost_member"], guide_start, guide_end, {}
             )
@@ -126,7 +127,7 @@ class MultiviewMemberProgrammeTests(unittest.TestCase):
             "name": "Atlanta Braves", "always_live": False,
             "start_time": "", "stop_time": "", "logo_url": "",
         }
-        with patch.dict(main.stream_state, {"braves": member}, clear=True):
+        with patch.dict(state.stream_state, {"braves": member}, clear=True):
             programmes = _multiview_member_programmes(["braves"], guide_start, guide_end, {})
             expected = _channel_programmes("braves", member, guide_start, guide_end, {})
         self.assertEqual(programmes["braves"], expected)
@@ -135,7 +136,7 @@ class MultiviewMemberProgrammeTests(unittest.TestCase):
         base = datetime(2026, 1, 1, tzinfo=timezone.utc)
         guide_start, guide_end = base, base + timedelta(hours=1)
         member = {"name": "Atlanta Braves", "always_live": False, "logo_url": ""}
-        with patch.dict(main.stream_state, {"braves": member}, clear=True):
+        with patch.dict(state.stream_state, {"braves": member}, clear=True):
             standby = _channel_programmes("braves", member, guide_start, guide_end, {})[0]
             self.assertIn("Standby", standby["title"])
             self.assertEqual(
@@ -156,7 +157,7 @@ class MultiviewMemberProgrammeTests(unittest.TestCase):
                 "description": "Live from Truist Park.",
             }]
         }
-        with patch.dict(main.stream_state, {"espn": member}, clear=True):
+        with patch.dict(state.stream_state, {"espn": member}, clear=True):
             programme = _channel_programmes("espn", member, guide_start, guide_end, schedules)[0]
         self.assertEqual(programme["title"], "Braves vs Rays")
         self.assertEqual(
@@ -191,7 +192,7 @@ class MultiviewIntervalSplittingTests(unittest.TestCase):
         }
 
     def test_boundaries_include_every_member_transition(self):
-        with patch.dict(main.stream_state, self.member_state, clear=True):
+        with patch.dict(state.stream_state, self.member_state, clear=True):
             member_programmes = _multiview_member_programmes(
                 ["team_a", "team_b"], self.guide_start, self.guide_end, {}
             )
@@ -205,7 +206,7 @@ class MultiviewIntervalSplittingTests(unittest.TestCase):
             "member_team_ids": ["team_a", "team_b"], "layout": "side_by_side_2",
             "active_audio_team_id": "team_a", "logo_url": "",
         }
-        with patch.dict(main.stream_state, self.member_state, clear=True):
+        with patch.dict(state.stream_state, self.member_state, clear=True):
             main_programmes, audio_programmes = _multiview_programmes(
                 "mv_sunday", data, self.guide_start, self.guide_end, {}
             )
@@ -239,7 +240,7 @@ class MultiviewIntervalSplittingTests(unittest.TestCase):
             "member_team_ids": ["team_a", "team_b"], "layout": "side_by_side_2",
             "active_audio_team_id": "team_a", "logo_url": "",
         }
-        with patch.dict(main.stream_state, self.member_state, clear=True):
+        with patch.dict(state.stream_state, self.member_state, clear=True):
             member_programmes = _multiview_member_programmes(
                 ["team_a", "team_b"], self.guide_start, self.guide_end, {}
             )
@@ -261,7 +262,7 @@ class MultiviewIntervalSplittingTests(unittest.TestCase):
             "member_team_ids": ["team_a", "team_b", "ghost_c", "ghost_d"],
             "layout": "grid_2x2", "active_audio_team_id": "team_a", "logo_url": "",
         }
-        with patch.dict(main.stream_state, self.member_state, clear=True):
+        with patch.dict(state.stream_state, self.member_state, clear=True):
             main_programmes, _ = _multiview_programmes(
                 "mv_quad", data, self.guide_start, self.guide_end, {}
             )
@@ -281,7 +282,7 @@ class MultiviewIntervalSplittingTests(unittest.TestCase):
             "member_team_ids": ["team_a", "team_b"], "layout": "side_by_side_2",
             "active_audio_team_id": "team_b", "logo_url": "",
         }
-        with patch.dict(main.stream_state, self.member_state, clear=True):
+        with patch.dict(state.stream_state, self.member_state, clear=True):
             main_programmes, _ = _multiview_programmes(
                 "mv_sunday", data, self.guide_start, self.guide_end, {}
             )
@@ -316,7 +317,7 @@ class MultiviewAudioChannelProgrammeTests(unittest.TestCase):
         }
 
     def test_audio_programmes_follow_member_boundaries_not_the_merged_grid(self):
-        with patch.dict(main.stream_state, self.member_state, clear=True):
+        with patch.dict(state.stream_state, self.member_state, clear=True):
             _, audio_programmes = _multiview_programmes(
                 "mv_sunday", self.data, self.guide_start, self.guide_end, {}
             )
@@ -331,7 +332,7 @@ class MultiviewAudioChannelProgrammeTests(unittest.TestCase):
             self.assertEqual(entry["stop"], expected["stop"])
 
     def test_audio_programme_title_prefixed_and_desc_mentions_member_and_show(self):
-        with patch.dict(main.stream_state, self.member_state, clear=True):
+        with patch.dict(state.stream_state, self.member_state, clear=True):
             _, audio_programmes = _multiview_programmes(
                 "mv_sunday", self.data, self.guide_start, self.guide_end, {}
             )
@@ -355,7 +356,7 @@ class MultiviewAudioChannelProgrammeTests(unittest.TestCase):
     def test_audio_channel_for_removed_member_is_no_signal(self):
         data = dict(self.data)
         data["member_team_ids"] = ["team_a", "ghost_member"]
-        with patch.dict(main.stream_state, {"team_a": self.member_state["team_a"]}, clear=True):
+        with patch.dict(state.stream_state, {"team_a": self.member_state["team_a"]}, clear=True):
             _, audio_programmes = _multiview_programmes(
                 "mv_sunday", data, self.guide_start, self.guide_end, {}
             )
@@ -396,9 +397,9 @@ class MultiviewTvgIdSchemeTests(unittest.TestCase):
             "team_a": {"name": "Team A", "always_live": False, "logo_url": ""},
             "team_b": {"name": "Team B", "always_live": False, "logo_url": ""},
         }
-        state = dict(member_state)
-        state["mv_sunday"] = data
-        with patch.dict(main.stream_state, state, clear=True), \
+        channel_state = dict(member_state)
+        channel_state["mv_sunday"] = data
+        with patch.dict(state.stream_state, channel_state, clear=True), \
                 patch.object(main, "_fetch_tvguide_epg", new=AsyncMock(return_value={})):
             request = SimpleNamespace(headers={"host": "127.0.0.1:8000"})
             playlist = asyncio.run(generate_m3u(request))
@@ -421,7 +422,7 @@ class MultiviewTvgIdSchemeTests(unittest.TestCase):
             "name": "Sunday Quad-Box", "type": "multiview",
             "member_team_ids": ["team_a"], "logo_url": "",
         }
-        with patch.dict(main.stream_state, {"team_a": {"name": "Atlanta Braves"}}, clear=True):
+        with patch.dict(state.stream_state, {"team_a": {"name": "Atlanta Braves"}}, clear=True):
             entries = _multiview_audio_channels("mv_sunday", data)
         self.assertEqual(len(entries), 1)
         _, display_name, _ = entries[0]
@@ -454,9 +455,9 @@ class MultiviewXmltvWellFormedTests(unittest.TestCase):
             },
             "team_b": {"name": "Team B", "always_live": False, "logo_url": ""},
         }
-        state = dict(member_state)
-        state["mv_sunday"] = data
-        with patch.dict(main.stream_state, state, clear=True), \
+        channel_state = dict(member_state)
+        channel_state["mv_sunday"] = data
+        with patch.dict(state.stream_state, channel_state, clear=True), \
                 patch.object(main, "_fetch_tvguide_epg", new=AsyncMock(return_value={})):
             guide = asyncio.run(generate_xmltv())
 

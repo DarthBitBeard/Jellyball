@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import state
 from sports_matcher import get_team_search_terms
 import stream_extractor
 
@@ -578,7 +579,7 @@ class CandidateCapTests(unittest.IsolatedAsyncioTestCase):
                 provider = FakeCappingProvider()
                 with patch.object(main, "_providers_for_search", lambda always_live=False: [provider]), \
                      patch.object(main, "get_healthy_browser", AsyncMock(return_value=None)), \
-                     patch.object(main, "SHARED_HTTP_CLIENT", None):
+                     patch.object(state, "SHARED_HTTP_CLIENT", None):
                     result = await main.master_scrape(
                         "Test Team", team_name="Test Team", team_id="test_team", always_live=True
                     )

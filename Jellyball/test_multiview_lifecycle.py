@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import state
 import config
 import shutil
 from hls_session import SourceSpec
@@ -166,7 +167,7 @@ class MultiviewStateTestCase(unittest.TestCase):
         main._PLACEHOLDER_FAILURE = None
         main._PLACEHOLDER_DRAWTEXT_OK = True
         main._PLACEHOLDER_START_TASK = None
-        state_patch = patch.dict(main.stream_state, {}, clear=True)
+        state_patch = patch.dict(state.stream_state, {}, clear=True)
         state_patch.start()
         self.addCleanup(state_patch.stop)
 
@@ -233,7 +234,7 @@ class WatchdogTests(MultiviewStateTestCase):
         self.assertEqual(restart.await_args.kwargs, {"run_id": 9})
 
     def test_standin_member_swapped_in_once_live(self):
-        main.stream_state["tb"] = {"name": "TB"}
+        state.stream_state["tb"] = {"name": "TB"}
         entry = live_entry(run_id=4, standins=["tb"])
         registry = FakeRegistry({"tb": FakeSession(flowing=True, source=SourceSpec(key=("prov", "cdn", "/x"), url="u"))})
         with patch.object(main, "SESSIONS", registry), \
@@ -309,7 +310,7 @@ class RestartTests(MultiviewStateTestCase):
         spawn.assert_not_called()
 
     def test_held_restart_does_not_start_until_hold_expires(self):
-        main.stream_state["mv"] = multiview_data()
+        state.stream_state["mv"] = multiview_data()
         main._set_multiview_hold("mv", 30.0, "restart", "stalled")
         with patch.object(main, "_spawn_background_task") as spawn:
             main._request_multiview_start("mv")
@@ -320,7 +321,7 @@ class SlotReservationTests(MultiviewStateTestCase):
     def test_simultaneous_starts_cannot_exceed_cap(self):
         main.FFMPEG_AVAILABLE = True
         data1, data2 = multiview_data(), multiview_data()
-        main.stream_state.update({"mv1": data1, "mv2": data2})
+        state.stream_state.update({"mv1": data1, "mv2": data2})
         started = []
 
         async def slow_run(channel_id, data):
@@ -341,7 +342,7 @@ class SlotReservationTests(MultiviewStateTestCase):
     def test_reservation_released_when_spawn_fails(self):
         main.FFMPEG_AVAILABLE = True
         data = multiview_data()
-        main.stream_state["mv"] = data
+        state.stream_state["mv"] = data
 
         async def failing_run(channel_id, data):
             self.assertEqual(main._running_multiview_count(), 1)  # reserved during the spawn
@@ -356,7 +357,7 @@ class SlotReservationTests(MultiviewStateTestCase):
 class RefusalTests(MultiviewStateTestCase):
     def test_refusal_logs_once_per_hold_and_view_gets_placeholder(self):
         main.FFMPEG_AVAILABLE = True
-        main.stream_state["mv"] = multiview_data()
+        state.stream_state["mv"] = multiview_data()
         main._MULTIVIEW_PROCESSES["other"] = live_entry()
 
         async def scenario():
@@ -383,7 +384,7 @@ class RefusalTests(MultiviewStateTestCase):
     def test_no_ffmpeg_is_a_refusal_not_a_failure(self):
         main.FFMPEG_AVAILABLE = False
         data = multiview_data()
-        main.stream_state["mv"] = data
+        state.stream_state["mv"] = data
         with patch.object(config.LOGGER, "warning"):
             asyncio.run(main._spawn_multiview("mv", data))
         self.assertNotIn("mv", main._MULTIVIEW_FAILURES)
@@ -413,7 +414,7 @@ class HwEncoderFailureTests(MultiviewStateTestCase):
 
     def _run_spawn(self, first_failure_log):
         data = multiview_data()
-        main.stream_state["mv"] = data
+        state.stream_state["mv"] = data
         inputs = [main._MultiviewInput(t, t, True, 0x0F, False) for t in data["member_team_ids"]]
         attempts = []
 
@@ -452,10 +453,10 @@ class HwEncoderFailureTests(MultiviewStateTestCase):
 class MemberInputTests(MultiviewStateTestCase):
     def test_unknown_audio_gets_silent_track_and_inputs_probe_briefly(self):
         data = multiview_data()
-        main.stream_state.update({"ta": {"name": "TA"}, "tb": {"name": "TB"}})
+        state.stream_state.update({"ta": {"name": "TA"}, "tb": {"name": "TB"}})
         with patch.object(config, "PORT", 8000), patch.dict(os.environ, {"JELLYBALL_HOST": ""}):
             args = main._build_multiview_ffmpeg_args(
-                "mv", data, Path("/x"), [True, None], "none", input_ids=["ta", main.PLACEHOLDER_SESSION_ID],
+                "mv", data, Path("/x"), [True, None], "none", input_ids=["ta", state.PLACEHOLDER_SESSION_ID],
             )
         maps = [args[i + 1] for i, a in enumerate(args) if a == "-map"]
         self.assertEqual(maps, ["[vout]", "0:a:0", "[a1]"])
@@ -477,11 +478,11 @@ class MemberInputTests(MultiviewStateTestCase):
         self.assertNotIn("-hwaccel", args)
 
     def test_warmup_replaces_unready_member_with_placeholder(self):
-        main.stream_state.update({"ta": {"name": "TA"}, "tb": {"name": "TB"}})
+        state.stream_state.update({"ta": {"name": "TA"}, "tb": {"name": "TB"}})
         registry = FakeRegistry({
             "ta": FakeSession(ready=True, has_audio=None),              # ready, audio unknown
             "tb": FakeSession(ready=False),                             # never gets ready
-            main.PLACEHOLDER_SESSION_ID: FakeSession(ready=True, has_audio=True, signature=(0x1B, 0x0F)),
+            state.PLACEHOLDER_SESSION_ID: FakeSession(ready=True, has_audio=True, signature=(0x1B, 0x0F)),
         })
         with patch.object(main, "SESSIONS", registry), \
                 patch.object(main, "MULTIVIEW_MEMBER_WARM_TIMEOUT", 0.2), \
@@ -490,15 +491,15 @@ class MemberInputTests(MultiviewStateTestCase):
             inputs = asyncio.run(main._warm_multiview_members(["ta", "tb", "gone"]))
         self.assertEqual(inputs, [
             main._MultiviewInput("ta", "ta", False, None, False),
-            main._MultiviewInput("tb", main.PLACEHOLDER_SESSION_ID, True, 0x0F, True),
-            main._MultiviewInput("gone", main.PLACEHOLDER_SESSION_ID, True, 0x0F, False),
+            main._MultiviewInput("tb", state.PLACEHOLDER_SESSION_ID, True, 0x0F, True),
+            main._MultiviewInput("gone", state.PLACEHOLDER_SESSION_ID, True, 0x0F, False),
         ])
         self.assertGreater(registry.sessions["tb"].touched, 0)
 
 
 class SourceKeyTests(MultiviewStateTestCase):
     def test_view_key_changes_only_with_output_audio_codec(self):
-        main.stream_state.update({
+        state.stream_state.update({
             "mv": multiview_data(("ta", "tb", "tc", "td"), "grid_2x2"),
             "ta": {"name": "TA"}, "tb": {"name": "TB"}, "tc": {"name": "TC"}, "td": {"name": "TD"},
         })
@@ -512,7 +513,7 @@ class SourceKeyTests(MultiviewStateTestCase):
         self.assertNotEqual(main._resolve_multiview_view_source("mv", 0).key, keys[0])
 
     def test_view_failure_restarts_with_the_reported_run(self):
-        main.stream_state["mv"] = multiview_data()
+        state.stream_state["mv"] = multiview_data()
         main._MULTIVIEW_PROCESSES["mv"] = live_entry(run_id=5)
         with patch.object(main, "_restart_multiview", MagicMock(return_value="coro")) as restart, \
                 patch.object(main, "_spawn_background_task") as spawn:
@@ -589,7 +590,7 @@ class SweepTests(MultiviewStateTestCase):
 class ManualStopTests(MultiviewStateTestCase):
     def test_stop_cancels_spawn_and_suppresses_auto_start_until_new_viewer(self):
         main.FFMPEG_AVAILABLE = True
-        main.stream_state["mv"] = multiview_data()
+        state.stream_state["mv"] = multiview_data()
         registry = FakeRegistry()
 
         async def slow_warm(members):
@@ -625,10 +626,10 @@ class ManualStopTests(MultiviewStateTestCase):
     def test_spawn_gives_up_when_channel_removed_during_warmup(self):
         main.FFMPEG_AVAILABLE = True
         data = multiview_data()
-        main.stream_state["mv"] = data
+        state.stream_state["mv"] = data
 
         async def warm_then_remove(members):
-            main.stream_state.pop("mv", None)
+            state.stream_state.pop("mv", None)
             return [main._MultiviewInput(t, t, True, 0x0F, False) for t in members]
 
         launch = AsyncMock(return_value=("ready", []))
@@ -639,7 +640,7 @@ class ManualStopTests(MultiviewStateTestCase):
 
     def test_cancelled_spawn_stops_the_ffmpeg_it_launched(self):
         data = multiview_data()
-        main.stream_state["mv"] = data
+        state.stream_state["mv"] = data
         inputs = [main._MultiviewInput(t, t, True, 0x0F, False) for t in data["member_team_ids"]]
         process = FakeProcess()
 
@@ -672,7 +673,7 @@ class ManualStopTests(MultiviewStateTestCase):
 
 class RemoveChannelTests(MultiviewStateTestCase):
     def test_remove_multiview_cancels_spawn_and_prunes_per_channel_state(self):
-        main.stream_state["mv"] = multiview_data()
+        state.stream_state["mv"] = multiview_data()
         for mapping in (main._MULTIVIEW_FAILURES, main._MULTIVIEW_HOLDS, main._MULTIVIEW_RESTARTS):
             mapping["mv"] = {"count": 1, "last_failure": 0.0, "last_error": "", "until": 0.0, "times": deque()}
             mapping["other"] = dict(mapping["mv"])
@@ -700,7 +701,7 @@ class RemoveChannelTests(MultiviewStateTestCase):
         ):
             self.assertNotIn("mv", mapping)
         self.assertIn("other", main._MULTIVIEW_FAILURES)
-        self.assertNotIn("mv", main.stream_state)
+        self.assertNotIn("mv", state.stream_state)
         self.assertEqual(registry.closed, ["mv", "mv#a0", "mv#a1"])
 
 

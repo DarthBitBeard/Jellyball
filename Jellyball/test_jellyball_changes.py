@@ -37,7 +37,6 @@ from main import (
     _providers_for_search,
     _scrape_lifecycle_defaults,
     api_status,
-    stream_state,
     LRUChunkCache,
     _resolve_espn_team,
     _channel_term_matches,
@@ -72,6 +71,7 @@ from main import (
     _resolve_schedule_status,
     xmltv_ts,
 )
+from state import stream_state
 from config import _upstream_media_headers
 
 from stream_extractor import extract_streams_from_text, verify_stream_live
@@ -79,6 +79,7 @@ from network_safety import validate_http_url
 from starlette.requests import Request
 from sports_catalog import SPECIAL_CHANNELS
 import config
+import state
 
 
 class JellyballChangesTests(unittest.TestCase):
@@ -383,7 +384,7 @@ class JellyballChangesTests(unittest.TestCase):
         async def exercise():
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
             try:
-                with patch.object(main, "SHARED_HTTP_CLIENT", client), patch.object(main, "STREAM_STARTUP_BUFFER_SECONDS", 0):
+                with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(main, "STREAM_STARTUP_BUFFER_SECONDS", 0):
                     response = await proxy_substream(
                         request_for("/substream.m3u8"),
                         url=manifest_url,
@@ -435,7 +436,7 @@ class JellyballChangesTests(unittest.TestCase):
         async def exercise():
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
             try:
-                with patch.object(main, "SHARED_HTTP_CLIENT", client):
+                with patch.object(state, "SHARED_HTTP_CLIENT", client):
                     response = await proxy_chunk(
                         request,
                         url=chunk_url,
@@ -676,7 +677,7 @@ class JellyballChangesTests(unittest.TestCase):
         async def exercise():
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
             try:
-                with patch.object(main, "SHARED_HTTP_CLIENT", client), patch.object(main, "PREFETCH_CHUNK_COUNT", 0):
+                with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(main, "PREFETCH_CHUNK_COUNT", 0):
                     await prefetch_next_chunks(
                         "https://4169it.7odxv0l067ka.net:8443/live/3165856830.ts"
                     )
@@ -710,7 +711,7 @@ class JellyballChangesTests(unittest.TestCase):
         async def exercise():
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
             try:
-                with patch.object(main, "SHARED_HTTP_CLIENT", client), patch.object(main, "PREFETCH_CHUNK_COUNT", 2):
+                with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(main, "PREFETCH_CHUNK_COUNT", 2):
                     await prefetch_next_chunks(
                         "https://4169it.7odxv0l067ka.net:8443/live/3165856830.ts",
                         referer=manifest_url,
@@ -754,7 +755,7 @@ class JellyballChangesTests(unittest.TestCase):
             "active_audio_team_id": "bucs",
         }
         members = {team: {"name": team.title()} for team in ("lions", "dolphins", "bucs")}
-        with patch.object(config, "PORT", 8000), patch.dict(main.stream_state, members, clear=True),                 patch.dict(os.environ, {"JELLYBALL_HOST": ""}):
+        with patch.object(config, "PORT", 8000), patch.dict(state.stream_state, members, clear=True),                 patch.dict(os.environ, {"JELLYBALL_HOST": ""}):
             args = _build_multiview_ffmpeg_args("mv_test", data, Path("/fake/out"), [True, True, False, True], "nvenc")
 
         self.assertEqual(args.count("-reconnect"), 4)
@@ -788,13 +789,13 @@ class JellyballChangesTests(unittest.TestCase):
     def test_multiview_member_validation_rejects_bad_selections(self):
         import main
 
-        original_state = dict(main.stream_state)
+        original_state = dict(state.stream_state)
         try:
-            main.stream_state.clear()
-            main.stream_state["lions"] = {"name": "Lions"}
-            main.stream_state["dolphins"] = {"name": "Dolphins"}
-            main.stream_state["bucs"] = {"name": "Bucs"}
-            main.stream_state["mv1"] = {"name": "MV", "type": "multiview"}
+            state.stream_state.clear()
+            state.stream_state["lions"] = {"name": "Lions"}
+            state.stream_state["dolphins"] = {"name": "Dolphins"}
+            state.stream_state["bucs"] = {"name": "Bucs"}
+            state.stream_state["mv1"] = {"name": "MV", "type": "multiview"}
 
             self.assertIsNone(_multiview_member_validation(["lions", "dolphins"]))
             self.assertIsNotNone(_multiview_member_validation(["lions", "dolphins", "bucs"]))
@@ -802,8 +803,8 @@ class JellyballChangesTests(unittest.TestCase):
             self.assertIsNotNone(_multiview_member_validation(["lions", "nope"]))
             self.assertIsNotNone(_multiview_member_validation(["lions", "mv1"]))
         finally:
-            main.stream_state.clear()
-            main.stream_state.update(original_state)
+            state.stream_state.clear()
+            state.stream_state.update(original_state)
 
     def test_multiview_sqlite_round_trip(self):
         import main
@@ -889,10 +890,10 @@ class JellyballChangesTests(unittest.TestCase):
     def test_multiview_entry_renders_in_m3u_and_xmltv(self):
         import main
 
-        original_state = dict(main.stream_state)
+        original_state = dict(state.stream_state)
         try:
-            main.stream_state.clear()
-            main.stream_state["mv_sunday"] = {
+            state.stream_state.clear()
+            state.stream_state["mv_sunday"] = {
                 "name": "NFL Sunday Quad-Box",
                 "type": "multiview",
                 "candidates": [{"synthetic": True}],
@@ -908,8 +909,8 @@ class JellyballChangesTests(unittest.TestCase):
             playlist = asyncio.run(generate_m3u(request))
             guide = asyncio.run(generate_xmltv())
         finally:
-            main.stream_state.clear()
-            main.stream_state.update(original_state)
+            state.stream_state.clear()
+            state.stream_state.update(original_state)
 
         self.assertIn("NFL Sunday Quad-Box", playlist)
         # Names stay stable (no health emoji) and URLs carry the .m3u8 extension.
@@ -920,10 +921,10 @@ class JellyballChangesTests(unittest.TestCase):
     def test_off_season_channel_excluded_from_m3u_and_xmltv(self):
         import main
 
-        original_state = dict(main.stream_state)
+        original_state = dict(state.stream_state)
         try:
-            main.stream_state.clear()
-            main.stream_state["gators_football"] = {
+            state.stream_state.clear()
+            state.stream_state["gators_football"] = {
                 "name": "Florida Gators (Football)",
                 "query": "Florida Gators",
                 "candidates": [],
@@ -936,7 +937,7 @@ class JellyballChangesTests(unittest.TestCase):
                 "group_title": "",
                 "schedule_status": "off_season",
             }
-            main.stream_state["chiefs"] = {
+            state.stream_state["chiefs"] = {
                 "name": "Kansas City Chiefs",
                 "query": "Kansas City Chiefs",
                 "candidates": [{"url": "https://example.test/live.m3u8", "referer": "", "origin": "", "provider": "ESPN+"}],
@@ -953,8 +954,8 @@ class JellyballChangesTests(unittest.TestCase):
             playlist = asyncio.run(generate_m3u(request))
             guide = asyncio.run(generate_xmltv())
         finally:
-            main.stream_state.clear()
-            main.stream_state.update(original_state)
+            state.stream_state.clear()
+            state.stream_state.update(original_state)
 
         self.assertNotIn("Florida Gators", playlist)
         self.assertNotIn("gators_football", playlist)
