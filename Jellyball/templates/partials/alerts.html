@@ -1,0 +1,53 @@
+{% macro secret_input(data) %}
+{% if data.has_value %}
+<input type="password" name="{{ data.name }}" value="" autocomplete="off" placeholder="Saved (ends {{ data.masked_tail }}) - leave blank to keep">
+<label style="font-size: 0.8rem; color: var(--text-muted); display: flex; gap: 0.35rem; align-items: center; margin-top: 0.35rem;">
+    <input type="checkbox" name="clear_{{ data.name }}" value="1" style="width: auto;"> Remove saved value</label>
+{% else %}
+<input type="password" name="{{ data.name }}" value="" autocomplete="off">
+{% endif %}
+{% endmacro %}
+
+<div class="card" style="border-color: var(--purple); background: linear-gradient(180deg, var(--card-bg) 0%, var(--purple-card-to) 100%);">
+    <h3 style="color: var(--purple-text);">🍇 Jellyfin Automatic Guide Refresh API</h3>
+    <form action="/settings/jellyfin" method="post" style="display: flex; flex-direction: column; gap: 1.25rem;">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+            <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">🌐 Jellyfin Server URL</label><input type="text" name="jellyfin_url" value="{{ jellyfin_cfg.jellyfin_url }}"></div>
+            <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">🔑 Jellyfin API Key</label>{{ secret_input(jellyfin_api_key_secret) }}</div>
+        </div>
+        <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">⚙️ Refresh Guide Scheduled Task ID</label><input type="text" name="jellyfin_task_id" value="{{ jellyfin_cfg.jellyfin_task_id }}"></div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.25rem;"><button type="submit" style="background: var(--purple-dark);">💾 Save Jellyfin API Settings</button></div>
+    </form>
+    <form action="/settings/test_jellyfin" method="post" style="margin-top: 1rem; display: flex; gap: 0.75rem; align-items: center;">
+        <button type="submit" class="btn-secondary" style="border-color: var(--purple); color: var(--purple-text); flex: 1;">🍇 Test Jellyfin Connection</button>
+        <span id="jellyfin-status" style="font-size: 0.9rem; min-width: 120px;"></span>
+    </form>
+    <p class="hint-text">Tests the API connection and shows whether the refresh task will work correctly.</p>
+</div>
+<div class="card">
+    <h3>🌐 Provider Domains</h3>
+    <p class="hint-text">Aggregator domains change often. Override any provider's base URL here without editing .env or restarting the service — changes apply immediately. Leave a field blank to reset it to its built-in default (shown as the placeholder and in the hint below each field).</p>
+    <form action="/settings/providers" method="post" style="display: flex; flex-direction: column; gap: 0.25rem;">
+        {% for row in provider_url_rows %}
+        <div style="display:grid; grid-template-columns: 160px 1fr; gap:0.75rem; align-items:center; margin-bottom:0.85rem;">
+            <label style="font-size:0.85rem; color: var(--text-soft); font-weight:600;">{{ row.name }}</label>
+            <div>
+                <input type="text" name="url_{{ row.name }}" value="{{ row.base_url }}" placeholder="{{ row.default_base_url }}">
+                <p class="hint-text" style="margin:0.25rem 0 0;">Leave blank to reset to default: {{ row.default_base_url }}</p>
+            </div>
+        </div>
+        {% endfor %}
+        <button type="submit" style="width: auto; align-self: flex-start; margin-top: 0.5rem;">💾 Save Provider Domains</button>
+    </form>
+</div>
+<div class="card">
+    <h3>Webhook Notification Settings</h3>
+    <form action="/settings/notifications" method="post" style="display: flex; flex-direction: column; gap: 1.25rem;">
+        <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">👾 Discord Incoming Webhook URL</label>{{ secret_input(discord_webhook_secret) }}</div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+            <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">✈️ Telegram Bot Token</label>{{ secret_input(telegram_bot_token_secret) }}</div>
+            <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">💬 Telegram Chat ID</label><input type="text" name="telegram_chat_id" value="{{ notif_cfg.telegram_chat_id }}"></div>
+        </div>
+        <button type="submit" style="margin-top: 0.5rem;">💾 Save Notification Settings</button>
+    </form>
+</div>

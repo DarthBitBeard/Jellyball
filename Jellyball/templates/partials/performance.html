@@ -1,0 +1,35 @@
+<div class="card">
+    <h3>⚡ System Performance</h3>
+    <p class="hint-text">Real-time performance metrics and diagnostics.</p>
+    <div id="performance-metrics" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem;">
+        <div style="background: var(--surface-2); padding: 1rem; border-radius: 8px; border: 1px solid var(--border);">
+            <div style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.5rem;">Cache Hit Rate</div>
+            <div style="font-size: 1.5rem; font-weight: 700; color: var(--success);" id="cache-hit-rate">--</div>
+        </div>
+        <div style="background: var(--surface-2); padding: 1rem; border-radius: 8px; border: 1px solid var(--border);">
+            <div style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.5rem;">Playback Sessions (1h)</div>
+            <div style="font-size: 1.5rem; font-weight: 700; color: var(--accent);" id="playback-sessions">--</div>
+        </div>
+        <div style="background: var(--surface-2); padding: 1rem; border-radius: 8px; border: 1px solid var(--border);">
+            <div style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.5rem;">Failovers (1h)</div>
+            <div style="font-size: 1.5rem; font-weight: 700; color: var(--danger);" id="failover-count">--</div>
+        </div>
+        <div style="background: var(--surface-2); padding: 1rem; border-radius: 8px; border: 1px solid var(--border);">
+            <div style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.5rem;">Database Size</div>
+            <div style="font-size: 1.5rem; font-weight: 700; color: var(--warning);" id="db-size">--</div>
+        </div>
+    </div>
+</div>
+<div class="card">
+    <h3>📊 Top Watched Teams (Last 7 Days)</h3>
+    <div id="top-teams-list" style="display: flex; flex-direction: column; gap: 0.75rem;">
+        <p style="color: var(--text-muted);">Loading...</p>
+    </div>
+</div>
+<div class="card">
+    <h3>⚠️ Rate Limiting Protection</h3>
+    <p class="hint-text">Success rate of each provider's search attempts in the last hour. A provider stuck below 50% may be throttling or banning us.</p>
+    <div id="rate-limiting-status" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem;">
+        <p style="color: var(--text-muted);">Loading...</p>
+    </div>
+</div>
