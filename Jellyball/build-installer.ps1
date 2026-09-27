@@ -35,6 +35,48 @@ function Assert-Success {
     }
 }
 
+# Optional Authenticode signing (avoids the SmartScreen "unrecognized app"
+# warning). Off unless configured:
+#   SIGN_CERT_THUMBPRINT     - SHA1 thumbprint of a code-signing cert in the
+#                              current user's or machine's certificate store
+#   AZURE_SIGNING_DLIB       - Azure Trusted Signing: path to
+#   AZURE_SIGNING_METADATA     Azure.CodeSigning.Dlib.dll and its metadata.json
+#   SIGN_TIMESTAMP_URL       - RFC 3161 timestamp server (default below)
+function Find-SignTool {
+    $onPath = Get-Command "signtool.exe" -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+    $kits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+    if (Test-Path $kits) {
+        $found = Get-ChildItem $kits -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "\\x64\\" } | Sort-Object FullName -Descending | Select-Object -First 1
+        if ($found) { return $found.FullName }
+    }
+    return $null
+}
+
+function Invoke-CodeSign {
+    param([string[]]$Paths)
+    $thumbprint = $env:SIGN_CERT_THUMBPRINT
+    $dlib = $env:AZURE_SIGNING_DLIB
+    $metadata = $env:AZURE_SIGNING_METADATA
+    if (-not $thumbprint -and -not ($dlib -and $metadata)) {
+        Write-Host "Code signing not configured (SIGN_CERT_THUMBPRINT / AZURE_SIGNING_*); skipping"
+        return
+    }
+    $signtool = Find-SignTool
+    if (-not $signtool) { throw "Code signing is configured but signtool.exe was not found (install the Windows SDK)" }
+    $timestamp = if ($env:SIGN_TIMESTAMP_URL) { $env:SIGN_TIMESTAMP_URL } else { "http://timestamp.acs.microsoft.com" }
+    foreach ($path in $Paths) {
+        Write-Host "Signing $path"
+        if ($dlib -and $metadata) {
+            & $signtool sign /v /fd SHA256 /tr $timestamp /td SHA256 /dlib $dlib /dmdf $metadata $path
+        } else {
+            & $signtool sign /v /fd SHA256 /tr $timestamp /td SHA256 /sha1 $thumbprint $path
+        }
+        Assert-Success "Signing failed for $path"
+    }
+}
+
 # ---------------------------------------------------------------------------
 # 1. Build venv
 # ---------------------------------------------------------------------------
@@ -97,6 +139,7 @@ if (-not (Test-Path $ConsoleExe -PathType Leaf)) {
 }
 Write-Host "Built $WindowedExe"
 Write-Host "Built $ConsoleExe"
+Invoke-CodeSign @($WindowedExe, $ConsoleExe)
 
 # ---------------------------------------------------------------------------
 # 6. Compile the Inno Setup installer
@@ -137,6 +180,7 @@ $OutputExe = Join-Path $ProjectRoot "installer\Output\JellyballSetup-$AppVersion
 if (-not (Test-Path $OutputExe -PathType Leaf)) {
     throw "Expected installer was not produced: $OutputExe"
 }
+Invoke-CodeSign @($OutputExe)
 
 Write-Host ""
 Write-Host "Installer built: $OutputExe" -ForegroundColor Green
