@@ -238,20 +238,79 @@ def _find_available_port(preferred_port: int) -> int:
     raise OSError("No available local TCP port found")
 
 
-def _connect_db() -> sqlite3.Connection:
-    """Open a consistently configured SQLite connection for every code path."""
+_DB_CONNECTIONS_LOCK = threading.Lock()
+# Keyed by (thread id, DB path) rather than just thread id, so a thread that
+# later sees a different DB_FILE (as tests do via
+# `patch.object(main, "DB_FILE", ...)`) gets a fresh connection to the new
+# file instead of reusing a stale one pointed at the old path.
+_DB_CONNECTIONS: Dict[Tuple[int, str], sqlite3.Connection] = {}
+
+
+def _open_db_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_FILE, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
     conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
+def _connect_db() -> sqlite3.Connection:
+    """Return a consistently configured SQLite connection for `DB_FILE`.
+
+    Reuses one connection per (thread, DB path) instead of opening a fresh
+    connection (and re-running its PRAGMAs) on every call — this sits on the
+    hot get_setting()/set_setting() path, invoked via asyncio.to_thread on
+    every dashboard/API request. A cached connection that turns out closed or
+    broken is transparently dropped and reopened.
+    """
+    key = (threading.get_ident(), DB_FILE)
+    with _DB_CONNECTIONS_LOCK:
+        conn = _DB_CONNECTIONS.get(key)
+    if conn is not None:
+        try:
+            conn.execute("SELECT 1")
+            return conn
+        except (sqlite3.ProgrammingError, sqlite3.OperationalError) as exc:
+            _log_failure("reuse cached DB connection", exc, logging.DEBUG)
+            with _DB_CONNECTIONS_LOCK:
+                _DB_CONNECTIONS.pop(key, None)
+            try:
+                conn.close()
+            except Exception:
+                pass
+    conn = _open_db_connection()
+    with _DB_CONNECTIONS_LOCK:
+        _DB_CONNECTIONS[key] = conn
+    return conn
+
+
+def close_all_db_connections() -> None:
+    """Close every cached per-thread DB connection.
+
+    Called from lifespan shutdown so the process doesn't hold the DB file
+    open after serving stops; also useful directly from tests before removing
+    a temp DB directory, since a cached connection otherwise keeps that file
+    (and, on Windows, its directory) locked open.
+    """
+    with _DB_CONNECTIONS_LOCK:
+        connections = list(_DB_CONNECTIONS.values())
+        _DB_CONNECTIONS.clear()
+    for conn in connections:
+        try:
+            conn.close()
+        except Exception as exc:
+            _log_failure("close cached DB connection", exc, logging.DEBUG)
+
+
 @contextmanager
 def _db_session():
-    """Like `_connect_db()` used as a context manager, but actually closes the
-    connection on exit. sqlite3.Connection.__exit__ only commits/rolls back —
-    it never closes — so every prior `with _db_session() as conn:` site leaked
-    a raw connection for the lifetime of the process."""
+    """Like `_connect_db()` used as a context manager: commits on success and
+    rolls back on exception. The underlying connection is cached per
+    (thread, DB path) by `_connect_db()` and is deliberately NOT closed here —
+    it's handed back out to the next `_db_session()` call on this thread
+    instead of being reopened. Commit/rollback still happen explicitly on
+    every exit, so nothing depends on connection close to persist writes;
+    `close_all_db_connections()` closes the cached connections for real, on
+    shutdown or teardown."""
     conn = _connect_db()
     try:
         yield conn
@@ -259,8 +318,6 @@ def _db_session():
     except Exception:
         conn.rollback()
         raise
-    finally:
-        conn.close()
 
 
 def _validate_upstream_url(value: str, *, allow_private: Optional[bool] = None) -> Optional[str]:
@@ -486,6 +543,72 @@ def verify_dashboard_auth(request: Request = None, credentials: Optional[HTTPBas
     _AUTH_FAILURES.pop(client_key, None)
     return True
 
+def _migrate_add_team_columns(conn: sqlite3.Connection) -> None:
+    """Migration 1: add columns to `teams` that older releases lacked.
+
+    Idempotent — a DB whose `teams` table already has every column (a fresh
+    install, whose CREATE TABLE above already declares them all, or a DB
+    that's already been through this migration) is left untouched instead of
+    re-attempting the ALTER TABLE."""
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(teams)").fetchall()}
+    for col, definition in [
+        ("logo_url", "TEXT DEFAULT ''"),
+        ("start_time", "TEXT DEFAULT ''"),
+        ("stop_time", "TEXT DEFAULT ''"),
+        ("category", "TEXT DEFAULT 'custom'"),
+        ("source_id", "TEXT DEFAULT ''"),
+        ("content_type", "TEXT DEFAULT 'team'"),
+        ("search_terms", "TEXT DEFAULT ''"),
+        ("always_live", "INTEGER DEFAULT 0"),
+        ("catalog_key", "TEXT DEFAULT ''"),
+        ("is_favorite", "INTEGER DEFAULT 0"),
+        ("auto_disable_after", "TEXT DEFAULT ''"),
+    ]:
+        if col in existing_columns:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE teams ADD COLUMN {col} {definition}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" in str(exc).lower():
+                LOGGER.debug("Database column already exists: %s", col)
+            else:
+                _log_failure(f"migrate database column {col}", exc, logging.ERROR)
+                raise
+
+
+def _migrate_add_team_indexes(conn: sqlite3.Connection) -> None:
+    """Migration 2: index the `teams` columns filtered/sorted by most often
+    (catalog sync lookups by catalog_key; the dashboard's favorites filter)."""
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_teams_catalog_key ON teams (catalog_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_teams_is_favorite ON teams (is_favorite)")
+
+
+# Ordered list of (version, migration_function). Append future migrations
+# here rather than editing an earlier one — each function receives the open
+# connection and must be idempotent, since a fresh DB's CREATE TABLE
+# statements above may already include what an earlier migration would
+# otherwise add.
+SCHEMA_MIGRATIONS = [
+    (1, _migrate_add_team_columns),
+    (2, _migrate_add_team_indexes),
+]
+
+
+def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT)"
+    )
+    applied = {row[0] for row in conn.execute("SELECT version FROM schema_migrations").fetchall()}
+    for version, migration in SCHEMA_MIGRATIONS:
+        if version in applied:
+            continue
+        migration(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (version, datetime.now(timezone.utc).isoformat()),
+        )
+
+
 def init_db():
     db_dir = os.path.dirname(DB_FILE)
     if db_dir:
@@ -550,29 +673,14 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_stream_test_results_timestamp ON stream_test_results (timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_playback_events_timestamp ON playback_events (timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_metrics_timestamp ON cache_metrics (timestamp)")
+        # Migrations (which backfill columns like `auto_disable_after` on a DB
+        # that predates them) must run before any index below that references
+        # a migrated column, or CREATE INDEX fails with "no such column" on a
+        # DB that hasn't been backfilled yet.
+        _apply_schema_migrations(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_teams_auto_disable ON teams (auto_disable_after)")
-        for col, definition in [
-            ("logo_url", "TEXT DEFAULT ''"),
-            ("start_time", "TEXT DEFAULT ''"),
-            ("stop_time", "TEXT DEFAULT ''"),
-            ("category", "TEXT DEFAULT 'custom'"),
-            ("source_id", "TEXT DEFAULT ''"),
-            ("content_type", "TEXT DEFAULT 'team'"),
-            ("search_terms", "TEXT DEFAULT ''"),
-            ("always_live", "INTEGER DEFAULT 0"),
-            ("catalog_key", "TEXT DEFAULT ''"),
-            ("is_favorite", "INTEGER DEFAULT 0"),
-            ("auto_disable_after", "TEXT DEFAULT ''"),
-        ]:
-            try:
-                conn.execute(f"ALTER TABLE teams ADD COLUMN {col} {definition}")
-            except sqlite3.OperationalError as exc:
-                if "duplicate column name" in str(exc).lower():
-                    LOGGER.debug("Database column already exists: %s", col)
-                else:
-                    _log_failure(f"migrate database column {col}", exc, logging.ERROR)
-                    raise
         conn.commit()
+    _load_provider_url_overrides()
     LOGGER.info("Database initialized")
 
 def prune_database_logs_once() -> None:
@@ -666,6 +774,66 @@ async def get_notification_config() -> dict:
         "telegram_chat_id": await get_setting_async("telegram_chat_id", os.getenv("TELEGRAM_CHAT_ID", ""))
     }
 
+# Backoff between webhook delivery attempts: one initial attempt plus up to
+# this many retries, for transient failures only (network errors, 5xx, 429).
+_ALERT_RETRY_DELAYS = (1.0, 3.0)
+_ALERT_MAX_RETRY_AFTER_SECONDS = 10.0
+
+
+def _parse_retry_after_seconds(value: Optional[str]) -> Optional[float]:
+    """Parse a `Retry-After` header's numeric-seconds form. The HTTP-date form
+    is rare for webhook 429s and isn't worth the parsing surface here; when
+    the header is absent or unparseable the caller falls back to its own
+    backoff schedule."""
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value.strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _post_webhook_with_retries(client: httpx.AsyncClient, provider: str, url: str, **kwargs) -> None:
+    """POST a webhook payload with up to len(_ALERT_RETRY_DELAYS) retries.
+
+    Retries transient failures — network/timeout errors, 5xx, and 429 (honouring
+    a `Retry-After` header, capped at _ALERT_MAX_RETRY_AFTER_SECONDS). Any other
+    4xx is treated as non-retryable. Reuses the caller's single AsyncClient
+    across every attempt. The final failure is logged once at WARNING with only
+    the provider name — never the webhook URL or any token embedded in it.
+    """
+    attempts = len(_ALERT_RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        is_last_attempt = attempt == attempts - 1
+        try:
+            response = await client.post(url, **kwargs)
+        except httpx.HTTPError:
+            if is_last_attempt:
+                LOGGER.warning("Alert webhook delivery failed after retries provider=%s", provider)
+                return
+            await asyncio.sleep(_ALERT_RETRY_DELAYS[attempt])
+            continue
+
+        if response.status_code < 400:
+            return
+
+        retryable = response.status_code == 429 or response.status_code >= 500
+        if not retryable or is_last_attempt:
+            LOGGER.warning(
+                "Alert webhook delivery failed after retries provider=%s status=%s",
+                provider, response.status_code,
+            )
+            return
+
+        if response.status_code == 429:
+            retry_after = _parse_retry_after_seconds(response.headers.get("Retry-After"))
+            delay = _ALERT_RETRY_DELAYS[attempt] if retry_after is None else retry_after
+            delay = min(delay, _ALERT_MAX_RETRY_AFTER_SECONDS)
+        else:
+            delay = _ALERT_RETRY_DELAYS[attempt]
+        await asyncio.sleep(delay)
+
+
 async def send_alert(title: str, message: str, level: str = "warning"):
     config = await get_notification_config()
     discord_url = config["discord_webhook_url"]
@@ -674,32 +842,32 @@ async def send_alert(title: str, message: str, level: str = "warning"):
         discord_url = ""
     tg_token = config["telegram_bot_token"]
     tg_chat_id = config["telegram_chat_id"]
-    
+
     color_map = {"info": 3066993, "warning": 16753920, "danger": 14431526, "success": 3647337}
     headers = {"User-Agent": "Jellyball-Proxy/1.0"}
     tasks = []
-    
+
     if discord_url:
         embed = {"title": title, "description": message, "color": color_map.get(level, 16753920), "timestamp": datetime.now(timezone.utc).isoformat()}
         async def _send_discord():
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
-                    await client.post(discord_url, json={"embeds": [embed]}, headers=headers)
+                    await _post_webhook_with_retries(client, "Discord", discord_url, json={"embeds": [embed]}, headers=headers)
             except Exception as exc:
                 _log_failure("send Discord alert", exc)
         tasks.append(_send_discord())
-        
+
     if tg_token and tg_chat_id:
         tg_url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
         tg_text = f"*{title}*\n{message}"
         async def _send_telegram():
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
-                    await client.post(tg_url, json={"chat_id": tg_chat_id, "text": tg_text, "parse_mode": "Markdown"}, headers=headers)
+                    await _post_webhook_with_retries(client, "Telegram", tg_url, json={"chat_id": tg_chat_id, "text": tg_text, "parse_mode": "Markdown"}, headers=headers)
             except Exception as exc:
                 _log_failure("send Telegram alert", exc)
         tasks.append(_send_telegram())
-        
+
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -1280,14 +1448,89 @@ async def _get_cached_index_html(url: str, fetcher) -> Optional[str]:
             _SCRAPE_INDEX_INFLIGHT.pop(url, None)
 
 
+def _invalidate_index_cache_for_prefix(url_prefix: str) -> None:
+    """Drop any cached or in-flight aggregator index-page fetch whose URL
+    starts with `url_prefix`, so a provider base-URL change doesn't keep
+    serving HTML fetched from the old domain out of the shared TTL cache."""
+    if not url_prefix:
+        return
+    for cache_key in [key for key in _SCRAPE_INDEX_CACHE if key.startswith(url_prefix)]:
+        _SCRAPE_INDEX_CACHE.pop(cache_key, None)
+    for cache_key in [key for key in _SCRAPE_INDEX_INFLIGHT if key.startswith(url_prefix)]:
+        _SCRAPE_INDEX_INFLIGHT.pop(cache_key, None)
+
+
+# --- Per-provider base-URL overrides (D1) ---------------------------------
+# Aggregator domains change often; today fixing one means editing .env and
+# restarting the service. Every HtmlAggregatorScraper subclass still has an
+# env-var default (passed into __init__ below), but a DB override stored
+# under app_settings key "provider_url:<ProviderName>" can replace it live.
+# Scrapers read the CURRENT value through the `base_url` property, backed by
+# this module-level dict -- refreshed from the DB once at startup (see
+# `_load_provider_url_overrides`, called from `init_db`) and updated again,
+# in-process, whenever the dashboard's Provider Domains card saves a change
+# (see `_set_provider_url_override`) -- rather than doing a DB read per
+# request on the event loop.
+_PROVIDER_BASE_URL_OVERRIDES: Dict[str, str] = {}
+
+
+def _provider_url_setting_key(provider_name: str) -> str:
+    return f"provider_url:{provider_name}"
+
+
+def _set_provider_url_override(provider: "HtmlAggregatorScraper", url: str) -> None:
+    """Live-apply a provider base-URL change: update the in-memory override
+    dict that the `base_url` property reads, and invalidate any index pages
+    cached under a base URL that's no longer current (the old override/default
+    and, defensively, the new one) so the next search re-fetches fresh HTML."""
+    previous_effective = provider.base_url
+    if url:
+        _PROVIDER_BASE_URL_OVERRIDES[provider.name] = url
+    else:
+        _PROVIDER_BASE_URL_OVERRIDES.pop(provider.name, None)
+    new_effective = provider.base_url
+    for stale in {previous_effective, new_effective}:
+        if stale:
+            _invalidate_index_cache_for_prefix(stale.rstrip("/"))
+
+
+def _load_provider_url_overrides() -> None:
+    """Populate `_PROVIDER_BASE_URL_OVERRIDES` from `app_settings` once at
+    startup (called from `init_db`). One indexed SELECT per provider; never
+    called on the request path. Re-callable/idempotent: a provider with no
+    stored override has any stale in-memory entry cleared too, which is what
+    keeps tests that reinitialize a fresh temp DB isolated from each other."""
+    for provider in ACTIVE_PROVIDERS:
+        if not isinstance(provider, HtmlAggregatorScraper):
+            continue
+        stored = get_setting(_provider_url_setting_key(provider.name), "")
+        if stored:
+            _PROVIDER_BASE_URL_OVERRIDES[provider.name] = stored
+        else:
+            _PROVIDER_BASE_URL_OVERRIDES.pop(provider.name, None)
+
+
 class HtmlAggregatorScraper(BaseProvider):
     """Configurable adapter for aggregators that expose linked event pages."""
 
     def __init__(self, name: str, base_url: str, categories: Optional[List[str]] = None, event_path_hints: Optional[List[str]] = None):
         self.name = name.strip() or "Aggregator"
-        self.base_url = (base_url or "").strip().rstrip("/")
+        self._default_base_url = (base_url or "").strip().rstrip("/")
         self.categories = list(categories or [])
         self.event_path_hints = tuple(hint.lower() for hint in (event_path_hints or []) if hint)
+
+    @property
+    def base_url(self) -> str:
+        """The provider's current base URL: a DB override (set via the
+        dashboard's Provider Domains card / POST /settings/providers) if one
+        is active, otherwise the env-var default this scraper was constructed
+        with. Read fresh on every access from a module-level dict that's kept
+        in sync at startup and on save -- never a DB read at search time."""
+        return _PROVIDER_BASE_URL_OVERRIDES.get(self.name) or self._default_base_url
+
+    @base_url.setter
+    def base_url(self, value: str) -> None:
+        self._default_base_url = (value or "").strip().rstrip("/")
 
     @staticmethod
     def _anchor_context(anchor) -> str:
@@ -1316,9 +1559,27 @@ class HtmlAggregatorScraper(BaseProvider):
             return False
         return True
 
-    async def _fetch_index_page(self, client: httpx.AsyncClient, page_url: str, browser: Optional[Browser]) -> Optional[str]:
-        """Fetch one index/category page: fast HTTP first, falling back to a
-        Playwright-rendered page when the site is behind a Cloudflare check."""
+    async def _fetch_html(
+        self,
+        client: httpx.AsyncClient,
+        page_url: str,
+        browser: Optional[Browser],
+        *,
+        settle_seconds: float = 0,
+        goto_timeout: int = 35000,
+        networkidle_timeout: int = 8000,
+    ) -> Optional[str]:
+        """Fetch one page: fast HTTP first, falling back to a Playwright-
+        rendered page when the site is behind a Cloudflare check (or otherwise
+        returns nothing usable over plain HTTP). Shared by every
+        HtmlAggregatorScraper subclass so this HTTP->Playwright fallback isn't
+        reimplemented per provider.
+
+        `settle_seconds`, when set, waits a fixed amount of time after
+        navigation instead of waiting for the network to go idle -- some sites
+        (e.g. DaddyLive's channel directory) never reach a quiet "networkidle"
+        state.
+        """
         page_html = await fetch_bounded_text(
             client,
             page_url,
@@ -1328,15 +1589,23 @@ class HtmlAggregatorScraper(BaseProvider):
         if not page_html and browser and browser.is_connected():
             try:
                 async with playwright_page(browser, user_agent=DEFAULT_USER_AGENT) as page:
-                    await page.goto(page_url, wait_until="domcontentloaded", timeout=35000)
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=8000)
-                    except Exception:
-                        pass
+                    await page.goto(page_url, wait_until="domcontentloaded", timeout=goto_timeout)
+                    if settle_seconds:
+                        await asyncio.sleep(settle_seconds)
+                    else:
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=networkidle_timeout)
+                        except Exception:
+                            pass
                     page_html = await page.content()
             except Exception as exc:
                 _log_failure(f"{self.name} Cloudflare bypass for {page_url}", exc)
         return page_html
+
+    async def _fetch_index_page(self, client: httpx.AsyncClient, page_url: str, browser: Optional[Browser]) -> Optional[str]:
+        """Fetch one index/category page: fast HTTP first, falling back to a
+        Playwright-rendered page when the site is behind a Cloudflare check."""
+        return await self._fetch_html(client, page_url, browser)
 
     def _parse_matches_from_html(
         self,
@@ -1385,25 +1654,53 @@ class HtmlAggregatorScraper(BaseProvider):
                 if len(matches) >= MAX_PROVIDER_EVENTS:
                     return
 
-    async def _find_matches(self, client: httpx.AsyncClient, search_terms: List[str], browser: Optional[Browser] = None) -> List[tuple[str, int, str]]:
+    async def _find_matches_using(
+        self,
+        client: httpx.AsyncClient,
+        search_terms: List[str],
+        browser: Optional[Browser],
+        *,
+        fetch_page,
+        parse_matches,
+        catch_page_errors: bool = True,
+    ) -> List[tuple[str, int, str]]:
+        """Shared skeleton behind `_find_matches`: fetch (through the shared
+        TTL cache) and parse each of this provider's scan URLs, stopping once
+        MAX_PROVIDER_EVENTS matches have accumulated. `fetch_page` and
+        `parse_matches` let each subclass keep its own fetch-fallback timing
+        and anchor-parsing rules while sharing this loop. `catch_page_errors`
+        preserves each subclass's original error-handling: some log and move
+        on to the next scan URL, others let the exception propagate."""
         matches: List[tuple[str, int, str]] = []
         seen_matches: Set[str] = set()
-        for page_url in self.get_scan_urls():
-            try:
-                page_html = await _get_cached_index_html(
-                    page_url, lambda pu=page_url: self._fetch_index_page(client, pu, browser)
-                )
-                if not page_html:
-                    continue
 
-                await asyncio.to_thread(
-                    self._parse_matches_from_html, page_html, page_url, search_terms, matches, seen_matches
-                )
-                if len(matches) >= MAX_PROVIDER_EVENTS:
-                    return matches
-            except Exception as exc:
-                _log_failure(f"scan provider={self.name} page", exc)
+        async def process(page_url: str) -> None:
+            page_html = await _get_cached_index_html(page_url, lambda pu=page_url: fetch_page(client, pu, browser))
+            if not page_html:
+                return
+            await asyncio.to_thread(parse_matches, page_html, page_url, search_terms, matches, seen_matches)
+
+        for page_url in self.get_scan_urls():
+            if catch_page_errors:
+                try:
+                    await process(page_url)
+                except Exception as exc:
+                    _log_failure(f"scan provider={self.name} page", exc)
+            else:
+                await process(page_url)
+            if len(matches) >= MAX_PROVIDER_EVENTS:
+                return matches
         return matches
+
+    async def _find_matches(self, client: httpx.AsyncClient, search_terms: List[str], browser: Optional[Browser] = None) -> List[tuple[str, int, str]]:
+        return await self._find_matches_using(
+            client,
+            search_terms,
+            browser,
+            fetch_page=self._fetch_index_page,
+            parse_matches=self._parse_matches_from_html,
+            catch_page_errors=True,
+        )
 
     async def search(
         self,
@@ -1808,11 +2105,25 @@ _NON_ENGLISH_CHANNEL_CODES = frozenset({
 })
 
 
+# D6: lets an operator extend the non-English tag list without a code change
+# (e.g. a new aggregator's own regional suffixes). Comma-separated, additive —
+# the built-in defaults above are never replaced, only extended.
+_EXTRA_NON_ENGLISH_MARKERS = frozenset(
+    token.strip().casefold()
+    for token in os.getenv("EXTRA_NON_ENGLISH_MARKERS", "").split(",")
+    if token.strip()
+)
+
+
 def _is_non_english_channel(text: str) -> bool:
     """Return True when a channel listing carries an explicit non-English tag."""
     value = str(text or "").casefold()
     tokens = [token for token in re.split(r"[^a-z]+", value) if token]
-    if any(token in _NON_ENGLISH_CHANNEL_TAGS for token in tokens):
+    if any(token in _NON_ENGLISH_CHANNEL_TAGS or token in _EXTRA_NON_ENGLISH_MARKERS for token in tokens):
+        return True
+    # Extra markers are also checked as plain substrings (not just whole
+    # tokens), so a multi-word or punctuated marker still matches.
+    if any(marker in value for marker in _EXTRA_NON_ENGLISH_MARKERS):
         return True
     # Two-letter region codes are accepted only as explicit suffixes or inside
     # delimiters. This avoids treating ordinary words such as "in" as regions.
@@ -1851,21 +2162,10 @@ class DaddyLiveScraper(HtmlAggregatorScraper):
         super().__init__("DaddyLive", os.getenv("AGGREGATOR_6_URL", "https://dlhd.pk"), ["/24-7-channels.php"], ["watch.php"])
 
     async def _fetch_directory_page(self, client: httpx.AsyncClient, page_url: str, browser: Optional[Browser]) -> Optional[str]:
-        page_html = await fetch_bounded_text(
-            client,
-            page_url,
-            headers={"User-Agent": DEFAULT_USER_AGENT, "Referer": self.base_url},
-            timeout=8.0,
-        )
-        if not page_html and browser and browser.is_connected():
-            try:
-                async with playwright_page(browser, user_agent=DEFAULT_USER_AGENT) as page:
-                    await page.goto(page_url, wait_until="domcontentloaded", timeout=25000)
-                    await asyncio.sleep(2)
-                    page_html = await page.content()
-            except Exception as exc:
-                _log_failure("scan DaddyLive directory with browser", exc)
-        return page_html
+        """DaddyLive's directory never reaches Playwright's "networkidle"
+        state, so this waits a fixed 2s after navigation instead (via the
+        shared `_fetch_html` HTTP->Playwright fallback)."""
+        return await self._fetch_html(client, page_url, browser, settle_seconds=2, goto_timeout=25000)
 
     def _parse_channel_matches_from_html(
         self,
@@ -1905,21 +2205,14 @@ class DaddyLiveScraper(HtmlAggregatorScraper):
 
     async def _find_matches(self, client: httpx.AsyncClient, search_terms: List[str], browser: Optional[Browser] = None) -> List[tuple[str, int, str]]:
         """Match individual directory cards without inheriting the grid's text."""
-        matches: List[tuple[str, int, str]] = []
-        seen_matches: Set[str] = set()
-        for page_url in self.get_scan_urls():
-            page_html = await _get_cached_index_html(
-                page_url, lambda pu=page_url: self._fetch_directory_page(client, pu, browser)
-            )
-            if not page_html:
-                continue
-
-            await asyncio.to_thread(
-                self._parse_channel_matches_from_html, page_html, page_url, search_terms, matches, seen_matches
-            )
-            if len(matches) >= MAX_PROVIDER_EVENTS:
-                return matches
-        return matches
+        return await self._find_matches_using(
+            client,
+            search_terms,
+            browser,
+            fetch_page=self._fetch_directory_page,
+            parse_matches=self._parse_channel_matches_from_html,
+            catch_page_errors=False,
+        )
 
     async def _extract_player_streams(self, browser: Browser, watch_url: str, score: int, match_title: str) -> List[dict]:
         """Follow the embedded player iframe chain and capture the real HLS manifest.
@@ -7040,6 +7333,18 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
     notif_cfg = await get_notification_config()
     jellyfin_cfg = await get_jellyfin_config()
     provider_rotation_enabled = await get_setting_async("provider_rotation_mode", "0") == "1"
+    provider_url_rows_html = "".join(
+        f'''
+                        <div style="display:grid; grid-template-columns: 160px 1fr; gap:0.75rem; align-items:center; margin-bottom:0.85rem;">
+                            <label style="font-size:0.85rem; color: var(--text-soft); font-weight:600;">{_html(provider.name)}</label>
+                            <div>
+                                <input type="text" name="url_{_html(provider.name)}" value="{_html(provider.base_url)}" placeholder="{_html(provider._default_base_url)}">
+                                <p class="hint-text" style="margin:0.25rem 0 0;">Leave blank to reset to default: {_html(provider._default_base_url)}</p>
+                            </div>
+                        </div>'''
+        for provider in ACTIVE_PROVIDERS
+        if isinstance(provider, HtmlAggregatorScraper)
+    )
     update_check_enabled = await get_setting_async("update_check_enabled", "0") == "1"
     update_banner = ""
     if update_check_enabled and _update_available():
@@ -7672,6 +7977,14 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                     <p class="hint-text">Tests the API connection and shows whether the refresh task will work correctly.</p>
                 </div>
                 <div class="card">
+                    <h3>🌐 Provider Domains</h3>
+                    <p class="hint-text">Aggregator domains change often. Override any provider's base URL here without editing .env or restarting the service — changes apply immediately. Leave a field blank to reset it to its built-in default (shown as the placeholder and in the hint below each field).</p>
+                    <form action="/settings/providers" method="post" style="display: flex; flex-direction: column; gap: 0.25rem;">
+                        {provider_url_rows_html}
+                        <button type="submit" style="width: auto; align-self: flex-start; margin-top: 0.5rem;">💾 Save Provider Domains</button>
+                    </form>
+                </div>
+                <div class="card">
                     <h3>Webhook Notification Settings</h3>
                     <form action="/settings/notifications" method="post" style="display: flex; flex-direction: column; gap: 1.25rem;">
                         <div><label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;">👾 Discord Incoming Webhook URL</label>{_secret_input("discord_webhook_url", notif_cfg['discord_webhook_url'])}</div>
@@ -7977,7 +8290,9 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
                     'schedule_failed': '❌ Could not save the auto-disable date',
                     'jellyfin_url_invalid': '❌ Jellyfin URL must be an absolute http(s) URL',
                     'saved': '✅ Settings saved',
-                    'test_sent': '✅ Test alert sent'
+                    'test_sent': '✅ Test alert sent',
+                    'providers_saved': '✅ Provider domains saved',
+                    'providers_invalid': '❌ One or more provider URLs must be an absolute http(s) URL'
                 }};
                 if (status && statusMessages[status]) {{
                     showToast(statusMessages[status], 4000, status.includes('failed'));
@@ -9055,6 +9370,35 @@ async def schedule_team_disable(team_id: str, disable_date: str = Form(""), auth
         _log_failure(f"schedule disable {team_id}", exc)
         return RedirectResponse(url="/?tab=channels&status=schedule_failed", status_code=303)
     return RedirectResponse(url="/?tab=channels&status=schedule_saved", status_code=303)
+
+
+@app.post("/settings/providers")
+async def update_provider_domains(request: Request, auth: bool = Depends(verify_dashboard_auth)):
+    """Save per-provider aggregator base-URL overrides (D1). A blank field
+    resets that provider to its env/default URL. Every non-blank value must
+    validate as an absolute public http(s) URL; if any doesn't, nothing is
+    saved and the dashboard shows a validation error, matching how
+    /settings/jellyfin reports an invalid URL."""
+    form = await request.form()
+    providers = [p for p in ACTIVE_PROVIDERS if isinstance(p, HtmlAggregatorScraper)]
+
+    updates: List[Tuple["HtmlAggregatorScraper", str]] = []
+    for provider in providers:
+        raw_value = str(form.get(f"url_{provider.name}", "") or "").strip()
+        if not raw_value:
+            updates.append((provider, ""))
+            continue
+        validated = _validate_upstream_url(raw_value)
+        if not validated:
+            return RedirectResponse(url="/?tab=settings&status=providers_invalid", status_code=303)
+        updates.append((provider, validated.rstrip("/")))
+
+    for provider, value in updates:
+        await set_setting_async(_provider_url_setting_key(provider.name), value)
+        _set_provider_url_override(provider, value)
+
+    return RedirectResponse(url="/?tab=settings&status=providers_saved", status_code=303)
+
 
 def _create_tray_image():
     from PIL import Image, ImageDraw
