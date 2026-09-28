@@ -487,16 +487,16 @@ class ChannelSessionTests(unittest.IsolatedAsyncioTestCase):
         session = self.make_session()
         await session._poll_once()
         seq_before_switch = session.next_seq
-        # The old source went quiet ~7s before failover: with ~6s segments,
-        # two new-source segments are needed to cover that gap.
+        # The old source went quiet ~7s before failover.
         session.last_new_segment_at -= 7.0
         self.harness.source = SourceSpec(key=("backup",), url=f"{base}/media2.m3u8", label="backup")
         self.harness.set_playlist(f"{base}/media2.m3u8", playlist_text("http://backup", list(range(3))))
         for u in range(3):
             self.harness.set_response(f"http://backup/seg{u}.ts", make_ts_segment())
         await session._poll_once()
-        durations = [s.duration for s in list(session.window)[-3:]]
-        expected = 1 if durations[-1] >= 7.0 else (2 if sum(durations[-2:]) >= 7.0 else 3)
+        # The appended duration is the closest match to the 7 s gap
+        # (6 s segments: one segment, 1 s short, beats two, 5 s over).
+        expected = 1
         self.assertEqual(session.next_seq - seq_before_switch, expected)
 
     async def test_same_key_url_only_change_no_discontinuity_continues_by_upstream_seq(self):
