@@ -43,18 +43,22 @@ from db import (
 )
 from main import (
     _catalog_selection_changes,
+    api_status,
+    generate_m3u,
+    generate_xmltv,
+)
+from failover import (
     _mark_scrape_finished,
     _mark_scrape_started,
     _scrape_lifecycle_defaults,
-    api_status,
+    _resolve_schedule_status,
+)
+from multiview import (
     _build_xstack_filter,
     _build_multiview_ffmpeg_args,
     _multiview_bufsize,
     _multiview_member_validation,
     _multiview_cooldown_remaining,
-    generate_m3u,
-    generate_xmltv,
-    _resolve_schedule_status,
 )
 from ffmpeg_proc import _wait_for_first_segment, _multiview_backoff_seconds, _multiview_error_from_log
 from placeholder import _build_placeholder_ffmpeg_args
@@ -87,6 +91,7 @@ import security
 import db
 import scrapers
 import legacy_proxy
+import multiview
 
 
 class JellyballChangesTests(unittest.TestCase):
@@ -1049,26 +1054,26 @@ class JellyballChangesTests(unittest.TestCase):
         import main
 
         channel_id = "mv_backoff_test"
-        original_failures = dict(main._MULTIVIEW_FAILURES)
+        original_failures = dict(multiview._MULTIVIEW_FAILURES)
         try:
-            main._MULTIVIEW_FAILURES.clear()
+            multiview._MULTIVIEW_FAILURES.clear()
             self.assertEqual(_multiview_cooldown_remaining(channel_id), 0.0)
 
-            main._record_multiview_failure(channel_id, "Server returned 404 Not Found")
+            multiview._record_multiview_failure(channel_id, "Server returned 404 Not Found")
             first_cooldown = _multiview_cooldown_remaining(channel_id)
             self.assertGreater(first_cooldown, 0.0)
             self.assertLessEqual(first_cooldown, 15.0)
 
             # A second failure backs off further (15s -> 30s), not resetting to the same window.
-            main._record_multiview_failure(channel_id, "Server returned 404 Not Found")
+            multiview._record_multiview_failure(channel_id, "Server returned 404 Not Found")
             second_cooldown = _multiview_cooldown_remaining(channel_id)
             self.assertGreater(second_cooldown, first_cooldown)
 
-            main._clear_multiview_failure(channel_id)
+            multiview._clear_multiview_failure(channel_id)
             self.assertEqual(_multiview_cooldown_remaining(channel_id), 0.0)
         finally:
-            main._MULTIVIEW_FAILURES.clear()
-            main._MULTIVIEW_FAILURES.update(original_failures)
+            multiview._MULTIVIEW_FAILURES.clear()
+            multiview._MULTIVIEW_FAILURES.update(original_failures)
 
     def test_multiview_error_from_log_prefers_input_error_over_boilerplate(self):
         log_lines = [

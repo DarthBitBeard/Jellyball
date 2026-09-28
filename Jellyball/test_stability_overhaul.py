@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import failover
 import alerts
 import db
 import scrapers
@@ -25,14 +26,14 @@ class CandidateMergeTests(unittest.TestCase):
             self._candidate("C", "https://cdn-c.test/x.m3u8"),
             self._candidate("B", "https://cdn-b.test/live.m3u8"),
         ]
-        merged, index = main._merge_stream_candidates([standby, active], 1, fresh, keep_active=True)
+        merged, index = failover._merge_stream_candidates([standby, active], 1, fresh, keep_active=True)
         self.assertIs(merged[index], active)
         self.assertEqual([c["provider"] for c in merged], ["A", "C", "B"])
 
     def test_rotated_token_refreshes_active_url_without_replacing_candidate(self):
         active = self._candidate("A", "https://cdn-a.test/live/index.m3u8?token=old")
         fresh = [self._candidate("A", "https://cdn-a.test/live/index.m3u8?token=new")]
-        merged, index = main._merge_stream_candidates([active], 0, fresh, keep_active=True)
+        merged, index = failover._merge_stream_candidates([active], 0, fresh, keep_active=True)
         self.assertEqual(len(merged), 1)
         self.assertIs(merged[index], active)
         self.assertTrue(active["url"].endswith("token=new"))
@@ -40,29 +41,29 @@ class CandidateMergeTests(unittest.TestCase):
     def test_unhealthy_active_is_not_kept(self):
         active = self._candidate("A", "https://cdn-a.test/live.m3u8")
         fresh = [self._candidate("B", "https://cdn-b.test/live.m3u8")]
-        merged, index = main._merge_stream_candidates([active], 0, fresh, keep_active=False)
+        merged, index = failover._merge_stream_candidates([active], 0, fresh, keep_active=False)
         self.assertEqual([c["provider"] for c in merged], ["B"])
         self.assertEqual(index, 0)
 
     def test_standby_health_history_is_preserved(self):
         old = self._candidate("B", "https://cdn-b.test/live.m3u8?t=1", last_health_ok=False, last_health_check=123.0)
         fresh = [self._candidate("B", "https://cdn-b.test/live.m3u8?t=2")]
-        merged, _ = main._merge_stream_candidates([old], 0, fresh, keep_active=False)
+        merged, _ = failover._merge_stream_candidates([old], 0, fresh, keep_active=False)
         self.assertFalse(merged[0]["last_health_ok"])
         self.assertEqual(merged[0]["last_health_check"], 123.0)
 
     def test_merge_respects_candidate_cap(self):
         fresh = [self._candidate("P", f"https://cdn.test/{i}.m3u8") for i in range(10)]
         with patch.object(scrapers, "MAX_STREAM_CANDIDATES", 3):
-            merged, _ = main._merge_stream_candidates([], 0, fresh, keep_active=False)
+            merged, _ = failover._merge_stream_candidates([], 0, fresh, keep_active=False)
         self.assertEqual(len(merged), 3)
 
 
 class HealthCheckOriginTests(unittest.IsolatedAsyncioTestCase):
     async def test_check_stream_health_forwards_origin(self):
         verify = AsyncMock(return_value=True)
-        with patch.object(main, "verify_stream_live", verify):
-            self.assertTrue(await main.check_stream_health("https://cdn.test/a.m3u8", "https://ref.test/", "https://org.test"))
+        with patch.object(failover, "verify_stream_live", verify):
+            self.assertTrue(await failover.check_stream_health("https://cdn.test/a.m3u8", "https://ref.test/", "https://org.test"))
         self.assertEqual(verify.await_args.kwargs.get("origin"), "https://org.test")
 
 

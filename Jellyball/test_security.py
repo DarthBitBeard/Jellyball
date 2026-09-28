@@ -12,6 +12,8 @@ from unittest.mock import patch
 import httpx
 
 import main
+import failover
+import sessions
 import legacy_proxy
 import alerts
 import db
@@ -287,7 +289,7 @@ class DashboardRenderTests(TempDbMixin, unittest.TestCase):
                  "match_title": '"><svg onload=alert(3)>'},
             ],
             "active_index": 0, "is_healthy": True, "category": "custom", "logo_url": "",
-            "start_time": "", "stop_time": "", **main._scrape_lifecycle_defaults(),
+            "start_time": "", "stop_time": "", **failover._scrape_lifecycle_defaults(),
         }
 
         async def exercise():
@@ -315,18 +317,18 @@ class DashboardRenderTests(TempDbMixin, unittest.TestCase):
                 {"provider": "ProviderB", "url": "https://cdn.example/b.m3u8", "match_title": "Game B"},
             ],
             "active_index": 0, "is_healthy": True, "category": "nfl", "logo_url": "",
-            "start_time": "", "stop_time": "", **main._scrape_lifecycle_defaults(),
+            "start_time": "", "stop_time": "", **failover._scrape_lifecycle_defaults(),
         }
         state.stream_state["off_season_team"] = {
             "name": "Off Season Team", "query": "q", "candidates": [],
             "active_index": 0, "is_healthy": False, "category": "ncaaf", "logo_url": "",
-            "start_time": "", "stop_time": "", **main._scrape_lifecycle_defaults(),
+            "start_time": "", "stop_time": "", **failover._scrape_lifecycle_defaults(),
         }
         state.stream_state["off_season_team"]["schedule_status"] = "off_season"
         state.stream_state["exhausted_team"] = {
             "name": "Exhausted Team", "query": "q", "candidates": [],
             "active_index": 0, "is_healthy": False, "category": "nba", "logo_url": "",
-            "start_time": "", "stop_time": "", **main._scrape_lifecycle_defaults(),
+            "start_time": "", "stop_time": "", **failover._scrape_lifecycle_defaults(),
         }
         state.stream_state["exhausted_team"]["exhausted"] = True
         state.stream_state["mv_channel"] = {
@@ -353,27 +355,27 @@ class DashboardRenderTests(TempDbMixin, unittest.TestCase):
             async with _client() as client:
                 return await client.post("/settings/advanced", data=data)
 
-        original = main.IDLE_HEALTH_INTERVAL
+        original = failover.IDLE_HEALTH_INTERVAL
         try:
             with patch.object(security, "DASHBOARD_PASSWORD", ""):
                 response = asyncio.run(post({"IDLE_HEALTH_INTERVAL": "45", "SESSION_STALE_SECONDS": "9999"}))
                 self.assertEqual(response.status_code, 303)
-                self.assertEqual(main.IDLE_HEALTH_INTERVAL, 45.0)
+                self.assertEqual(failover.IDLE_HEALTH_INTERVAL, 45.0)
                 # Clamped to the tunable's maximum and applied to live sessions.
-                self.assertEqual(main.SESSIONS.config.stale_min_seconds, 300.0)
+                self.assertEqual(sessions.SESSIONS.config.stale_min_seconds, 300.0)
                 self.assertEqual(db.get_setting("tunable:IDLE_HEALTH_INTERVAL"), "45.0")
 
-                main.IDLE_HEALTH_INTERVAL = 1.0
+                failover.IDLE_HEALTH_INTERVAL = 1.0
                 main._load_tunable_overrides()
-                self.assertEqual(main.IDLE_HEALTH_INTERVAL, 45.0)
+                self.assertEqual(failover.IDLE_HEALTH_INTERVAL, 45.0)
 
                 asyncio.run(post({"IDLE_HEALTH_INTERVAL": "", "SESSION_STALE_SECONDS": ""}))
-                self.assertEqual(main.IDLE_HEALTH_INTERVAL, main._TUNABLE_DEFAULTS["IDLE_HEALTH_INTERVAL"])
-                self.assertEqual(main.SESSIONS.config.stale_min_seconds,
+                self.assertEqual(failover.IDLE_HEALTH_INTERVAL, main._TUNABLE_DEFAULTS["IDLE_HEALTH_INTERVAL"])
+                self.assertEqual(sessions.SESSIONS.config.stale_min_seconds,
                                  main._TUNABLE_DEFAULTS["SESSION_STALE_SECONDS"])
         finally:
-            main.IDLE_HEALTH_INTERVAL = original
-            main.SESSIONS.config.stale_min_seconds = main._TUNABLE_DEFAULTS["SESSION_STALE_SECONDS"]
+            failover.IDLE_HEALTH_INTERVAL = original
+            sessions.SESSIONS.config.stale_min_seconds = main._TUNABLE_DEFAULTS["SESSION_STALE_SECONDS"]
 
 
 class ObservabilityEndpointTests(unittest.TestCase):
