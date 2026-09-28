@@ -168,13 +168,6 @@ from dotenv import load_dotenv
 from fastapi import Request
 from typing import Dict
 
-# stream_extractor and network_safety are imported before load_dotenv() below,
-# as they were before the split: both read a few settings at import time
-# (JELLYBALL_USER_AGENT, PLAYWRIGHT_MAX_PAGES, DNS_RESOLVE_TIMEOUT), which
-# therefore come from the real environment only, not from .env.
-from stream_extractor import DEFAULT_USER_AGENT
-from network_safety import bounded_float, bounded_int, validate_http_url
-
 # Precedence: real environment variables > the data directory's .env (per-user
 # for the tray app, %ProgramData%\Jellyball\.env for the service, written by the
 # installer) > a .env beside the executable (package-wide defaults). Previously
@@ -182,6 +175,13 @@ from network_safety import bounded_float, bounded_int, validate_http_url
 # service manager or Docker passed in.
 load_dotenv(dotenv_path=USER_ENV_FILE)
 load_dotenv(dotenv_path=APP_DIR / ".env")
+
+# Imported after load_dotenv(): both read settings at import time
+# (JELLYBALL_USER_AGENT, PLAYWRIGHT_MAX_PAGES, DNS_RESOLVE_TIMEOUT), which
+# previously could only come from the real environment, not from .env.
+from stream_extractor import DEFAULT_USER_AGENT  # noqa: E402
+from network_safety import bounded_float, bounded_int, validate_http_url  # noqa: E402
+
 PORT = bounded_int(os.getenv("PORT", "8000"), 8000, 1, 65535)
 
 
