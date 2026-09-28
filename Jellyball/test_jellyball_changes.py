@@ -41,7 +41,8 @@ from db import (
     load_multiview_channels,
     delete_multiview_channel,
 )
-from main import _catalog_selection_changes, api_status
+from routes_dashboard import _catalog_selection_changes
+from routes_api import api_status
 from epg import generate_m3u, generate_xmltv
 from failover import (
     _mark_scrape_finished,
