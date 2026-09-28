@@ -19,8 +19,9 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import epg
 import state
-from main import (
+from epg import (
     generate_m3u,
     generate_xmltv,
     _channel_programmes,
@@ -400,7 +401,7 @@ class MultiviewTvgIdSchemeTests(unittest.TestCase):
         channel_state = dict(member_state)
         channel_state["mv_sunday"] = data
         with patch.dict(state.stream_state, channel_state, clear=True), \
-                patch.object(main, "_fetch_tvguide_epg", new=AsyncMock(return_value={})):
+                patch.object(epg, "_fetch_tvguide_epg", new=AsyncMock(return_value={})):
             request = SimpleNamespace(headers={"host": "127.0.0.1:8000"})
             playlist = asyncio.run(generate_m3u(request))
             guide = asyncio.run(generate_xmltv())
@@ -458,7 +459,7 @@ class MultiviewXmltvWellFormedTests(unittest.TestCase):
         channel_state = dict(member_state)
         channel_state["mv_sunday"] = data
         with patch.dict(state.stream_state, channel_state, clear=True), \
-                patch.object(main, "_fetch_tvguide_epg", new=AsyncMock(return_value={})):
+                patch.object(epg, "_fetch_tvguide_epg", new=AsyncMock(return_value={})):
             guide = asyncio.run(generate_xmltv())
 
         root = ET.fromstring(guide)  # raises if malformed
