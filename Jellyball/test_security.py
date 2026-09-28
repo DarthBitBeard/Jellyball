@@ -12,6 +12,8 @@ from unittest.mock import patch
 import httpx
 
 import main
+import routes_api
+import routes_dashboard
 import tunables
 import channels
 import epg
@@ -77,7 +79,7 @@ class CsrfTests(unittest.TestCase):
                     headers={"origin": "https://evil.example"},
                 )
 
-        with patch.object(main, "send_alert") as send_alert:
+        with patch.object(routes_dashboard, "send_alert") as send_alert:
             response = asyncio.run(exercise())
         self.assertEqual(response.status_code, 403)
         send_alert.assert_not_called()
@@ -148,7 +150,7 @@ class SecretSettingsTests(TempDbMixin, unittest.TestCase):
         # secret_input macro (templates/partials/alerts.html) rather than
         # HTML directly, so the saved value itself is never embedded
         # anywhere except as a masked last-4-characters hint.
-        data = main._secret_input("jellyfin_api_key", "abcdef123456")
+        data = routes_dashboard._secret_input("jellyfin_api_key", "abcdef123456")
         self.assertNotIn("abcdef123456", repr(data))
         self.assertEqual(data["name"], "jellyfin_api_key")
         self.assertTrue(data["has_value"])
@@ -168,15 +170,15 @@ class SecretSettingsTests(TempDbMixin, unittest.TestCase):
         self.assertIn("3456", body)
 
     def test_blank_secret_keeps_saved_value_and_clear_removes_it(self):
-        self.assertEqual(main._submitted_secret("", "", "saved"), "saved")
-        self.assertEqual(main._submitted_secret("new", "", "saved"), "new")
-        self.assertEqual(main._submitted_secret("", "1", "saved"), "")
+        self.assertEqual(routes_dashboard._submitted_secret("", "", "saved"), "saved")
+        self.assertEqual(routes_dashboard._submitted_secret("new", "", "saved"), "new")
+        self.assertEqual(routes_dashboard._submitted_secret("", "1", "saved"), "")
 
     def test_changing_jellyfin_host_requires_the_key_again(self):
         async def exercise():
             await db.set_setting_async("jellyfin_url", "http://192.168.1.10:8096")
             await db.set_setting_async("jellyfin_api_key", "secret-key")
-            response = await main.update_jellyfin_settings(
+            response = await routes_dashboard.update_jellyfin_settings(
                 jellyfin_url="https://attacker.example", jellyfin_api_key="",
                 jellyfin_task_id="", clear_jellyfin_api_key="", auth=True,
             )
@@ -191,7 +193,7 @@ class SecretSettingsTests(TempDbMixin, unittest.TestCase):
         async def exercise():
             await db.set_setting_async("jellyfin_url", "http://192.168.1.10:8096")
             await db.set_setting_async("jellyfin_api_key", "secret-key")
-            await main.update_jellyfin_settings(
+            await routes_dashboard.update_jellyfin_settings(
                 jellyfin_url="http://192.168.1.10:8096/", jellyfin_api_key="",
                 jellyfin_task_id="task", clear_jellyfin_api_key="", auth=True,
             )
@@ -263,8 +265,8 @@ class ImportConfigTests(TempDbMixin, unittest.TestCase):
             request = Request({"type": "http", "method": "POST", "path": "/api/import-config",
                                "headers": [], "query_string": b""}, receive)
             with patch.object(channels, "_start_team_scrape_loop") as start_loop, \
-                    patch.object(main, "get_catalog_entries", return_value=[]):
-                response = await main.import_config(request, auth=True)
+                    patch.object(routes_api, "get_catalog_entries", return_value=[]):
+                response = await routes_api.import_config(request, auth=True)
             return response, start_loop
 
         response, start_loop = asyncio.run(exercise())
@@ -278,10 +280,10 @@ class ImportConfigTests(TempDbMixin, unittest.TestCase):
         start_loop.assert_called_once_with("evil_id")
 
     def test_schedule_disable_rejects_bad_dates(self):
-        self.assertEqual(main._parse_disable_date("2026-10-01"), "2026-10-01")
-        self.assertEqual(main._parse_disable_date(""), "")
-        self.assertIsNone(main._parse_disable_date("10/01/2026"))
-        self.assertIsNone(main._parse_disable_date("2026-02-30"))
+        self.assertEqual(routes_dashboard._parse_disable_date("2026-10-01"), "2026-10-01")
+        self.assertEqual(routes_dashboard._parse_disable_date(""), "")
+        self.assertIsNone(routes_dashboard._parse_disable_date("10/01/2026"))
+        self.assertIsNone(routes_dashboard._parse_disable_date("2026-02-30"))
 
 
 class DashboardRenderTests(TempDbMixin, unittest.TestCase):
@@ -299,7 +301,7 @@ class DashboardRenderTests(TempDbMixin, unittest.TestCase):
             async with _client() as client:
                 return await client.get("/?tab=channels")
 
-        with patch.object(security, "DASHBOARD_PASSWORD", ""),                 patch.object(main, "get_catalog_entries", return_value=[]):
+        with patch.object(security, "DASHBOARD_PASSWORD", ""),                 patch.object(routes_dashboard, "get_catalog_entries", return_value=[]):
             response = asyncio.run(exercise())
         self.assertEqual(response.status_code, 200)
         body = response.text
@@ -345,7 +347,7 @@ class DashboardRenderTests(TempDbMixin, unittest.TestCase):
                 return await client.get(f"/?tab={tab}")
 
         with patch.object(security, "DASHBOARD_PASSWORD", ""), \
-                patch.object(main, "get_catalog_entries", return_value=[]):
+                patch.object(routes_dashboard, "get_catalog_entries", return_value=[]):
             for tab in ["channels", "metrics", "performance", "playback", "alerts", "logs"]:
                 response = asyncio.run(exercise(tab))
                 self.assertEqual(response.status_code, 200, tab)

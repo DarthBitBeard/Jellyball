@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import main
+import routes_dashboard
 import epg
 import failover
 import sessions
@@ -215,8 +216,8 @@ class SessionHookTests(StateMixin, unittest.TestCase):
     def test_override_clears_exhaustion(self):
         a = _candidate("A", "https://a.example/1.m3u8")
         state.stream_state["t"] = {"name": "Team", "candidates": [a], "active_index": 0, "exhausted": True}
-        with patch.object(main, "_spawn_background_task") as spawn:
-            asyncio.run(main.override_stream("t", candidate_index=0, auth=True))
+        with patch.object(routes_dashboard, "_spawn_background_task") as spawn:
+            asyncio.run(routes_dashboard.override_stream("t", candidate_index=0, auth=True))
         self.assertFalse(state.stream_state["t"]["exhausted"])
         for call in spawn.call_args_list:
             call.args[0].close()

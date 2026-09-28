@@ -111,7 +111,7 @@ datas = [
     if path.is_file()
 ]
 
-# Dashboard templates/static assets (see main.py's TEMPLATES/StaticFiles
+# Dashboard templates/static assets (see routes_dashboard.TEMPLATES and main.py's StaticFiles
 # setup, resolved at runtime via _resource_path so this bundle and the
 # source tree both work). Walked recursively to preserve the templates/
 # partials/ subfolder.
@@ -132,6 +132,28 @@ hiddenimports = [
     "ts_normalize",
     "version",
     "main",
+    # Modules split out of main.py (T6). main imports them statically; listed so the
+    # bundle never depends on that, since main itself is only imported lazily by the launcher.
+    "config",
+    "state",
+    "db",
+    "security",
+    "scrapers",
+    "catalog",
+    "alerts",
+    "updates",
+    "legacy_proxy",
+    "ffmpeg_proc",
+    "placeholder",
+    "sessions",
+    "multiview",
+    "failover",
+    "channels",
+    "epg",
+    "tunables",
+    "routes_stream",
+    "routes_api",
+    "routes_dashboard",
     "uvicorn.logging",
     "uvicorn.loops",
     "uvicorn.loops.auto",

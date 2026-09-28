@@ -13,7 +13,7 @@ on:
 # Jellyball targets Windows (Windows service, PyInstaller + Inno Setup
 # installer), so windows-latest is the primary/required job. An ubuntu-latest
 # job is also run because the unit suite has no Windows-only dependency: every
-# pywin32 usage in Jellyball/main.py is guarded by `sys.platform == "win32"` /
+# Windows-specific usage in Jellyball/*.py is guarded by `sys.platform == "win32"` /
 # `os.name == "nt"`, requirements.txt marks pywin32 itself
 # `sys_platform == "win32"` (so pip simply skips it on Linux), and pystray/PIL
 # (tray-icon mode) are imported lazily inside functions, never at module
