@@ -12,6 +12,7 @@ from unittest.mock import patch
 import httpx
 
 import main
+import tunables
 import channels
 import epg
 import failover
@@ -368,16 +369,16 @@ class DashboardRenderTests(TempDbMixin, unittest.TestCase):
                 self.assertEqual(db.get_setting("tunable:IDLE_HEALTH_INTERVAL"), "45.0")
 
                 failover.IDLE_HEALTH_INTERVAL = 1.0
-                main._load_tunable_overrides()
+                tunables._load_tunable_overrides()
                 self.assertEqual(failover.IDLE_HEALTH_INTERVAL, 45.0)
 
                 asyncio.run(post({"IDLE_HEALTH_INTERVAL": "", "SESSION_STALE_SECONDS": ""}))
-                self.assertEqual(failover.IDLE_HEALTH_INTERVAL, main._TUNABLE_DEFAULTS["IDLE_HEALTH_INTERVAL"])
+                self.assertEqual(failover.IDLE_HEALTH_INTERVAL, tunables._TUNABLE_DEFAULTS["IDLE_HEALTH_INTERVAL"])
                 self.assertEqual(sessions.SESSIONS.config.stale_min_seconds,
-                                 main._TUNABLE_DEFAULTS["SESSION_STALE_SECONDS"])
+                                 tunables._TUNABLE_DEFAULTS["SESSION_STALE_SECONDS"])
         finally:
             failover.IDLE_HEALTH_INTERVAL = original
-            sessions.SESSIONS.config.stale_min_seconds = main._TUNABLE_DEFAULTS["SESSION_STALE_SECONDS"]
+            sessions.SESSIONS.config.stale_min_seconds = tunables._TUNABLE_DEFAULTS["SESSION_STALE_SECONDS"]
 
 
 class ObservabilityEndpointTests(unittest.TestCase):
