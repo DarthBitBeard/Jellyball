@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import main
+import failover
+import sessions
 import alerts
 import catalog
 import updates
@@ -30,9 +32,9 @@ class StateMixin:
         super().setUp()
         self._state_backup = dict(state.stream_state)
         state.stream_state.clear()
-        self._alerts = patch.object(main, "send_alert", new=AsyncMock())
+        self._alerts = patch.object(failover, "send_alert", new=AsyncMock())
         self._alerts.start()
-        self._metric = patch.object(main, "log_metric_event_async", new=AsyncMock())
+        self._metric = patch.object(failover, "log_metric_event_async", new=AsyncMock())
         self._metric.start()
 
     def tearDown(self):
@@ -57,8 +59,8 @@ class ExhaustedRecoveryTests(StateMixin, unittest.IsolatedAsyncioTestCase):
         async def health(url, referer, origin="", **kwargs):
             return url.startswith("https://b.")
 
-        with patch.object(main, "check_stream_health", side_effect=health):
-            await main._probe_exhausted_candidates("t", data)
+        with patch.object(failover, "check_stream_health", side_effect=health):
+            await failover._probe_exhausted_candidates("t", data)
 
         self.assertFalse(data["exhausted"])
         self.assertTrue(data["is_healthy"])
@@ -71,10 +73,10 @@ class ExhaustedRecoveryTests(StateMixin, unittest.IsolatedAsyncioTestCase):
                 "candidates": [_candidate("A", "https://a.example/live.m3u8")],
                 "start_time": "", "stop_time": "", "always_live": True}
         state.stream_state["t"] = data
-        with patch.object(main, "_spawn_background_task") as spawn, \
-                patch.object(main, "_probe_exhausted_candidates", new=lambda *a: None):
-            main._failover_monitor_tick()
-            main._failover_monitor_tick()  # throttled by EXHAUSTED_PROBE_INTERVAL
+        with patch.object(failover, "_spawn_background_task") as spawn, \
+                patch.object(failover, "_probe_exhausted_candidates", new=lambda *a: None):
+            failover._failover_monitor_tick()
+            failover._failover_monitor_tick()  # throttled by EXHAUSTED_PROBE_INTERVAL
         self.assertEqual(spawn.call_count, 1)
         self.assertTrue(data["exhausted_probe_in_flight"])
 
@@ -85,7 +87,7 @@ class FailoverCountersTests(StateMixin, unittest.IsolatedAsyncioTestCase):
         b = _candidate("B", "https://b.example/live.m3u8", consecutive_failures=2, last_health_ok=True,
                        last_health_check=time.time())
         state.stream_state["t"] = {"name": "Team", "candidates": [a, b], "active_index": 0}
-        moved = await main.request_failover("t", main.candidate_source_key(a), "health probe failed")
+        moved = await failover.request_failover("t", sessions.candidate_source_key(a), "health probe failed")
         self.assertTrue(moved)
         self.assertEqual(state.stream_state["t"]["active_index"], 1)
         self.assertEqual(b["consecutive_failures"], 0)
@@ -93,8 +95,8 @@ class FailoverCountersTests(StateMixin, unittest.IsolatedAsyncioTestCase):
 
     async def test_good_standby_probe_clears_its_failure_count(self):
         standby = _candidate("B", "https://b.example/live.m3u8", consecutive_failures=3)
-        with patch.object(main, "check_stream_health", new=AsyncMock(return_value=True)):
-            await main._probe_standby_candidate(standby, asyncio.Semaphore(1))
+        with patch.object(failover, "check_stream_health", new=AsyncMock(return_value=True)):
+            await failover._probe_standby_candidate(standby, asyncio.Semaphore(1))
         self.assertEqual(standby["consecutive_failures"], 0)
         self.assertTrue(standby["last_health_ok"])
 
@@ -102,12 +104,12 @@ class FailoverCountersTests(StateMixin, unittest.IsolatedAsyncioTestCase):
         only = _candidate("A", "https://a.example/live.m3u8")
         data = {"name": "Team", "candidates": [only], "active_index": 0}
         state.stream_state["t"] = data
-        key = main.candidate_source_key(only)
-        with patch.object(main, "_handle_candidates_exhausted") as exhausted:
-            for _ in range(main.SELF_RETRY_LIMIT):
-                self.assertFalse(await main.request_failover("t", key, "playlist stale"))
+        key = sessions.candidate_source_key(only)
+        with patch.object(failover, "_handle_candidates_exhausted") as exhausted:
+            for _ in range(failover.SELF_RETRY_LIMIT):
+                self.assertFalse(await failover.request_failover("t", key, "playlist stale"))
                 self.assertFalse(data.get("exhausted", False))
-            await main.request_failover("t", key, "playlist stale")
+            await failover.request_failover("t", key, "playlist stale")
         self.assertTrue(data["exhausted"])
         exhausted.assert_called_once()
 
@@ -116,13 +118,13 @@ class FailoverCountersTests(StateMixin, unittest.IsolatedAsyncioTestCase):
         b = _candidate("B", "https://b.example/live.m3u8")
         data = {"name": "Team", "candidates": [a, b], "active_index": 0}
         state.stream_state["t"] = data
-        with patch.object(main, "_spawn_background_task") as spawn:
+        with patch.object(failover, "_spawn_background_task") as spawn:
             for _ in range(4):
                 active = data["candidates"][data["active_index"]]
                 # Make the other one eligible again each round.
                 for c in data["candidates"]:
                     c["last_health_check"] = 0.0
-                await main.request_failover("t", main.candidate_source_key(active), "segments failing")
+                await failover.request_failover("t", sessions.candidate_source_key(active), "segments failing")
         alert_calls = [c for c in spawn.call_args_list if "failover alert" in c.args[1]]
         self.assertEqual(len(alert_calls), 1)
         self.assertEqual(data["suppressed_failover_alerts"], 3)
@@ -135,8 +137,8 @@ class FailoverCountersTests(StateMixin, unittest.IsolatedAsyncioTestCase):
         a = _candidate("A", "https://a.example/live.m3u8")
         b = _candidate("B", "https://b.example/live.m3u8")
         state.stream_state["t"] = {"name": "Team", "candidates": [a, b], "active_index": 0}
-        with patch.object(main, "_trigger_scrape", new=AsyncMock()) as rescrape:
-            await main.request_failover("t", main.candidate_source_key(a), "playlist forbidden")
+        with patch.object(failover, "_trigger_scrape", new=AsyncMock()) as rescrape:
+            await failover.request_failover("t", sessions.candidate_source_key(a), "playlist forbidden")
             await asyncio.sleep(0)
         rescrape.assert_awaited_once_with("t", force=True)
 
@@ -144,18 +146,18 @@ class FailoverCountersTests(StateMixin, unittest.IsolatedAsyncioTestCase):
 class WindowCloseTests(StateMixin, unittest.TestCase):
     def test_close_needs_the_grace_period(self):
         data = {"name": "Team", "schedule_status": "no_event", "candidates": [_candidate("A", "https://a/x.m3u8")]}
-        with patch.object(main, "WINDOW_CLOSE_GRACE_SECONDS", 100.0):
-            self.assertFalse(main._stream_window_should_close("t", data))
+        with patch.object(failover, "WINDOW_CLOSE_GRACE_SECONDS", 100.0):
+            self.assertFalse(failover._stream_window_should_close("t", data))
             data["window_close_pending_since"] -= 101.0
-            self.assertTrue(main._stream_window_should_close("t", data))
+            self.assertTrue(failover._stream_window_should_close("t", data))
 
     def test_placeholder_does_not_count_as_flowing(self):
         session = SimpleNamespace(
             source=SimpleNamespace(key=("placeholder",)), is_flowing=lambda: True, is_watched=lambda: True,
         )
-        self.assertFalse(main._session_playing_real_source(session))
+        self.assertFalse(failover._session_playing_real_source(session))
         session.source = SimpleNamespace(key=("prov", "cdn", "/live.m3u8"))
-        self.assertTrue(main._session_playing_real_source(session))
+        self.assertTrue(failover._session_playing_real_source(session))
 
 
 class CandidateSelectionTests(unittest.TestCase):
@@ -164,25 +166,25 @@ class CandidateSelectionTests(unittest.TestCase):
         failed = _candidate("A", "https://a.example/1.m3u8", last_health_ok=False, last_health_check=now)
         good = _candidate("B", "https://b.example/1.m3u8", last_health_ok=True, last_health_check=now)
         fresh = [dict(failed), dict(good)]
-        merged, index = main._merge_stream_candidates([failed, good], 0, fresh, keep_active=False)
+        merged, index = failover._merge_stream_candidates([failed, good], 0, fresh, keep_active=False)
         self.assertEqual(merged[index]["provider"], "B")
 
     def test_incompatible_sources_get_another_chance_after_expiry(self):
         now = time.time()
         c = {"session_compatible": False, "incompatible_at": now}
-        self.assertFalse(main._candidate_session_compatible(c, now))
-        self.assertTrue(main._candidate_session_compatible(c, now + main.INCOMPATIBLE_RETRY_SECONDS + 1))
+        self.assertFalse(failover._candidate_session_compatible(c, now))
+        self.assertTrue(failover._candidate_session_compatible(c, now + failover.INCOMPATIBLE_RETRY_SECONDS + 1))
 
     def test_token_like_path_segments_do_not_change_the_source_key(self):
         a = _candidate("P", "https://cdn.example/hls/Zx81kQ2mTyp0aLr9bnW3cDeF45/espn/index.m3u8")
         b = _candidate("P", "https://cdn.example/hls/Q9w8E7r6T5y4U3i2O1p0aSdF12/espn/index.m3u8")
         c = _candidate("P", "https://cdn.example/hls/Q9w8E7r6T5y4U3i2O1p0aSdF12/espn2/index.m3u8")
-        self.assertEqual(main.candidate_source_key(a), main.candidate_source_key(b))
-        self.assertNotEqual(main.candidate_source_key(b), main.candidate_source_key(c))
+        self.assertEqual(sessions.candidate_source_key(a), sessions.candidate_source_key(b))
+        self.assertNotEqual(sessions.candidate_source_key(b), sessions.candidate_source_key(c))
         # Short numeric/channel ids are identity, not tokens.
         d = _candidate("P", "https://cdn.example/live/1234/index.m3u8")
         e = _candidate("P", "https://cdn.example/live/5678/index.m3u8")
-        self.assertNotEqual(main.candidate_source_key(d), main.candidate_source_key(e))
+        self.assertNotEqual(sessions.candidate_source_key(d), sessions.candidate_source_key(e))
 
 
 class SessionHookTests(StateMixin, unittest.TestCase):
@@ -190,11 +192,11 @@ class SessionHookTests(StateMixin, unittest.TestCase):
         a = _candidate("A", "https://a.example/1.m3u8")
         b = _candidate("B", "https://b.example/1.m3u8")
         state.stream_state["t"] = {"name": "Team", "candidates": [a, b], "active_index": 0}
-        with patch.object(main, "_spawn_background_task") as spawn:
-            self.assertTrue(main._on_session_incompatible("t", main.candidate_source_key(a), "fMP4"))
+        with patch.object(sessions, "_spawn_background_task") as spawn:
+            self.assertTrue(sessions._on_session_incompatible("t", sessions.candidate_source_key(a), "fMP4"))
             self.assertFalse(a.get("session_compatible", True))
             state.stream_state["solo"] = {"name": "Solo", "candidates": [dict(a)], "active_index": 0}
-            self.assertFalse(main._on_session_incompatible("solo", main.candidate_source_key(a), "fMP4"))
+            self.assertFalse(sessions._on_session_incompatible("solo", sessions.candidate_source_key(a), "fMP4"))
         for call in spawn.call_args_list:
             call.args[0].close()
 
@@ -204,10 +206,10 @@ class SessionHookTests(StateMixin, unittest.TestCase):
             "startup_placeholder_until": time.monotonic() + 30,
         }
         sentinel = object()
-        with patch.object(main, "_placeholder_source", return_value=sentinel):
-            self.assertIs(main._resolve_session_source("t"), sentinel)
+        with patch.object(sessions, "_placeholder_source", return_value=sentinel):
+            self.assertIs(sessions._resolve_session_source("t"), sentinel)
             state.stream_state["t"]["startup_placeholder_until"] = 0.0
-            self.assertIsNot(main._resolve_session_source("t"), sentinel)
+            self.assertIsNot(sessions._resolve_session_source("t"), sentinel)
 
     def test_override_clears_exhaustion(self):
         a = _candidate("A", "https://a.example/1.m3u8")

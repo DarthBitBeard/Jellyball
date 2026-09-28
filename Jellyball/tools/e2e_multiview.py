@@ -30,13 +30,13 @@ sys.path.insert(0, str(HERE))
 from e2e_failover import build_origin, free_port, make_source, serve  # noqa: E402
 
 
-def member_state(jellyball, name: str, url: str) -> dict:
+def member_state(failover, name: str, url: str) -> dict:
     return {
         "name": name, "query": name, "active_index": 0, "is_healthy": True,
         "candidates": [{"provider": f"Origin{name}", "url": url, "referer": "", "origin": ""}],
         "always_live": True, "category": "custom", "content_type": "team", "search_terms": [],
         "start_time": "", "stop_time": "", "logo_url": "", "catalog_key": "", "tvg_id": "", "group_title": "",
-        **jellyball._scrape_lifecycle_defaults(),
+        **failover._scrape_lifecycle_defaults(),
     }
 
 
@@ -78,22 +78,26 @@ def main() -> int:
     })
     import httpx
     import main as jellyball
+    import failover
+    import multiview
+    import sessions
+    import state
 
     serve(build_origin(work / "origin"), origin_port)
     serve(jellyball.app, app_port)
     base = f"http://127.0.0.1:{origin_port}"
     app_base = f"http://127.0.0.1:{app_port}"
 
-    jellyball.stream_state["ta"] = member_state(jellyball, "TeamA", f"{base}/a/live.m3u8")
-    jellyball.stream_state["tb"] = member_state(jellyball, "TeamB", f"{base}/b/live.m3u8")
-    jellyball.stream_state["mv"] = {
+    state.stream_state["ta"] = member_state(failover, "TeamA", f"{base}/a/live.m3u8")
+    state.stream_state["tb"] = member_state(failover, "TeamB", f"{base}/b/live.m3u8")
+    state.stream_state["mv"] = {
         "name": "E2E Grid", "query": "", "type": "multiview",
         "candidates": [{"synthetic": True}], "active_index": 0, "is_healthy": False,
         "logo_url": "", "start_time": "", "stop_time": "", "category": "multiview", "source_id": "",
         "content_type": "multiview", "search_terms": [], "always_live": True, "catalog_key": "",
         "tvg_id": "", "group_title": "Multi-View", "layout": "side_by_side_2",
         "member_team_ids": ["ta", "tb"], "active_audio_team_id": "ta",
-        **jellyball._scrape_lifecycle_defaults(),
+        **failover._scrape_lifecycle_defaults(),
     }
 
     m3u = httpx.get(f"{app_base}/playlist.m3u", timeout=10).text
@@ -116,7 +120,7 @@ def main() -> int:
         switched = False
         pid_before = pid_after = None
         while player.poll() is None and time.monotonic() - started < args.seconds + 90:
-            entry = jellyball._MULTIVIEW_PROCESSES.get("mv")
+            entry = multiview._MULTIVIEW_PROCESSES.get("mv")
             if entry and entry.get("ready") and not switched and time.monotonic() - started > args.seconds / 2:
                 pid_before = entry["process"].pid
                 results["encoder"] = entry.get("encoder")
@@ -133,19 +137,19 @@ def main() -> int:
             if int(time.monotonic() - started) % 5 == 0:
                 parts = []
                 for sid in ("ta", "tb", "mv"):
-                    sess = jellyball.SESSIONS.peek(sid)
+                    sess = sessions.SESSIONS.peek(sid)
                     if sess and sess.window:
                         parts.append(f"{sid}:seq={sess.window[-1].seq} age={time.monotonic() - sess.last_new_segment_at:.1f}s n={sess.stats['segments']}")
-                mv_entry = jellyball._MULTIVIEW_PROCESSES.get("mv")
+                mv_entry = multiview._MULTIVIEW_PROCESSES.get("mv")
                 if mv_entry and mv_entry.get("ready"):
-                    ages = [jellyball._newest_segment_age(mv_entry["output_dir"] / f"a{i}") for i in range(2)]
+                    ages = [multiview._newest_segment_age(mv_entry["output_dir"] / f"a{i}") for i in range(2)]
                     count = len(list((mv_entry["output_dir"] / "a0").glob("seg_*.ts")))
                     parts.append(f"mvdisk newest_age={ages} files={count}")
                 print(f"[{time.monotonic() - started:5.1f}s] " + " | ".join(parts), flush=True)
             time.sleep(1)
         if player.poll() is None:
             player.kill()
-        entry = jellyball._MULTIVIEW_PROCESSES.get("mv")
+        entry = multiview._MULTIVIEW_PROCESSES.get("mv")
         pid_after = entry["process"].pid if entry else None
 
     mv_log = list(entry.get("log_lines", [])) if entry else []
@@ -157,9 +161,9 @@ def main() -> int:
         capture_output=True, text=True,
     )
     duration = float(probe.stdout.strip() or 0)
-    session = jellyball.SESSIONS.peek("mv")
+    session = sessions.SESSIONS.peek("mv")
     snapshot = session.snapshot() if session else {}
-    failure = jellyball._MULTIVIEW_FAILURES.get("mv")
+    failure = multiview._MULTIVIEW_FAILURES.get("mv")
 
     print(f"ffmpeg exit code      : {player.returncode}")
     print(f"output duration       : {duration:.1f}s of {args.seconds}s")

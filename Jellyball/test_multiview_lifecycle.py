@@ -17,6 +17,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import multiview
+import sessions
 import ffmpeg_proc
 import placeholder
 import state
@@ -142,17 +144,18 @@ class MultiviewStateTestCase(unittest.TestCase):
     """Snapshot/restore the module-level state these tests touch."""
 
     # (owning module, global name): each global lives in the module whose code uses it.
-    DICTS = tuple((main, name) for name in (
+    DICTS = tuple((multiview, name) for name in (
         "_MULTIVIEW_PROCESSES", "_MULTIVIEW_FAILURES", "_MULTIVIEW_HOLDS", "_MULTIVIEW_REFUSALS",
         "_MULTIVIEW_RESTARTS", "_MULTIVIEW_MANUAL_STOPS", "_MULTIVIEW_START_TASKS", "_MULTIVIEW_LAST_VIEWER",
-    )) + ((main, "_LAST_PLAYBACK_EVENT"),)
-    SETS = ((main, "_MULTIVIEW_SLOT_RESERVATIONS"), (main, "_MULTIVIEW_PENDING_RUN_DIRS"),
+    )) + ((sessions, "_LAST_PLAYBACK_EVENT"),)
+    SETS = ((multiview, "_MULTIVIEW_SLOT_RESERVATIONS"), (multiview, "_MULTIVIEW_PENDING_RUN_DIRS"),
             (placeholder, "_PLACEHOLDER_PENDING_DIRS"))
     SCALARS = (
-        (main, "_HW_ENCODER_FAILED_AT"), (main, "_CUDA_DECODE_FAILED_AT"), (main, "_MULTIVIEW_RUN_COUNTER"),
+        (multiview, "_HW_ENCODER_FAILED_AT"), (multiview, "_CUDA_DECODE_FAILED_AT"),
+        (multiview, "_MULTIVIEW_RUN_COUNTER"),
         (placeholder, "_PLACEHOLDER_STATE"), (placeholder, "_PLACEHOLDER_FAILURE"),
         (placeholder, "_PLACEHOLDER_DRAWTEXT_OK"), (placeholder, "_PLACEHOLDER_RUN_COUNTER"),
-        (ffmpeg_proc, "FFMPEG_AVAILABLE"), (main, "_PLACEHOLDER_START_TASK"),
+        (ffmpeg_proc, "FFMPEG_AVAILABLE"), (sessions, "_PLACEHOLDER_START_TASK"),
     )
 
     def setUp(self):
@@ -165,12 +168,12 @@ class MultiviewStateTestCase(unittest.TestCase):
             getattr(module, name).clear()
         for module, name in self.SCALARS:
             self._saved[name] = getattr(module, name)
-        main._HW_ENCODER_FAILED_AT = None
-        main._CUDA_DECODE_FAILED_AT = None
+        multiview._HW_ENCODER_FAILED_AT = None
+        multiview._CUDA_DECODE_FAILED_AT = None
         placeholder._PLACEHOLDER_STATE = None
         placeholder._PLACEHOLDER_FAILURE = None
         placeholder._PLACEHOLDER_DRAWTEXT_OK = True
-        main._PLACEHOLDER_START_TASK = None
+        sessions._PLACEHOLDER_START_TASK = None
         state_patch = patch.dict(state.stream_state, {}, clear=True)
         state_patch.start()
         self.addCleanup(state_patch.stop)
@@ -194,7 +197,7 @@ class NewestSegmentAgeTests(unittest.TestCase):
             live.write_bytes(b"x")
             vanished = out / "seg_000001.ts"  # listed, then removed by delete_segments
             with patch.object(Path, "glob", return_value=[vanished, live]):
-                age = main._newest_segment_age(out)
+                age = multiview._newest_segment_age(out)
             self.assertIsNotNone(age)
             self.assertLess(age, 5.0)
 
@@ -203,14 +206,14 @@ class NewestSegmentAgeTests(unittest.TestCase):
             out = Path(tmp)
             playlist = out / "index.m3u8"
             playlist.write_text("#EXTM3U\n", encoding="utf-8")
-            self.assertLess(main._newest_segment_age(out), 5.0)  # fresh playlist: not stalled
+            self.assertLess(multiview._newest_segment_age(out), 5.0)  # fresh playlist: not stalled
             old = time.time() - 120
             os.utime(playlist, (old, old))
-            self.assertGreater(main._newest_segment_age(out), 100.0)  # stale playlist: stalled
+            self.assertGreater(multiview._newest_segment_age(out), 100.0)  # stale playlist: stalled
 
     def test_no_segments_and_no_playlist_is_none(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertIsNone(main._newest_segment_age(Path(tmp)))
+            self.assertIsNone(multiview._newest_segment_age(Path(tmp)))
 
 
 class WatchdogTests(MultiviewStateTestCase):
@@ -220,44 +223,44 @@ class WatchdogTests(MultiviewStateTestCase):
             (run_dir / "a0").mkdir()
             playlist = run_dir / "a0" / "index.m3u8"
             playlist.write_text("#EXTM3U\n", encoding="utf-8")
-            main._MULTIVIEW_PROCESSES["mv"] = live_entry(run_id=2, output_dir=run_dir, audio_count=1)
-            with patch.object(main, "_restart_multiview", AsyncMock(return_value=True)) as restart:
-                asyncio.run(main._multiview_watchdog_pass(12.0))
+            multiview._MULTIVIEW_PROCESSES["mv"] = live_entry(run_id=2, output_dir=run_dir, audio_count=1)
+            with patch.object(multiview, "_restart_multiview", AsyncMock(return_value=True)) as restart:
+                asyncio.run(multiview._multiview_watchdog_pass(12.0))
                 restart.assert_not_awaited()
                 old = time.time() - 60
                 os.utime(playlist, (old, old))
-                asyncio.run(main._multiview_watchdog_pass(12.0))
+                asyncio.run(multiview._multiview_watchdog_pass(12.0))
             restart.assert_awaited_once_with("mv", "output stalled audio=[0]", run_id=2)
 
     def test_dead_watched_run_is_restarted_with_its_run_id(self):
         entry = live_entry(run_id=9)
         entry["exited"] = True
-        main._MULTIVIEW_PROCESSES["mv"] = entry
-        with patch.object(main, "_restart_multiview", AsyncMock(return_value=True)) as restart:
-            asyncio.run(main._multiview_watchdog_pass(12.0))
+        multiview._MULTIVIEW_PROCESSES["mv"] = entry
+        with patch.object(multiview, "_restart_multiview", AsyncMock(return_value=True)) as restart:
+            asyncio.run(multiview._multiview_watchdog_pass(12.0))
         self.assertEqual(restart.await_args.kwargs, {"run_id": 9})
 
     def test_standin_member_swapped_in_once_live(self):
         state.stream_state["tb"] = {"name": "TB"}
         entry = live_entry(run_id=4, standins=["tb"])
         registry = FakeRegistry({"tb": FakeSession(flowing=True, source=SourceSpec(key=("prov", "cdn", "/x"), url="u"))})
-        with patch.object(main, "SESSIONS", registry), \
-                patch.object(main, "_restart_multiview", AsyncMock(return_value=True)) as restart:
-            asyncio.run(main._swap_in_ready_members("mv", entry))
+        with patch.object(multiview, "SESSIONS", registry), \
+                patch.object(multiview, "_restart_multiview", AsyncMock(return_value=True)) as restart:
+            asyncio.run(multiview._swap_in_ready_members("mv", entry))
             restart.assert_awaited_once()
             self.assertEqual(restart.await_args.kwargs, {"run_id": 4})
 
             # A member whose own session is only showing the placeholder isn't "live".
             restart.reset_mock()
             registry.sessions["tb"].source = SourceSpec(key=("placeholder", 3), url="u")
-            asyncio.run(main._swap_in_ready_members("mv", entry))
+            asyncio.run(multiview._swap_in_ready_members("mv", entry))
             restart.assert_not_awaited()
 
             # Not when that restart would be backed off.
             registry.sessions["tb"].source = SourceSpec(key=("prov", "cdn", "/x"), url="u")
             now = time.monotonic()
-            main._MULTIVIEW_RESTARTS["mv"] = {"times": deque([now] * main.MULTIVIEW_RESTART_BURST), "last_alert": None}
-            asyncio.run(main._swap_in_ready_members("mv", entry))
+            multiview._MULTIVIEW_RESTARTS["mv"] = {"times": deque([now] * multiview.MULTIVIEW_RESTART_BURST), "last_alert": None}
+            asyncio.run(multiview._swap_in_ready_members("mv", entry))
             restart.assert_not_awaited()
         self.assertGreater(registry.sessions["tb"].touched, 0)  # kept warm meanwhile
 
@@ -265,59 +268,59 @@ class WatchdogTests(MultiviewStateTestCase):
 class RestartTests(MultiviewStateTestCase):
     def test_restart_for_a_replaced_run_is_ignored(self):
         entry = live_entry(run_id=7)
-        main._MULTIVIEW_PROCESSES["mv"] = entry
-        with patch.object(main, "_stop_multiview_process", AsyncMock()) as stop, \
-                patch.object(main, "_request_multiview_start") as request:
-            self.assertFalse(asyncio.run(main._restart_multiview("mv", "output stalled", run_id=6)))
+        multiview._MULTIVIEW_PROCESSES["mv"] = entry
+        with patch.object(multiview, "_stop_multiview_process", AsyncMock()) as stop, \
+                patch.object(multiview, "_request_multiview_start") as request:
+            self.assertFalse(asyncio.run(multiview._restart_multiview("mv", "output stalled", run_id=6)))
         stop.assert_not_awaited()
         request.assert_not_called()
         self.assertFalse(entry.get("restarting"))
-        self.assertNotIn("mv", main._MULTIVIEW_RESTARTS)
+        self.assertNotIn("mv", multiview._MULTIVIEW_RESTARTS)
 
     def test_restart_of_current_run_stops_exactly_that_run(self):
-        main._MULTIVIEW_PROCESSES["mv"] = live_entry(run_id=7)
-        with patch.object(main, "_stop_multiview_process", AsyncMock(return_value=True)) as stop, \
-                patch.object(main, "_request_multiview_start") as request:
-            self.assertTrue(asyncio.run(main._restart_multiview("mv", "output stalled", run_id=7)))
+        multiview._MULTIVIEW_PROCESSES["mv"] = live_entry(run_id=7)
+        with patch.object(multiview, "_stop_multiview_process", AsyncMock(return_value=True)) as stop, \
+                patch.object(multiview, "_request_multiview_start") as request:
+            self.assertTrue(asyncio.run(multiview._restart_multiview("mv", "output stalled", run_id=7)))
         stop.assert_awaited_once_with("mv", run_id=7)
         request.assert_called_once_with("mv")
 
     def test_stop_process_refuses_other_run(self):
         entry = live_entry(run_id=3)
-        main._MULTIVIEW_PROCESSES["mv"] = entry
-        self.assertFalse(asyncio.run(main._stop_multiview_process("mv", run_id=2)))
-        self.assertIs(main._MULTIVIEW_PROCESSES["mv"], entry)
+        multiview._MULTIVIEW_PROCESSES["mv"] = entry
+        self.assertFalse(asyncio.run(multiview._stop_multiview_process("mv", run_id=2)))
+        self.assertIs(multiview._MULTIVIEW_PROCESSES["mv"], entry)
         entry["process"].kill.assert_not_called()
 
     def test_restart_backoff_builds_in_rolling_window_and_alerts_once(self):
-        with patch.object(main, "MULTIVIEW_RESTART_BURST", 2), \
+        with patch.object(multiview, "MULTIVIEW_RESTART_BURST", 2), \
                 patch.object(ffmpeg_proc, "MULTIVIEW_BACKOFF_BASE_SECONDS", 15.0), \
                 patch.object(ffmpeg_proc, "MULTIVIEW_BACKOFF_MAX_SECONDS", 300.0), \
-                patch.object(main, "send_alert", MagicMock(return_value=None)) as alert, \
-                patch.object(main, "_spawn_background_task") as spawn:
-            delays = [main._note_multiview_restart("mv", "output stalled")[1] for _ in range(7)]
+                patch.object(multiview, "send_alert", MagicMock(return_value=None)) as alert, \
+                patch.object(multiview, "_spawn_background_task") as spawn:
+            delays = [multiview._note_multiview_restart("mv", "output stalled")[1] for _ in range(7)]
             # A successful spawn clears the failure record, not the restart history.
-            main._clear_multiview_failure("mv")
-            self.assertEqual(main._recent_multiview_restarts("mv"), 7)
+            multiview._clear_multiview_failure("mv")
+            self.assertEqual(multiview._recent_multiview_restarts("mv"), 7)
         self.assertEqual(delays, [0.0, 0.0, 15.0, 30.0, 60.0, 120.0, 240.0])
         self.assertEqual(alert.call_count, 1)
         self.assertEqual(spawn.call_count, 1)
-        self.assertGreater(main._multiview_cooldown_remaining("mv"), 200.0)
-        self.assertEqual(main._MULTIVIEW_HOLDS["mv"]["kind"], "restart")
+        self.assertGreater(multiview._multiview_cooldown_remaining("mv"), 200.0)
+        self.assertEqual(multiview._MULTIVIEW_HOLDS["mv"]["kind"], "restart")
 
     def test_restarts_age_out_of_the_window(self):
-        old = time.monotonic() - main.MULTIVIEW_RESTART_WINDOW_SECONDS - 5
-        main._MULTIVIEW_RESTARTS["mv"] = {"times": deque([old] * 5), "last_alert": None}
-        with patch.object(main, "_spawn_background_task") as spawn:
-            count, delay = main._note_multiview_restart("mv", "output stalled")
+        old = time.monotonic() - multiview.MULTIVIEW_RESTART_WINDOW_SECONDS - 5
+        multiview._MULTIVIEW_RESTARTS["mv"] = {"times": deque([old] * 5), "last_alert": None}
+        with patch.object(multiview, "_spawn_background_task") as spawn:
+            count, delay = multiview._note_multiview_restart("mv", "output stalled")
         self.assertEqual((count, delay), (1, 0.0))
         spawn.assert_not_called()
 
     def test_held_restart_does_not_start_until_hold_expires(self):
         state.stream_state["mv"] = multiview_data()
-        main._set_multiview_hold("mv", 30.0, "restart", "stalled")
-        with patch.object(main, "_spawn_background_task") as spawn:
-            main._request_multiview_start("mv")
+        multiview._set_multiview_hold("mv", 30.0, "restart", "stalled")
+        with patch.object(multiview, "_spawn_background_task") as spawn:
+            multiview._request_multiview_start("mv")
         spawn.assert_not_called()
 
 
@@ -333,15 +336,15 @@ class SlotReservationTests(MultiviewStateTestCase):
             await asyncio.sleep(0.05)  # the member warm-up
 
         async def scenario():
-            await asyncio.gather(main._spawn_multiview("mv1", data1), main._spawn_multiview("mv2", data2))
+            await asyncio.gather(multiview._spawn_multiview("mv1", data1), multiview._spawn_multiview("mv2", data2))
 
-        with patch.object(main, "MAX_CONCURRENT_MULTIVIEW", 1), \
-                patch.object(main, "_start_multiview_run", slow_run), \
+        with patch.object(multiview, "MAX_CONCURRENT_MULTIVIEW", 1), \
+                patch.object(multiview, "_start_multiview_run", slow_run), \
                 self.assertLogs(config.LOGGER, "WARNING"):
             asyncio.run(scenario())
         self.assertEqual(started, ["mv1"])
-        self.assertEqual(main._MULTIVIEW_HOLDS["mv2"]["kind"], "refused")
-        self.assertEqual(main._MULTIVIEW_SLOT_RESERVATIONS, set())
+        self.assertEqual(multiview._MULTIVIEW_HOLDS["mv2"]["kind"], "refused")
+        self.assertEqual(multiview._MULTIVIEW_SLOT_RESERVATIONS, set())
 
     def test_reservation_released_when_spawn_fails(self):
         ffmpeg_proc.FFMPEG_AVAILABLE = True
@@ -349,40 +352,40 @@ class SlotReservationTests(MultiviewStateTestCase):
         state.stream_state["mv"] = data
 
         async def failing_run(channel_id, data):
-            self.assertEqual(main._running_multiview_count(), 1)  # reserved during the spawn
+            self.assertEqual(multiview._running_multiview_count(), 1)  # reserved during the spawn
             raise RuntimeError("boom")
 
-        with patch.object(main, "_start_multiview_run", failing_run):
+        with patch.object(multiview, "_start_multiview_run", failing_run):
             with self.assertRaises(RuntimeError):
-                asyncio.run(main._spawn_multiview("mv", data))
-        self.assertEqual(main._running_multiview_count(), 0)
+                asyncio.run(multiview._spawn_multiview("mv", data))
+        self.assertEqual(multiview._running_multiview_count(), 0)
 
 
 class RefusalTests(MultiviewStateTestCase):
     def test_refusal_logs_once_per_hold_and_view_gets_placeholder(self):
         ffmpeg_proc.FFMPEG_AVAILABLE = True
         state.stream_state["mv"] = multiview_data()
-        main._MULTIVIEW_PROCESSES["other"] = live_entry()
+        multiview._MULTIVIEW_PROCESSES["other"] = live_entry()
 
         async def scenario():
             results = []
             for _ in range(6):
-                results.append(main._resolve_multiview_view_source("mv", None))
+                results.append(multiview._resolve_multiview_view_source("mv", None))
                 await asyncio.sleep(0.01)
             return results
 
-        with patch.object(main, "MAX_CONCURRENT_MULTIVIEW", 1), \
-                patch.object(main, "_placeholder_source", return_value=PLACEHOLDER_SPEC), \
+        with patch.object(multiview, "MAX_CONCURRENT_MULTIVIEW", 1), \
+                patch.object(multiview, "_placeholder_source", return_value=PLACEHOLDER_SPEC), \
                 self.assertLogs(config.LOGGER, "WARNING") as logs:
             results = asyncio.run(scenario())
         refusals = [line for line in logs.output if "Refusing to start multiview" in line]
         self.assertEqual(len(refusals), 1)
         self.assertIs(results[-1], PLACEHOLDER_SPEC)
-        self.assertGreater(main._multiview_cooldown_remaining("mv"), 0.0)
+        self.assertGreater(multiview._multiview_cooldown_remaining("mv"), 0.0)
 
     def test_refusal_hold_grows_and_caps(self):
         with patch.object(config.LOGGER, "warning"):
-            delays = [main._record_multiview_refusal("mv", "cap") for _ in range(6)]
+            delays = [multiview._record_multiview_refusal("mv", "cap") for _ in range(6)]
         self.assertEqual(delays, [5.0, 10.0, 20.0, 40.0, 60.0, 60.0])
 
     def test_no_ffmpeg_is_a_refusal_not_a_failure(self):
@@ -390,49 +393,49 @@ class RefusalTests(MultiviewStateTestCase):
         data = multiview_data()
         state.stream_state["mv"] = data
         with patch.object(config.LOGGER, "warning"):
-            asyncio.run(main._spawn_multiview("mv", data))
-        self.assertNotIn("mv", main._MULTIVIEW_FAILURES)
-        self.assertEqual(main._MULTIVIEW_HOLDS["mv"]["kind"], "refused")
+            asyncio.run(multiview._spawn_multiview("mv", data))
+        self.assertNotIn("mv", multiview._MULTIVIEW_FAILURES)
+        self.assertEqual(multiview._MULTIVIEW_HOLDS["mv"]["kind"], "refused")
 
 
 class HwEncoderFailureTests(MultiviewStateTestCase):
     def test_nvenc_markers(self):
-        self.assertTrue(main._looks_like_hw_encoder_failure(LOG_NO_NVIDIA_DRIVER, "nvenc"))
-        self.assertTrue(main._looks_like_hw_encoder_failure(LOG_NVENC_SESSION_LIMIT, "nvenc"))
-        self.assertTrue(main._looks_like_hw_encoder_failure(LOG_NVENC_DRIVER_TOO_OLD, "nvenc"))
+        self.assertTrue(multiview._looks_like_hw_encoder_failure(LOG_NO_NVIDIA_DRIVER, "nvenc"))
+        self.assertTrue(multiview._looks_like_hw_encoder_failure(LOG_NVENC_SESSION_LIMIT, "nvenc"))
+        self.assertTrue(multiview._looks_like_hw_encoder_failure(LOG_NVENC_DRIVER_TOO_OLD, "nvenc"))
         # NVDEC's per-stream fallback, stream mapping and input errors are not NVENC failures.
-        self.assertFalse(main._looks_like_hw_encoder_failure(LOG_NVDEC_FALLBACK_ONLY, "nvenc"))
-        self.assertFalse(main._looks_like_hw_encoder_failure(
+        self.assertFalse(multiview._looks_like_hw_encoder_failure(LOG_NVDEC_FALLBACK_ONLY, "nvenc"))
+        self.assertFalse(multiview._looks_like_hw_encoder_failure(
             ["[vost#0:0/libx264 @ 0x1] [enc:libx264 @ 0x2] Error while opening encoder"], "nvenc"))
-        self.assertFalse(main._looks_like_hw_encoder_failure(LOG_QSV_FAILURE, "nvenc"))
+        self.assertFalse(multiview._looks_like_hw_encoder_failure(LOG_QSV_FAILURE, "nvenc"))
 
     def test_qsv_markers(self):
-        self.assertTrue(main._looks_like_hw_encoder_failure(LOG_QSV_FAILURE, "qsv"))
-        self.assertFalse(main._looks_like_hw_encoder_failure(LOG_NVENC_SESSION_LIMIT, "qsv"))
-        self.assertFalse(main._looks_like_hw_encoder_failure(LOG_NO_NVIDIA_DRIVER, "none"))
+        self.assertTrue(multiview._looks_like_hw_encoder_failure(LOG_QSV_FAILURE, "qsv"))
+        self.assertFalse(multiview._looks_like_hw_encoder_failure(LOG_NVENC_SESSION_LIMIT, "qsv"))
+        self.assertFalse(multiview._looks_like_hw_encoder_failure(LOG_NO_NVIDIA_DRIVER, "none"))
 
     def test_cuda_init_markers(self):
-        self.assertTrue(main._looks_like_cuda_init_failure(LOG_NO_NVIDIA_DRIVER))
-        self.assertFalse(main._looks_like_cuda_init_failure(LOG_NVENC_SESSION_LIMIT))
-        self.assertFalse(main._looks_like_cuda_init_failure(LOG_NVDEC_FALLBACK_ONLY))
+        self.assertTrue(multiview._looks_like_cuda_init_failure(LOG_NO_NVIDIA_DRIVER))
+        self.assertFalse(multiview._looks_like_cuda_init_failure(LOG_NVENC_SESSION_LIMIT))
+        self.assertFalse(multiview._looks_like_cuda_init_failure(LOG_NVDEC_FALLBACK_ONLY))
 
     def _run_spawn(self, first_failure_log):
         data = multiview_data()
         state.stream_state["mv"] = data
-        inputs = [main._MultiviewInput(t, t, True, 0x0F, False) for t in data["member_team_ids"]]
+        inputs = [multiview._MultiviewInput(t, t, True, 0x0F, False) for t in data["member_team_ids"]]
         attempts = []
 
         async def fake_launch(channel_id, data, run_id, inputs, encoder, hw_decode):
             attempts.append((encoder, hw_decode))
             return ("failed", first_failure_log) if encoder == "nvenc" else ("ready", [])
 
-        with patch.object(main, "MULTIVIEW_HWACCEL", "nvenc"), \
-                patch.object(main, "_warm_multiview_members", AsyncMock(return_value=inputs)), \
-                patch.object(main, "_launch_multiview_run", fake_launch), \
+        with patch.object(multiview, "MULTIVIEW_HWACCEL", "nvenc"), \
+                patch.object(multiview, "_warm_multiview_members", AsyncMock(return_value=inputs)), \
+                patch.object(multiview, "_launch_multiview_run", fake_launch), \
                 patch.object(config.LOGGER, "warning"):
-            asyncio.run(main._start_multiview_run("mv", data))
-            plan = main._multiview_encoder_plan()
-            later = main._multiview_encoder_plan(now=time.monotonic() + main.NVENC_FALLBACK_SECONDS + 1)
+            asyncio.run(multiview._start_multiview_run("mv", data))
+            plan = multiview._multiview_encoder_plan()
+            later = multiview._multiview_encoder_plan(now=time.monotonic() + multiview.NVENC_FALLBACK_SECONDS + 1)
         return attempts, plan, later
 
     def test_nvenc_failure_retries_same_spawn_with_libx264_without_broken_cuda(self):
@@ -440,7 +443,7 @@ class HwEncoderFailureTests(MultiviewStateTestCase):
         self.assertEqual(attempts, [("nvenc", True), ("none", False)])
         self.assertEqual(plan, ("none", False))
         self.assertEqual(later, ("nvenc", True))  # GPU re-tested after the fallback window
-        self.assertNotIn("mv", main._MULTIVIEW_FAILURES)
+        self.assertNotIn("mv", multiview._MULTIVIEW_FAILURES)
 
     def test_nvenc_only_failure_keeps_cuda_decoding(self):
         attempts, plan, _ = self._run_spawn(LOG_NVENC_SESSION_LIMIT)
@@ -448,10 +451,10 @@ class HwEncoderFailureTests(MultiviewStateTestCase):
         self.assertEqual(plan, ("none", True))
 
     def test_fallback_window_is_configurable(self):
-        main._HW_ENCODER_FAILED_AT = time.monotonic()
-        with patch.object(main, "MULTIVIEW_HWACCEL", "nvenc"), patch.object(main, "NVENC_FALLBACK_SECONDS", 30.0):
-            self.assertEqual(main._multiview_encoder_plan()[0], "none")
-            self.assertEqual(main._multiview_encoder_plan(now=time.monotonic() + 31)[0], "nvenc")
+        multiview._HW_ENCODER_FAILED_AT = time.monotonic()
+        with patch.object(multiview, "MULTIVIEW_HWACCEL", "nvenc"), patch.object(multiview, "NVENC_FALLBACK_SECONDS", 30.0):
+            self.assertEqual(multiview._multiview_encoder_plan()[0], "none")
+            self.assertEqual(multiview._multiview_encoder_plan(now=time.monotonic() + 31)[0], "nvenc")
 
 
 class MemberInputTests(MultiviewStateTestCase):
@@ -459,7 +462,7 @@ class MemberInputTests(MultiviewStateTestCase):
         data = multiview_data()
         state.stream_state.update({"ta": {"name": "TA"}, "tb": {"name": "TB"}})
         with patch.object(config, "PORT", 8000), patch.dict(os.environ, {"JELLYBALL_HOST": ""}):
-            args = main._build_multiview_ffmpeg_args(
+            args = multiview._build_multiview_ffmpeg_args(
                 "mv", data, Path("/x"), [True, None], "none", input_ids=["ta", state.PLACEHOLDER_SESSION_ID],
             )
         maps = [args[i + 1] for i, a in enumerate(args) if a == "-map"]
@@ -475,10 +478,10 @@ class MemberInputTests(MultiviewStateTestCase):
         self.assertNotIn("-hwaccel", args)
 
     def test_cuda_decoding_independent_of_encoder(self):
-        args = main._build_multiview_ffmpeg_args("mv", multiview_data(), Path("/x"), [True, True], "none", hw_decode=True)
+        args = multiview._build_multiview_ffmpeg_args("mv", multiview_data(), Path("/x"), [True, True], "none", hw_decode=True)
         self.assertEqual(args.count("-hwaccel"), 2)
         self.assertEqual(args[args.index("-c:v") + 1], "libx264")
-        args = main._build_multiview_ffmpeg_args("mv", multiview_data(), Path("/x"), [True, True], "nvenc", hw_decode=False)
+        args = multiview._build_multiview_ffmpeg_args("mv", multiview_data(), Path("/x"), [True, True], "nvenc", hw_decode=False)
         self.assertNotIn("-hwaccel", args)
 
     def test_warmup_replaces_unready_member_with_placeholder(self):
@@ -488,15 +491,15 @@ class MemberInputTests(MultiviewStateTestCase):
             "tb": FakeSession(ready=False),                             # never gets ready
             state.PLACEHOLDER_SESSION_ID: FakeSession(ready=True, has_audio=True, signature=(0x1B, 0x0F)),
         })
-        with patch.object(main, "SESSIONS", registry), \
-                patch.object(main, "MULTIVIEW_MEMBER_WARM_TIMEOUT", 0.2), \
-                patch.object(main, "MULTIVIEW_STANDIN_WAIT_SECONDS", 0.1), \
+        with patch.object(multiview, "SESSIONS", registry), \
+                patch.object(multiview, "MULTIVIEW_MEMBER_WARM_TIMEOUT", 0.2), \
+                patch.object(multiview, "MULTIVIEW_STANDIN_WAIT_SECONDS", 0.1), \
                 patch.object(config.LOGGER, "warning"):
-            inputs = asyncio.run(main._warm_multiview_members(["ta", "tb", "gone"]))
+            inputs = asyncio.run(multiview._warm_multiview_members(["ta", "tb", "gone"]))
         self.assertEqual(inputs, [
-            main._MultiviewInput("ta", "ta", False, None, False),
-            main._MultiviewInput("tb", state.PLACEHOLDER_SESSION_ID, True, 0x0F, True),
-            main._MultiviewInput("gone", state.PLACEHOLDER_SESSION_ID, True, 0x0F, False),
+            multiview._MultiviewInput("ta", "ta", False, None, False),
+            multiview._MultiviewInput("tb", state.PLACEHOLDER_SESSION_ID, True, 0x0F, True),
+            multiview._MultiviewInput("gone", state.PLACEHOLDER_SESSION_ID, True, 0x0F, False),
         ])
         self.assertGreater(registry.sessions["tb"].touched, 0)
 
@@ -507,23 +510,23 @@ class SourceKeyTests(MultiviewStateTestCase):
             "mv": multiview_data(("ta", "tb", "tc", "td"), "grid_2x2"),
             "ta": {"name": "TA"}, "tb": {"name": "TB"}, "tc": {"name": "TC"}, "td": {"name": "TD"},
         })
-        main._MULTIVIEW_PROCESSES["mv"] = live_entry(run_id=3, audio_count=4, audio_types=[0x0F, 0x0F, 0x81, None])
-        keys = [main._resolve_multiview_view_source("mv", index).key for index in range(4)]
+        multiview._MULTIVIEW_PROCESSES["mv"] = live_entry(run_id=3, audio_count=4, audio_types=[0x0F, 0x0F, 0x81, None])
+        keys = [multiview._resolve_multiview_view_source("mv", index).key for index in range(4)]
         self.assertEqual(keys[0], ("multiview", "mv", 3, "audio:0x0f"))
         self.assertEqual(keys[0], keys[1])        # AAC -> AAC: seamless URL switch
         self.assertNotEqual(keys[0], keys[2])     # AAC -> AC-3: new epoch + discontinuity
         self.assertEqual(keys[3], ("multiview", "mv", 3, "audio:a3"))  # unknown codec: per output
-        main._MULTIVIEW_PROCESSES["mv"]["run_id"] = 4
-        self.assertNotEqual(main._resolve_multiview_view_source("mv", 0).key, keys[0])
+        multiview._MULTIVIEW_PROCESSES["mv"]["run_id"] = 4
+        self.assertNotEqual(multiview._resolve_multiview_view_source("mv", 0).key, keys[0])
 
     def test_view_failure_restarts_with_the_reported_run(self):
         state.stream_state["mv"] = multiview_data()
-        main._MULTIVIEW_PROCESSES["mv"] = live_entry(run_id=5)
-        with patch.object(main, "_restart_multiview", MagicMock(return_value="coro")) as restart, \
-                patch.object(main, "_spawn_background_task") as spawn:
-            main._on_multiview_view_failure("mv", ("multiview", "mv", 5, "audio:0x0f"), "playlist stale")
-            main._on_multiview_view_failure("mv", ("multiview", "mv", 4, "audio:0x0f"), "playlist stale")
-            main._on_multiview_view_failure("mv", ("placeholder", 2), "playlist stale")
+        multiview._MULTIVIEW_PROCESSES["mv"] = live_entry(run_id=5)
+        with patch.object(multiview, "_restart_multiview", MagicMock(return_value="coro")) as restart, \
+                patch.object(multiview, "_spawn_background_task") as spawn:
+            multiview._on_multiview_view_failure("mv", ("multiview", "mv", 5, "audio:0x0f"), "playlist stale")
+            multiview._on_multiview_view_failure("mv", ("multiview", "mv", 4, "audio:0x0f"), "playlist stale")
+            multiview._on_multiview_view_failure("mv", ("placeholder", 2), "playlist stale")
         restart.assert_called_once_with("mv", "view reported playlist stale", run_id=5)
         spawn.assert_called_once()
 
@@ -535,16 +538,16 @@ class SourceKeyTests(MultiviewStateTestCase):
             }
 
         placeholder._PLACEHOLDER_STATE = state(4)
-        first = main._placeholder_source()
+        first = sessions._placeholder_source()
         placeholder._PLACEHOLDER_STATE = state(5)
-        second = main._placeholder_source()
+        second = sessions._placeholder_source()
         self.assertEqual(first.key, ("placeholder", 4))
         self.assertNotEqual(first.key, second.key)
-        self.assertEqual(first.key[:1], main.PLACEHOLDER_SOURCE_KEY)
-        for key in (first.key, second.key, main.PLACEHOLDER_SOURCE_KEY, ["placeholder", 9]):
-            self.assertTrue(main._is_placeholder_key(key))
+        self.assertEqual(first.key[:1], sessions.PLACEHOLDER_SOURCE_KEY)
+        for key in (first.key, second.key, sessions.PLACEHOLDER_SOURCE_KEY, ["placeholder", 9]):
+            self.assertTrue(sessions._is_placeholder_key(key))
         for key in (("multiview", "mv", 1, "audio:0x0f"), ("prov", "cdn", "/p"), (), None):
-            self.assertFalse(main._is_placeholder_key(key))
+            self.assertFalse(sessions._is_placeholder_key(key))
 
 
 class SweepTests(MultiviewStateTestCase):
@@ -563,12 +566,12 @@ class SweepTests(MultiviewStateTestCase):
             old = time.time() - 3600
             for path in (live_run, dead_run, pending_run, orphan_run, placeholder_live, placeholder_dead):
                 os.utime(path, (old, old))
-            main._MULTIVIEW_PROCESSES["mv1"] = live_entry(output_dir=live_run)
-            main._MULTIVIEW_PENDING_RUN_DIRS.add(pending_run)
+            multiview._MULTIVIEW_PROCESSES["mv1"] = live_entry(output_dir=live_run)
+            multiview._MULTIVIEW_PENDING_RUN_DIRS.add(pending_run)
             placeholder._PLACEHOLDER_STATE = {"process": FakeProcess(), "output_dir": placeholder_live}
-            with patch.object(main, "MULTIVIEW_OUTPUT_ROOT", root), \
+            with patch.object(multiview, "MULTIVIEW_OUTPUT_ROOT", root), \
                     patch.object(placeholder, "PLACEHOLDER_OUTPUT_DIR", placeholder_root):
-                removed = asyncio.run(main._sweep_output_dirs(min_age=60.0))
+                removed = asyncio.run(multiview._sweep_output_dirs(min_age=60.0))
             for path in (live_run, pending_run, fresh_run, placeholder_live):
                 self.assertTrue(path.exists(), path)
             for path in (dead_run, orphan_run, orphan_run.parent, empty_channel, placeholder_dead):
@@ -602,28 +605,28 @@ class ManualStopTests(MultiviewStateTestCase):
             return []
 
         async def scenario():
-            main._request_multiview_start("mv")
-            task = main._MULTIVIEW_START_TASKS["mv"]
+            multiview._request_multiview_start("mv")
+            task = multiview._MULTIVIEW_START_TASKS["mv"]
             await asyncio.sleep(0.01)  # the spawn is warming members up
-            self.assertIn("mv", main._MULTIVIEW_SLOT_RESERVATIONS)
-            await main._stop_multiview_manually("mv")
+            self.assertIn("mv", multiview._MULTIVIEW_SLOT_RESERVATIONS)
+            await multiview._stop_multiview_manually("mv")
             self.assertTrue(task.cancelled())
-            self.assertNotIn("mv", main._MULTIVIEW_SLOT_RESERVATIONS)
-            main._request_multiview_start("mv")
-            self.assertNotIn("mv", main._MULTIVIEW_START_TASKS)  # no auto-start while stopped
-            self.assertIs(main._resolve_multiview_view_source("mv", None), PLACEHOLDER_SPEC)
+            self.assertNotIn("mv", multiview._MULTIVIEW_SLOT_RESERVATIONS)
+            multiview._request_multiview_start("mv")
+            self.assertNotIn("mv", multiview._MULTIVIEW_START_TASKS)  # no auto-start while stopped
+            self.assertIs(multiview._resolve_multiview_view_source("mv", None), PLACEHOLDER_SPEC)
             # Someone was already watching: their polls don't undo the Stop.
             registry.sessions["mv"] = FakeSession(running=True)
-            main._touch_multiview_viewer("mv")
-            self.assertIn("mv", main._MULTIVIEW_MANUAL_STOPS)
+            multiview._touch_multiview_viewer("mv")
+            self.assertIn("mv", multiview._MULTIVIEW_MANUAL_STOPS)
             # A fresh tune (no view session running) is an explicit play.
             registry.sessions.clear()
-            main._touch_multiview_viewer("mv")
-            self.assertNotIn("mv", main._MULTIVIEW_MANUAL_STOPS)
+            multiview._touch_multiview_viewer("mv")
+            self.assertNotIn("mv", multiview._MULTIVIEW_MANUAL_STOPS)
 
-        with patch.object(main, "SESSIONS", registry), \
-                patch.object(main, "_warm_multiview_members", slow_warm), \
-                patch.object(main, "_placeholder_source", return_value=PLACEHOLDER_SPEC):
+        with patch.object(multiview, "SESSIONS", registry), \
+                patch.object(multiview, "_warm_multiview_members", slow_warm), \
+                patch.object(multiview, "_placeholder_source", return_value=PLACEHOLDER_SPEC):
             asyncio.run(scenario())
         self.assertIn("mv", registry.poked)
 
@@ -634,18 +637,18 @@ class ManualStopTests(MultiviewStateTestCase):
 
         async def warm_then_remove(members):
             state.stream_state.pop("mv", None)
-            return [main._MultiviewInput(t, t, True, 0x0F, False) for t in members]
+            return [multiview._MultiviewInput(t, t, True, 0x0F, False) for t in members]
 
         launch = AsyncMock(return_value=("ready", []))
-        with patch.object(main, "_warm_multiview_members", warm_then_remove), \
-                patch.object(main, "_launch_multiview_run", launch):
-            asyncio.run(main._spawn_multiview("mv", data))
+        with patch.object(multiview, "_warm_multiview_members", warm_then_remove), \
+                patch.object(multiview, "_launch_multiview_run", launch):
+            asyncio.run(multiview._spawn_multiview("mv", data))
         launch.assert_not_awaited()
 
     def test_cancelled_spawn_stops_the_ffmpeg_it_launched(self):
         data = multiview_data()
         state.stream_state["mv"] = data
-        inputs = [main._MultiviewInput(t, t, True, 0x0F, False) for t in data["member_team_ids"]]
+        inputs = [multiview._MultiviewInput(t, t, True, 0x0F, False) for t in data["member_team_ids"]]
         process = FakeProcess()
 
         async def fake_exec(*args, **kwargs):
@@ -655,56 +658,56 @@ class ManualStopTests(MultiviewStateTestCase):
             await asyncio.sleep(10)
 
         async def scenario():
-            task = asyncio.create_task(main._launch_multiview_run("mv", data, 5, inputs, "none", False))
+            task = asyncio.create_task(multiview._launch_multiview_run("mv", data, 5, inputs, "none", False))
             await asyncio.sleep(0.2)
-            self.assertEqual(main._MULTIVIEW_PROCESSES["mv"]["run_id"], 5)
+            self.assertEqual(multiview._MULTIVIEW_PROCESSES["mv"]["run_id"], 5)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
         with tempfile.TemporaryDirectory() as tmp, \
-                patch.object(main, "MULTIVIEW_OUTPUT_ROOT", Path(tmp)), \
+                patch.object(multiview, "MULTIVIEW_OUTPUT_ROOT", Path(tmp)), \
                 patch.object(asyncio, "create_subprocess_exec", fake_exec), \
-                patch.object(main, "_wait_for_first_segment", never_ready), \
-                patch.object(main, "_watch_multiview_process", AsyncMock()), \
-                patch.object(main, "_drain_multiview_log", AsyncMock()), \
-                patch.object(main, "_create_run_job", MagicMock(return_value=None)), \
-                patch.object(main, "_write_run_pid_file", MagicMock()), \
-                patch.object(main, "_stop_multiview_process", AsyncMock(return_value=True)) as stop:
+                patch.object(multiview, "_wait_for_first_segment", never_ready), \
+                patch.object(multiview, "_watch_multiview_process", AsyncMock()), \
+                patch.object(multiview, "_drain_multiview_log", AsyncMock()), \
+                patch.object(multiview, "_create_run_job", MagicMock(return_value=None)), \
+                patch.object(multiview, "_write_run_pid_file", MagicMock()), \
+                patch.object(multiview, "_stop_multiview_process", AsyncMock(return_value=True)) as stop:
             asyncio.run(scenario())
         stop.assert_awaited_once_with("mv", run_id=5)
-        self.assertEqual(main._MULTIVIEW_PENDING_RUN_DIRS, set())
+        self.assertEqual(multiview._MULTIVIEW_PENDING_RUN_DIRS, set())
 
 
 class RemoveChannelTests(MultiviewStateTestCase):
     def test_remove_multiview_cancels_spawn_and_prunes_per_channel_state(self):
         state.stream_state["mv"] = multiview_data()
-        for mapping in (main._MULTIVIEW_FAILURES, main._MULTIVIEW_HOLDS, main._MULTIVIEW_RESTARTS):
+        for mapping in (multiview._MULTIVIEW_FAILURES, multiview._MULTIVIEW_HOLDS, multiview._MULTIVIEW_RESTARTS):
             mapping["mv"] = {"count": 1, "last_failure": 0.0, "last_error": "", "until": 0.0, "times": deque()}
             mapping["other"] = dict(mapping["mv"])
-        main._MULTIVIEW_REFUSALS["mv"] = 2
-        main._MULTIVIEW_MANUAL_STOPS["mv"] = 1.0
-        main._MULTIVIEW_LAST_VIEWER["mv"] = 1.0
-        main._LAST_PLAYBACK_EVENT["mv"] = 1.0
+        multiview._MULTIVIEW_REFUSALS["mv"] = 2
+        multiview._MULTIVIEW_MANUAL_STOPS["mv"] = 1.0
+        multiview._MULTIVIEW_LAST_VIEWER["mv"] = 1.0
+        sessions._LAST_PLAYBACK_EVENT["mv"] = 1.0
         registry = FakeRegistry()
 
         async def scenario():
             task = asyncio.create_task(asyncio.sleep(10))
-            main._MULTIVIEW_START_TASKS["mv"] = task
+            multiview._MULTIVIEW_START_TASKS["mv"] = task
             await main._remove_channel("mv")
             return task
 
-        with patch.object(main, "SESSIONS", registry), \
+        with patch.object(multiview, "SESSIONS", registry), patch.object(main, "SESSIONS", registry), \
                 patch.object(main, "delete_multiview_channel_async", AsyncMock()), \
                 patch.object(main, "_remove_tree_later", MagicMock()):
             task = asyncio.run(scenario())
         self.assertTrue(task.cancelled())
         for mapping in (
-            main._MULTIVIEW_FAILURES, main._MULTIVIEW_HOLDS, main._MULTIVIEW_RESTARTS, main._MULTIVIEW_REFUSALS,
-            main._MULTIVIEW_MANUAL_STOPS, main._MULTIVIEW_LAST_VIEWER, main._MULTIVIEW_START_TASKS,
-            main._LAST_PLAYBACK_EVENT,
+            multiview._MULTIVIEW_FAILURES, multiview._MULTIVIEW_HOLDS, multiview._MULTIVIEW_RESTARTS, multiview._MULTIVIEW_REFUSALS,
+            multiview._MULTIVIEW_MANUAL_STOPS, multiview._MULTIVIEW_LAST_VIEWER, multiview._MULTIVIEW_START_TASKS,
+            sessions._LAST_PLAYBACK_EVENT,
         ):
             self.assertNotIn("mv", mapping)
-        self.assertIn("other", main._MULTIVIEW_FAILURES)
+        self.assertIn("other", multiview._MULTIVIEW_FAILURES)
         self.assertNotIn("mv", state.stream_state)
         self.assertEqual(registry.closed, ["mv", "mv#a0", "mv#a1"])
 
@@ -728,8 +731,8 @@ class PlaceholderTests(MultiviewStateTestCase):
                 patch.object(asyncio, "create_subprocess_exec", failing_exec), \
                 patch.object(config.LOGGER, "error") as error_log:
             self.assertEqual(asyncio.run(scenario()), (False, False))
-            with patch.object(main, "_spawn_background_task") as spawn:
-                main._request_placeholder_start()
+            with patch.object(multiview, "_spawn_background_task") as spawn:
+                sessions._request_placeholder_start()
             spawn.assert_not_called()
         self.assertEqual(len(launches), 1)
         self.assertEqual(error_log.call_count, 1)
@@ -767,20 +770,20 @@ class PlaceholderTests(MultiviewStateTestCase):
 class EncoderSettingsTests(unittest.TestCase):
     def test_env_choice_rejects_unknown_values(self):
         with patch.dict(os.environ, {"X_PRESET": "P7"}):
-            self.assertEqual(main._env_choice("X_PRESET", "p4", {"p4", "p7"}), "p7")
+            self.assertEqual(multiview._env_choice("X_PRESET", "p4", {"p4", "p7"}), "p7")
         with patch.dict(os.environ, {"X_PRESET": "turbo"}), patch.object(config.LOGGER, "warning"):
-            self.assertEqual(main._env_choice("X_PRESET", "p4", {"p4", "p7"}), "p4")
+            self.assertEqual(multiview._env_choice("X_PRESET", "p4", {"p4", "p7"}), "p4")
 
     def test_gop_and_keyframes_follow_fps_and_segment_length(self):
-        with patch.object(main, "MULTIVIEW_FPS", 60), patch.object(main, "MULTIVIEW_SEGMENT_SECONDS", 4), \
-                patch.object(main, "MULTIVIEW_NVENC_PRESET", "p2"), patch.object(main, "MULTIVIEW_NVENC_TUNE", "ull"):
-            args = main._multiview_video_encoder_args("nvenc")
+        with patch.object(multiview, "MULTIVIEW_FPS", 60), patch.object(multiview, "MULTIVIEW_SEGMENT_SECONDS", 4), \
+                patch.object(multiview, "MULTIVIEW_NVENC_PRESET", "p2"), patch.object(multiview, "MULTIVIEW_NVENC_TUNE", "ull"):
+            args = multiview._multiview_video_encoder_args("nvenc")
         self.assertEqual(args[args.index("-g") + 1], "240")
         self.assertEqual(args[args.index("-force_key_frames") + 1], "expr:gte(t,n_forced*4)")
         self.assertEqual(args[args.index("-preset") + 1], "p2")
         self.assertEqual(args[args.index("-tune") + 1], "ull")
-        with patch.object(main, "MULTIVIEW_HLS_LIST_SIZE", 12):
-            self.assertIn("hls_list_size=12", main._multiview_tee_outputs(2))
+        with patch.object(multiview, "MULTIVIEW_HLS_LIST_SIZE", 12):
+            self.assertIn("hls_list_size=12", multiview._multiview_tee_outputs(2))
 
 
 class ProcessControlTests(unittest.TestCase):
@@ -865,10 +868,10 @@ class ProcessControlTests(unittest.TestCase):
                 # Same pid, different creation time: a reused pid, must survive.
                 (bystander_dir / ffmpeg_proc.RUN_PID_FILE).write_text(json.dumps(
                     {"pid": bystander.pid, "created": api.process_creation_time(bystander.pid) + 1}), encoding="utf-8")
-                with patch.object(main, "MULTIVIEW_OUTPUT_ROOT", root), \
+                with patch.object(multiview, "MULTIVIEW_OUTPUT_ROOT", root), \
                         patch.object(placeholder, "PLACEHOLDER_OUTPUT_DIR", placeholder_root), \
                         patch.object(config.LOGGER, "warning"):
-                    self.assertEqual(main._kill_orphaned_ffmpeg(), 1)
+                    self.assertEqual(multiview._kill_orphaned_ffmpeg(), 1)
             self.assertIsNotNone(orphan.wait(timeout=10))
             self.assertIsNone(bystander.poll())
         finally:

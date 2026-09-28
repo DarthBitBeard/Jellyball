@@ -173,7 +173,7 @@ def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
 
 
 def init_db():
-    # Late import: scrapers imports db (settings, provider stats), so db can only reach it at call time.
+    # Late import: scrapers imports db, so it is reached at call time.
     from scrapers import _load_provider_url_overrides
     db_dir = os.path.dirname(DB_FILE)
     if db_dir:

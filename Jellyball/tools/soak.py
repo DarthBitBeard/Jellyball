@@ -289,6 +289,9 @@ def main() -> int:
     })
     import httpx
     import main as jellyball
+    import failover
+    import sessions
+    import state
 
     serve(build_soak_origin(origin_root, routes), origin_port)
     serve(jellyball.app, app_port)
@@ -298,7 +301,7 @@ def main() -> int:
 
     for cid in channel_ids:
         route_a, route_b = channel_routes[cid]
-        jellyball.stream_state[cid] = {
+        state.stream_state[cid] = {
             "name": cid, "query": cid, "active_index": 0, "is_healthy": True,
             "candidates": [
                 {"provider": "OriginA", "url": f"{origin_base}/{route_a}/live.m3u8", "referer": "", "origin": ""},
@@ -306,7 +309,7 @@ def main() -> int:
             ],
             "always_live": True, "category": "custom", "content_type": "team", "search_terms": [],
             "start_time": "", "stop_time": "", "logo_url": "", "catalog_key": "", "tvg_id": "", "group_title": "",
-            **jellyball._scrape_lifecycle_defaults(),
+            **failover._scrape_lifecycle_defaults(),
         }
 
     consumers = {}
@@ -337,7 +340,7 @@ def main() -> int:
                "threads": threads, "ffmpeg_children": ffmpeg_children}
         parts = [f"[{elapsed:7.1f}s] rss={rss_mb:.0f}MB handles={handles} threads={threads} ffmpeg={ffmpeg_children}/{len(consumers)}"]
         for cid in channel_ids:
-            session = jellyball.SESSIONS.peek(cid)
+            session = sessions.SESSIONS.peek(cid)
             snap = session.snapshot() if session else {}
             mem = snap.get("memory_mb", 0.0) or 0.0
             max_session_mem[cid] = max(max_session_mem[cid], mem)
@@ -363,7 +366,7 @@ def main() -> int:
         return row
 
     def active_route(cid: str) -> str:
-        idx = jellyball.stream_state[cid].get("active_index", 0)
+        idx = state.stream_state[cid].get("active_index", 0)
         route_a, route_b = channel_routes[cid]
         return route_b if idx == 1 else route_a
 

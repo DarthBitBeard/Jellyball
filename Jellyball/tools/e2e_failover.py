@@ -134,12 +134,15 @@ def main() -> int:
     })
     import httpx
     import main as jellyball
+    import failover
+    import sessions
+    import state
 
     serve(build_origin(work / "origin"), origin_port)
     serve(jellyball.app, app_port)
 
     base = f"http://127.0.0.1:{origin_port}"
-    jellyball.stream_state["e2e"] = {
+    state.stream_state["e2e"] = {
         "name": "E2E Test", "query": "e2e", "active_index": 0, "is_healthy": True,
         "candidates": [
             {"provider": "OriginA", "url": f"{base}/a/live.m3u8", "referer": "", "origin": ""},
@@ -147,7 +150,7 @@ def main() -> int:
         ],
         "always_live": True, "category": "custom", "content_type": "team", "search_terms": [],
         "start_time": "", "stop_time": "", "logo_url": "", "catalog_key": "", "tvg_id": "", "group_title": "",
-        **jellyball._scrape_lifecycle_defaults(),
+        **failover._scrape_lifecycle_defaults(),
     }
 
     channel_url = f"http://127.0.0.1:{app_port}/stream/e2e.m3u8"
@@ -178,7 +181,7 @@ def main() -> int:
         if player.poll() is None:
             player.kill()
 
-    session = jellyball.SESSIONS.peek("e2e")
+    session = sessions.SESSIONS.peek("e2e")
     snapshot = session.snapshot() if session else {}
     log_text = log_path.read_text(encoding="utf-8", errors="replace")
     probe = subprocess.run(
@@ -187,7 +190,7 @@ def main() -> int:
     )
     duration = float(probe.stdout.strip() or 0)
     new_stream = "New video stream" in log_text or "New audio stream" in log_text
-    active = jellyball.stream_state["e2e"]["active_index"]
+    active = state.stream_state["e2e"]["active_index"]
 
     print(f"ffmpeg exit code      : {player.returncode}")
     print(f"output duration       : {duration:.1f}s of {args.seconds}s")
