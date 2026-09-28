@@ -12,6 +12,8 @@ from unittest.mock import patch
 import httpx
 
 import main
+import channels
+import epg
 import failover
 import sessions
 import legacy_proxy
@@ -221,14 +223,14 @@ class OutputEscapingTests(unittest.TestCase):
             "name": 'Evil"\n#EXTINF:-1,Planted\nhttp://attacker.example/x.m3u8',
             "query": "evil", "candidates": [], "category": "custom",
         }
-        playlist = asyncio.run(main.generate_m3u(self._request()))
+        playlist = asyncio.run(epg.generate_m3u(self._request()))
         lines = playlist.splitlines()
         self.assertEqual(sum(1 for line in lines if line.startswith("#EXTINF")), 1)
         self.assertFalse(any(line.startswith("http://attacker.example") for line in lines))
 
     def test_malformed_host_header_falls_back_to_loopback(self):
         state.stream_state["t"] = {"name": "T", "query": "t", "candidates": [], "category": "custom"}
-        playlist = asyncio.run(main.generate_m3u(self._request(b"evil.example/<script>")))
+        playlist = asyncio.run(epg.generate_m3u(self._request(b"evil.example/<script>")))
         self.assertIn(f"http://127.0.0.1:{config.PORT}/stream/t.m3u8", playlist)
 
     def test_xml_attributes_escape_quotes_and_drop_invalid_chars(self):
@@ -259,7 +261,7 @@ class ImportConfigTests(TempDbMixin, unittest.TestCase):
 
             request = Request({"type": "http", "method": "POST", "path": "/api/import-config",
                                "headers": [], "query_string": b""}, receive)
-            with patch.object(main, "_start_team_scrape_loop") as start_loop, \
+            with patch.object(channels, "_start_team_scrape_loop") as start_loop, \
                     patch.object(main, "get_catalog_entries", return_value=[]):
                 response = await main.import_config(request, auth=True)
             return response, start_loop

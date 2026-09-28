@@ -14,7 +14,7 @@ from catalog import (
     _channel_is_always_live,
     _team_catalog_entry,
 )
-from main import generate_m3u, generate_xmltv
+from epg import generate_m3u, generate_xmltv
 from sports_catalog import SPECIAL_CHANNELS, STATIC_TEAM_RECORDS
 import state
 

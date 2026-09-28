@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import main
+import epg
 import failover
 import sessions
 import alerts
@@ -260,7 +261,7 @@ class OffSeasonGuideTests(StateMixin, unittest.TestCase):
         with patch.object(catalog, "SHOW_OFFSEASON_CHANNELS", True):
             self.assertTrue(catalog._channel_listed(state.stream_state["t"]))
             now = datetime.now(timezone.utc)
-            blocks = main._channel_programmes("t", state.stream_state["t"], now, now + timedelta(days=1), {})
+            blocks = epg._channel_programmes("t", state.stream_state["t"], now, now + timedelta(days=1), {})
             self.assertEqual(len(blocks), 1)
             self.assertIn("Off-season", blocks[0]["title"])
 

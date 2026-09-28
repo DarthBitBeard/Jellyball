@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
+import channels
 import multiview
 import sessions
 import ffmpeg_proc
@@ -693,12 +694,12 @@ class RemoveChannelTests(MultiviewStateTestCase):
         async def scenario():
             task = asyncio.create_task(asyncio.sleep(10))
             multiview._MULTIVIEW_START_TASKS["mv"] = task
-            await main._remove_channel("mv")
+            await channels._remove_channel("mv")
             return task
 
-        with patch.object(multiview, "SESSIONS", registry), patch.object(main, "SESSIONS", registry), \
-                patch.object(main, "delete_multiview_channel_async", AsyncMock()), \
-                patch.object(main, "_remove_tree_later", MagicMock()):
+        with patch.object(multiview, "SESSIONS", registry), patch.object(channels, "SESSIONS", registry), \
+                patch.object(channels, "delete_multiview_channel_async", AsyncMock()), \
+                patch.object(channels, "_remove_tree_later", MagicMock()):
             task = asyncio.run(scenario())
         self.assertTrue(task.cancelled())
         for mapping in (
