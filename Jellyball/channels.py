@@ -6,7 +6,7 @@ import asyncio
 from typing import Optional
 
 from config import _clean_label, _log_failure, _safe_team_id, _validate_upstream_url, LOGGER
-from state import _spawn_background_task, stream_state
+from state import _spawn_background_task, new_channel_state, stream_state
 from db import (
     _fetch_expired_scheduled_teams,
     delete_multiview_channel_async,
@@ -77,25 +77,20 @@ async def _set_catalog_entry_enabled(entry: dict, enabled: bool) -> bool:
                 entry["always_live"],
                 entry["catalog_key"],
             )
-            stream_state[team_id] = {
-                "name": entry["name"],
-                "query": entry["query"],
-                "candidates": [],
-                "active_index": 0,
-                "is_healthy": False,
-                "logo_url": entry["logo_url"],
-                "start_time": "",
-                "stop_time": "",
-                "category": entry["category"],
-                "source_id": entry["source_id"],
-                "content_type": entry["content_type"],
-                "search_terms": entry["search_terms"],
-                "always_live": entry["always_live"],
-                "catalog_key": entry["catalog_key"],
-                "tvg_id": entry.get("tvg_id", ""),
-                "group_title": entry.get("group_title", ""),
-            **_scrape_lifecycle_defaults(),
-            }
+            stream_state[team_id] = new_channel_state(
+                name=entry["name"],
+                query=entry["query"],
+                logo_url=entry["logo_url"],
+                category=entry["category"],
+                source_id=entry["source_id"],
+                content_type=entry["content_type"],
+                search_terms=entry["search_terms"],
+                always_live=entry["always_live"],
+                catalog_key=entry["catalog_key"],
+                tvg_id=entry.get("tvg_id", ""),
+                group_title=entry.get("group_title", ""),
+                **_scrape_lifecycle_defaults(),
+            )
             _start_team_scrape_loop(team_id)
             return True
     else:
@@ -132,23 +127,15 @@ async def _add_manual_team(
     search_terms = get_team_search_terms(team_name, search_query, team_id)
     await save_team_async(team_id, team_name, search_query, logo_url, category=category,
                           search_terms=search_terms, content_type="manual")
-    stream_state[team_id] = {
-        "name": team_name,
-        "query": search_query,
-        "candidates": [],
-        "active_index": 0,
-        "is_healthy": False,
-        "logo_url": logo_url,
-        "start_time": "",
-        "stop_time": "",
-        "category": category,
-        "source_id": "",
-        "content_type": "manual",
-        "search_terms": search_terms,
-        "always_live": False,
-        "catalog_key": "",
+    stream_state[team_id] = new_channel_state(
+        name=team_name,
+        query=search_query,
+        logo_url=logo_url,
+        category=category,
+        content_type="manual",
+        search_terms=search_terms,
         **_scrape_lifecycle_defaults(),
-    }
+    )
     _start_team_scrape_loop(team_id)
     return team_id
 

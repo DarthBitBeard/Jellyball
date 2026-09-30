@@ -778,10 +778,6 @@ class ChannelSession:
                 data = await task
                 if self.source is None:
                     return
-                self.last_useq = segment.useq
-                if segment.discontinuity:
-                    self.normalizer.start_new_epoch()
-                    self.pending_discontinuity = bool(self.window)
                 if data is not None and find_ts_start(data) < 0:
                     # One odd segment (an HTML error page served as 200, an
                     # ID3-only ad slate) is skipped like a failed download; only
@@ -794,6 +790,8 @@ class ChannelSession:
                 elif data is not None:
                     self.consecutive_non_ts = 0
                 if data is None:
+                    # Do not advance last_useq: a transient 404/timeout must be
+                    # retried on the next poll instead of permanently skipped.
                     self.stats["segment_failures"] += 1
                     self.consecutive_segment_failures += 1
                     self.pending_discontinuity = bool(self.window)
@@ -806,6 +804,9 @@ class ChannelSession:
                         self._report_failure("playlist stale")
                         return
                     continue
+                if segment.discontinuity:
+                    self.normalizer.start_new_epoch()
+                    self.pending_discontinuity = bool(self.window)
                 result = await asyncio.to_thread(self.normalizer.normalize, data, segment.duration)
                 if getattr(result, "discontinuity", False):
                     # The normalizer saw a timestamp jump inside the source
@@ -821,6 +822,7 @@ class ChannelSession:
                     discontinuity=self.pending_discontinuity and bool(self.window),
                     data=result.data,
                 ))
+                self.last_useq = segment.useq
         finally:
             for task in downloads:
                 if not task.done():

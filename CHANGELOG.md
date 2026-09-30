@@ -3,6 +3,39 @@
 All notable changes to Jellyball are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- HLS sessions no longer advance `last_useq` on failed segment downloads, so a
+  transient CDN blip is retried on the next poll instead of permanently skipped.
+- Failover and emergency-rescrape candidate mutations are serialized on the
+  per-team state lock, closing races between `request_failover` and partial
+  scrape installs.
+- On `playlist forbidden`, same-host / same-provider standbys are no longer
+  burned before a token refresh rescrape lands.
+
+### Security
+
+- CSRF Origin checks ignore `X-Forwarded-Host` unless `TRUST_X_FORWARDED_HOST=1`.
+- Generated `dashboard-password.txt` and `relay-signing.key` are written with
+  mode `0600`; the generated dashboard password is no longer logged in plaintext.
+
+### Changed
+
+- `/metrics` exports failover-reason counters, deferred-failover counts,
+  emergency-rescrape totals/duration, provider circuit-breaker state, Playwright
+  page usage, and aggregate session memory.
+- `stream_state` entries are typed via `ChannelState` / `new_channel_state()`.
+- Release workflow signing env vars match `build-installer.ps1`
+  (`AZURE_SIGNING_DLIB` / `AZURE_SIGNING_METADATA`).
+- CI runs e2e tool wrappers (Windows) and a Docker compose health smoke (Ubuntu).
+
+### Removed
+
+- Dead `FuzzFallback` / unused `fuzz` import and `safe_get_content` from
+  `scrapers.py`; unused `CACHE_TTL_SECONDS` from `legacy_proxy.py`.
+
 ## [2.0.0] - 2026-09-27
 
 Jellyball 2.0.0 is a stability and packaging release. The streaming core was

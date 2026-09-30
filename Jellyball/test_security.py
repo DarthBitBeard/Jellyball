@@ -70,6 +70,18 @@ class CsrfTests(unittest.TestCase):
         self.assertFalse(detect("GET", {**own, "origin": "https://evil.example"}, "http"))
         # Default ports are equivalent.
         self.assertFalse(detect("POST", {"host": "jb.local", "origin": "http://jb.local:80"}, "http"))
+        # X-Forwarded-Host is ignored by default (spoofable without a trusted proxy).
+        self.assertTrue(detect(
+            "POST",
+            {**own, "x-forwarded-host": "evil.example", "origin": "https://evil.example"},
+            "http",
+        ))
+        with patch.object(security, "TRUST_X_FORWARDED_HOST", True):
+            self.assertFalse(detect(
+                "POST",
+                {**own, "x-forwarded-host": "evil.example", "origin": "https://evil.example"},
+                "http",
+            ))
 
     def test_cross_origin_post_is_rejected_before_the_route(self):
         async def exercise():
@@ -113,6 +125,8 @@ class DashboardAuthTests(unittest.TestCase):
                 self.assertGreaterEqual(len(generated), 12)
                 self.assertEqual(security.DASHBOARD_AUTH_MODE, "generated")
                 self.assertEqual(password_file.read_text(encoding="utf-8").strip(), generated)
+                if os.name == "posix":
+                    self.assertEqual(password_file.stat().st_mode & 0o777, 0o600)
 
                 # A restart reuses the saved password instead of rotating it.
                 security.DASHBOARD_PASSWORD = ""

@@ -49,3 +49,64 @@ jobs:
 
       - name: Lint (ruff)
         run: ruff check Jellyball
+
+  e2e:
+    # Opt-in e2e tools (fake HLS origins + real ffmpeg). windows-latest matches
+    # the primary target platform; skip gracefully if ffmpeg is missing.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: Jellyball/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r Jellyball/requirements.txt
+
+      - name: Install ffmpeg
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y
+          ffmpeg -version
+
+      - name: Run e2e tool wrappers
+        working-directory: Jellyball
+        shell: pwsh
+        env:
+          JELLYBALL_E2E: "1"
+        run: python -m unittest test_e2e_tools -v
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker compose build
+
+      - name: Smoke-run container healthcheck
+        run: |
+          # Image runs as uid 1000; the bind-mounted ./data must be writable.
+          mkdir -p data
+          sudo chown -R 1000:1000 data
+          docker compose up -d
+          for i in $(seq 1 60); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' jellyball 2>/dev/null || echo starting)
+            echo "health=$status"
+            if [ "$status" = "healthy" ]; then
+              docker compose down -v
+              exit 0
+            fi
+            if [ "$status" = "unhealthy" ]; then
+              docker compose logs
+              docker compose down -v
+              exit 1
+            fi
+            sleep 2
+          done
+          docker compose logs
+          docker compose down -v
+          exit 1

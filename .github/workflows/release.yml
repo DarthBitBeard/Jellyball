@@ -50,18 +50,19 @@ jobs:
           # then fall back to their own default lookup and build without one.
           FFMPEG_BUNDLE_PATH: ${{ github.event.inputs.ffmpeg_bundle_path }}
           # ---------------------------------------------------------------
-          # Signing passthrough only - build-installer.ps1 does not sign
-          # anything yet. These are exposed so a signing step (traditional
-          # cert-based signtool via SIGN_CERT_THUMBPRINT, or Azure Trusted
-          # Signing via the AZURE_TRUSTED_SIGNING_*/AZURE_* vars) can be
-          # added to build-installer.ps1 later without touching this
-          # workflow. Any secret left unset in the repo/environment simply
-          # comes through empty, so an unsigned build is unaffected.
+          # Optional Authenticode signing via build-installer.ps1's
+          # Invoke-CodeSign. Unset secrets yield an unsigned build.
+          # Prefer either:
+          #   SIGN_CERT_THUMBPRINT - cert in the runner's certificate store, or
+          #   AZURE_SIGNING_DLIB + AZURE_SIGNING_METADATA - Azure Trusted
+          #   Signing dlib path and metadata.json on the runner.
+          # AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET are
+          # consumed by the Azure Code Signing dlib when that path is used.
           # ---------------------------------------------------------------
           SIGN_CERT_THUMBPRINT: ${{ secrets.SIGN_CERT_THUMBPRINT }}
-          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-          AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
-          AZURE_TRUSTED_SIGNING_CERT_PROFILE_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE_NAME }}
+          AZURE_SIGNING_DLIB: ${{ secrets.AZURE_SIGNING_DLIB }}
+          AZURE_SIGNING_METADATA: ${{ secrets.AZURE_SIGNING_METADATA }}
+          SIGN_TIMESTAMP_URL: ${{ secrets.SIGN_TIMESTAMP_URL }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}

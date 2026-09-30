@@ -89,13 +89,16 @@ def _configure_dashboard_auth(bind_host: str) -> None:
         generated = secrets.token_urlsafe(12)
         try:
             DASHBOARD_PASSWORD_FILE.write_text(generated + "\n", encoding="utf-8")
+            try:
+                DASHBOARD_PASSWORD_FILE.chmod(0o600)
+            except OSError as exc:
+                _log_failure("restrict dashboard password file permissions", exc)
         except OSError as exc:
             _log_failure("save generated dashboard password", exc)
-        # Logged once, on the run that creates it (docker logs / the console);
-        # later runs only point at the file.
+        # Point at the file only — never log the plaintext password.
         LOGGER.warning(
-            "Dashboard listens on %s with no DASHBOARD_PASSWORD: generated one. user=%s password=%s (saved to %s)",
-            bind_host, DASHBOARD_USERNAME, generated, DASHBOARD_PASSWORD_FILE,
+            "Dashboard listens on %s with no DASHBOARD_PASSWORD: generated one for user=%s (saved to %s)",
+            bind_host, DASHBOARD_USERNAME, DASHBOARD_PASSWORD_FILE,
         )
     else:
         LOGGER.warning(
@@ -204,6 +207,14 @@ def _normalized_netloc(scheme: str, netloc: str) -> str:
     return netloc
 
 
+# When True, CSRF also trusts X-Forwarded-Host (only safe behind a reverse
+# proxy that overwrites that header). Off by default so a browser cannot
+# spoof the allowed Origin target.
+TRUST_X_FORWARDED_HOST = os.getenv("TRUST_X_FORWARDED_HOST", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
+
 def _is_cross_site_write(method: str, headers: Dict[str, str], scheme: str) -> bool:
     """True for a state-changing request a browser sent from another site.
 
@@ -213,10 +224,10 @@ def _is_cross_site_write(method: str, headers: Dict[str, str], scheme: str) -> b
     non-browser clients (curl, scripts) send neither and aren't a CSRF vector."""
     if method not in _UNSAFE_METHODS:
         return False
-    allowed = {
-        _normalized_netloc(scheme, headers.get("host", "")),
-        _normalized_netloc(scheme, headers.get("x-forwarded-host", "").split(",")[0]),
-    } - {""}
+    allowed = {_normalized_netloc(scheme, headers.get("host", ""))} - {""}
+    if TRUST_X_FORWARDED_HOST:
+        allowed.add(_normalized_netloc(scheme, headers.get("x-forwarded-host", "").split(",")[0]))
+        allowed.discard("")
     origin = headers.get("origin")
     source = origin if origin is not None else headers.get("referer")
     if source is None:
@@ -259,6 +270,10 @@ def _load_relay_signing_key() -> bytes:
     key = secrets.token_bytes(32)
     try:
         key_file.write_bytes(key)
+        try:
+            key_file.chmod(0o600)
+        except OSError as exc:
+            _log_failure("restrict relay signing key permissions", exc)
     except OSError as exc:
         _log_failure("save relay signing key", exc)
     return key
