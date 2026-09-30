@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from config import _log_failure, _public_base_url, _resource_path, _safe_team_id, _validate_upstream_url
-from state import _spawn_background_task, stream_state
+from state import _spawn_background_task, new_channel_state, stream_state
 from db import (
     _bulk_set_favorite_sync,
     _load_dashboard_metrics_async,
@@ -525,18 +525,20 @@ async def create_multiview(
     active_audio_team_id = members[0]
     _forget_multiview_channel(channel_id)
     await save_multiview_channel_async(channel_id, name, layout, members, active_audio_team_id)
-    stream_state[channel_id] = {
-        "name": name, "query": "", "type": "multiview",
-        "candidates": [{"synthetic": True}],
-        "active_index": 0, "is_healthy": False,
-        "logo_url": "", "start_time": "", "stop_time": "",
-        "category": "multiview", "source_id": "", "content_type": "multiview",
-        "search_terms": [], "always_live": True, "catalog_key": "",
-        "tvg_id": "", "group_title": "Multi-View",
-        "layout": layout, "member_team_ids": members,
-        "active_audio_team_id": active_audio_team_id,
+    stream_state[channel_id] = new_channel_state(
+        name=name,
+        query="",
+        type="multiview",
+        candidates=[{"synthetic": True}],
+        category="multiview",
+        content_type="multiview",
+        always_live=True,
+        group_title="Multi-View",
+        layout=layout,
+        member_team_ids=members,
+        active_audio_team_id=active_audio_team_id,
         **_scrape_lifecycle_defaults(),
-    }
+    )
     _spawn_background_task(trigger_jellyfin_refresh(), "refresh Jellyfin guide after multiview creation")
     return RedirectResponse(url="/?tab=channels&status=multiview_created", status_code=303)
 

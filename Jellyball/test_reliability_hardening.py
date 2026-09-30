@@ -75,7 +75,9 @@ class ReliabilityHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(decision)
         remaining = expiry - time.monotonic()
         self.assertGreater(remaining, 0)
-        self.assertLessEqual(remaining, network_safety._DNS_CACHE_BLOCKED_TTL)
+        # Allow a tiny float epsilon: expiry was set as monotonic()+TTL, and
+        # subtracting monotonic() again can land a few ulps over the TTL.
+        self.assertLessEqual(remaining, network_safety._DNS_CACHE_BLOCKED_TTL + 1e-6)
 
     async def test_dns_resolution_timeout_returns_none(self):
         hostname = "slow.example.test"

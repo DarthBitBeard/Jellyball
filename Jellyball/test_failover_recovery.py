@@ -136,13 +136,76 @@ class FailoverCountersTests(StateMixin, unittest.IsolatedAsyncioTestCase):
                 coro.close()
 
     async def test_forbidden_playlist_triggers_token_refresh(self):
-        a = _candidate("A", "https://a.example/live.m3u8")
-        b = _candidate("B", "https://b.example/live.m3u8")
+        # Same CDN host: refresh-first, do not burn standbys with equally stale tokens.
+        a = _candidate("A", "https://cdn.example/a/live.m3u8")
+        b = _candidate("B", "https://cdn.example/b/live.m3u8")
         state.stream_state["t"] = {"name": "Team", "candidates": [a, b], "active_index": 0}
         with patch.object(failover, "_trigger_scrape", new=AsyncMock()) as rescrape:
-            await failover.request_failover("t", sessions.candidate_source_key(a), "playlist forbidden")
+            moved = await failover.request_failover(
+                "t", sessions.candidate_source_key(a), "playlist forbidden",
+            )
             await asyncio.sleep(0)
+        self.assertFalse(moved)
+        self.assertEqual(state.stream_state["t"]["active_index"], 0)
         rescrape.assert_awaited_once_with("t", force=True)
+
+    async def test_forbidden_playlist_failovers_when_hosts_differ(self):
+        a = _candidate("A", "https://a.example/live.m3u8")
+        b = _candidate("B", "https://b.example/live.m3u8", last_health_ok=True, last_health_check=time.time())
+        state.stream_state["t"] = {"name": "Team", "candidates": [a, b], "active_index": 0}
+        with patch.object(failover, "_trigger_scrape", new=AsyncMock()) as rescrape:
+            moved = await failover.request_failover(
+                "t", sessions.candidate_source_key(a), "playlist forbidden",
+            )
+            await asyncio.sleep(0)
+        self.assertTrue(moved)
+        self.assertEqual(state.stream_state["t"]["active_index"], 1)
+        rescrape.assert_awaited_once_with("t", force=True)
+
+    async def test_emergency_partial_and_failover_serialize_on_team_lock(self):
+        a = _candidate("A", "https://a.example/live.m3u8")
+        b = _candidate("B", "https://b.example/live.m3u8", last_health_ok=True, last_health_check=time.time())
+        data = {
+            "name": "Team", "query": "Team", "exhausted": True, "is_healthy": False,
+            "active_index": 0, "candidates": [a, b],
+        }
+        state.stream_state["t"] = data
+        lock = failover._team_state_lock("t")
+        await lock.acquire()
+        failover_task = asyncio.create_task(
+            failover.request_failover("t", sessions.candidate_source_key(a), "segments failing")
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(failover_task.done())
+        self.assertEqual(data["active_index"], 0)
+
+        # Simulate emergency partial install waiting on the same lock.
+        install = asyncio.create_task(_locked_partial_install("t", [
+            _candidate("C", "https://c.example/live.m3u8"),
+        ]))
+        await asyncio.sleep(0)
+        self.assertFalse(install.done())
+
+        lock.release()
+        moved = await failover_task
+        await install
+        # Whichever ran second sees a coherent candidates/active_index pair.
+        self.assertTrue(moved or not data.get("exhausted"))
+        self.assertLess(data["active_index"], len(data["candidates"]))
+
+
+async def _locked_partial_install(team_id: str, streams: list) -> None:
+    async with failover._team_state_lock(team_id):
+        current = state.stream_state.get(team_id)
+        if current is None or not current.get("exhausted"):
+            return
+        merged, merged_index = failover._merge_stream_candidates(
+            current.get("candidates", []), 0, streams, keep_active=False,
+        )
+        current["candidates"] = merged
+        current["active_index"] = merged_index
+        current["exhausted"] = False
+        current["is_healthy"] = True
 
 
 class WindowCloseTests(StateMixin, unittest.TestCase):

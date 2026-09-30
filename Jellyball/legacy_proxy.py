@@ -32,8 +32,6 @@ from network_safety import bounded_float, bounded_int, validate_http_url_async
 router = APIRouter()
 
 
-CACHE_TTL_SECONDS = 120.0
-
 STREAM_CHUNK_CACHE_TTL = _positive_env_number("STREAM_CHUNK_CACHE_TTL", 15.0)
 STREAM_STARTUP_BUFFER_SECONDS = bounded_float(
     os.getenv("STREAM_STARTUP_BUFFER_SECONDS", "15"), 15.0, 0.0, 120.0

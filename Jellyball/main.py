@@ -40,7 +40,7 @@ from config import (
     LOGGER,
 )
 import state
-from state import _cancel_background_tasks, _spawn_background_task, stream_state
+from state import _cancel_background_tasks, _spawn_background_task, new_channel_state, stream_state
 from db import (
     _METRIC_WRITER,
     close_all_db_connections,
@@ -190,22 +190,23 @@ async def lifespan(app: FastAPI):
             search_terms = get_team_search_terms(name, query, team_id)
         display_name = _sport_labeled_name(name, category or "")
         special_channel = _special_channel_for({"catalog_key": catalog_key})
-        stream_state[team_id] = {
-            "name": display_name, "query": query, "candidates": [], "active_index": 0, "is_healthy": False,
-            "logo_url": logo_url or resolve_espn_logo(name, category, source_id),
-            "start_time": start_time or "",
-            "stop_time": stop_time or "",
-            "category": category or "custom",
-            "source_id": source_id or "",
-            "content_type": content_type or "team",
-            "search_terms": search_terms,
-            "always_live": bool(always_live) or bool(special_channel),
-            "catalog_key": catalog_key or "",
-            "tvg_id": special_channel.tvg_id if special_channel else "",
-            "group_title": special_channel.group_title if special_channel else "",
-            "auto_disable_after": auto_disable_after or "",
+        stream_state[team_id] = new_channel_state(
+            name=display_name,
+            query=query,
+            logo_url=logo_url or resolve_espn_logo(name, category, source_id),
+            start_time=start_time or "",
+            stop_time=stop_time or "",
+            category=category or "custom",
+            source_id=source_id or "",
+            content_type=content_type or "team",
+            search_terms=search_terms,
+            always_live=bool(always_live) or bool(special_channel),
+            catalog_key=catalog_key or "",
+            tvg_id=special_channel.tvg_id if special_channel else "",
+            group_title=special_channel.group_title if special_channel else "",
+            auto_disable_after=auto_disable_after or "",
             **_scrape_lifecycle_defaults(),
-        }
+        )
         _start_team_scrape_loop(team_id, initial_delay=random.uniform(0.0, STARTUP_SCRAPE_SPREAD_SECONDS))
 
     for (
@@ -230,18 +231,25 @@ async def lifespan(app: FastAPI):
         if missing:
             # Keep the Multi-View: removed members render as a "No Signal" pane.
             LOGGER.warning("Multi-View %s references removed channels %s; showing No Signal for them", channel_id, missing)
-        stream_state[channel_id] = {
-            "name": mv_name, "query": "", "type": "multiview",
-            "candidates": [{"synthetic": True}],  # non-empty sentinel only to satisfy generic health-dot/404 checks; not a real stream candidate
-            "active_index": 0, "is_healthy": False,
-            "logo_url": logo_url, "start_time": "", "stop_time": "",
-            "category": "multiview", "source_id": "", "content_type": "multiview",
-            "search_terms": [], "always_live": True, "catalog_key": "",
-            "tvg_id": tvg_id, "group_title": group_title or "Multi-View",
-            "layout": layout, "member_team_ids": member_team_ids,
-            "active_audio_team_id": active_audio_team_id if active_audio_team_id in member_team_ids else member_team_ids[0],
+        stream_state[channel_id] = new_channel_state(
+            name=mv_name,
+            query="",
+            type="multiview",
+            # non-empty sentinel only to satisfy generic health-dot/404 checks; not a real stream candidate
+            candidates=[{"synthetic": True}],
+            logo_url=logo_url,
+            category="multiview",
+            content_type="multiview",
+            always_live=True,
+            tvg_id=tvg_id,
+            group_title=group_title or "Multi-View",
+            layout=layout,
+            member_team_ids=member_team_ids,
+            active_audio_team_id=(
+                active_audio_team_id if active_audio_team_id in member_team_ids else member_team_ids[0]
+            ),
             **_scrape_lifecycle_defaults(),
-        }
+        )
 
     monitor_task = asyncio.create_task(failover_monitor(), name="failover monitor")
     prune_task = asyncio.create_task(prune_database_logs(), name="database log pruning")
