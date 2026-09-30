@@ -89,22 +89,24 @@ jobs:
 
       - name: Smoke-run container healthcheck
         run: |
+          # Image runs as uid 1000; the bind-mounted ./data must be writable.
           mkdir -p data
+          sudo chown -R 1000:1000 data
           docker compose up -d
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             status=$(docker inspect --format='{{.State.Health.Status}}' jellyball 2>/dev/null || echo starting)
             echo "health=$status"
             if [ "$status" = "healthy" ]; then
-              docker compose down
+              docker compose down -v
               exit 0
             fi
             if [ "$status" = "unhealthy" ]; then
               docker compose logs
-              docker compose down
+              docker compose down -v
               exit 1
             fi
             sleep 2
           done
           docker compose logs
-          docker compose down
+          docker compose down -v
           exit 1
