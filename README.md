@@ -128,6 +128,13 @@ CI runs the suite and lint on Windows and Linux. Pushing a `v*` tag builds the
 installer and attaches it to a GitHub release. Building it yourself is covered
 in the [full documentation](Jellyball/README.md#building-from-source-and-running-tests).
 
+## Contributing
+
+Community contributions are welcome via **fork → pull request** into `master`
+(the protected default branch). See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+workflow and local test commands. You do not need write access to this repo to
+propose changes.
+
 ## Disclaimer
 
 Jellyball hosts, stores and distributes no media. It is a tool that finds and
