@@ -584,7 +584,10 @@ def _request_token_refresh(team_id: str, data: dict) -> None:
     standbys from the same scrape carry tokens just as old. Rescrape now (the
     merge keeps health history) rather than waiting for the next cycle."""
     now = time.monotonic()
-    if now - float(data.get("last_token_refresh") or 0.0) < TOKEN_REFRESH_COOLDOWN:
+    # monotonic() is near zero just after boot, so an unset timestamp must not
+    # be treated as "refreshed 0 seconds ago".
+    last = data.get("last_token_refresh")
+    if last is not None and now - float(last) < TOKEN_REFRESH_COOLDOWN:
         return
     data["last_token_refresh"] = now
     LOGGER.info("Refreshing stream tokens team=%s", team_id)
