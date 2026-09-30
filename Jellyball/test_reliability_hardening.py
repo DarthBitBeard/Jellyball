@@ -25,12 +25,16 @@ class ReliabilityHardeningTests(unittest.IsolatedAsyncioTestCase):
         clear_dns_cache()
 
     async def test_cache_expiry_is_removed_during_put(self):
+        # Drive time.monotonic() explicitly: Windows timer resolution (~15ms)
+        # can make a 1ms TTL + 10ms sleep leave the entry still "fresh".
         cache = legacy_proxy.LRUChunkCache(capacity=4, max_bytes=1024)
-        await cache.put("expired", b"old", 0.001)
-        await asyncio.sleep(0.01)
-        await cache.put("new", b"new", 10)
-        self.assertIsNone(await cache.get("expired"))
-        self.assertEqual(await cache.get("new"), b"new")
+        clock = {"t": 1000.0}
+        with patch.object(legacy_proxy.time, "monotonic", side_effect=lambda: clock["t"]):
+            await cache.put("expired", b"old", 1.0)  # expires at 1001
+            clock["t"] = 1002.0
+            await cache.put("new", b"new", 10)
+            self.assertIsNone(await cache.get("expired"))
+            self.assertEqual(await cache.get("new"), b"new")
 
     async def test_dns_validation_rejects_loopback(self):
         self.assertIsNone(await validate_http_url_async("http://127.0.0.1:8000/stream"))
