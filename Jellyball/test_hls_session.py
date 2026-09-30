@@ -576,6 +576,33 @@ class ChannelSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.stats["segment_failures"], 3)
         self.assertEqual(len(self.harness.failures), 1)
         self.assertEqual(self.harness.failures[0][2], "segments failing")
+        # Failures must not advance the upstream cursor, or a later poll
+        # (after failover recovery) would permanently skip those seqs.
+        self.assertIsNone(session.last_useq)
+
+    async def test_failed_download_does_not_advance_last_useq(self):
+        base = "http://upstream"
+        self.harness.source = SourceSpec(key=("primary",), url=f"{base}/media.m3u8", label="primary")
+        self.harness.set_playlist(f"{base}/media.m3u8", playlist_text(base, list(range(3))))
+        self.harness.set_response(f"{base}/seg0.ts", make_ts_segment())
+        self.harness.set_response(f"{base}/seg1.ts", make_ts_segment())
+        # seg2 missing: first poll publishes 0-1, fails on 2 without advancing.
+
+        cfg = fast_config(fail_threshold=10, live_edge_segments=3)
+        session = self.make_session(cfg)
+        await session._poll_once()
+
+        self.assertEqual(len(session.window), 2)
+        self.assertEqual(session.last_useq, 1)
+        self.assertEqual(session.stats["segment_failures"], 1)
+
+        # Transient CDN blip recovers: next poll must retry useq 2.
+        self.harness.set_response(f"{base}/seg2.ts", make_ts_segment())
+        self.harness.set_playlist(f"{base}/media.m3u8", playlist_text(base, list(range(3))))
+        await session._poll_once()
+
+        self.assertEqual(session.last_useq, 2)
+        self.assertEqual(len(session.window), 3)
 
     async def test_stale_playlist_triggers_report_failure_rate_limited(self):
         base = "http://upstream"

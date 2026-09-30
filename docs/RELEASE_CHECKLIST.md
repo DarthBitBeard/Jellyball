@@ -63,6 +63,13 @@ restart, growing lag, rising RSS, or session `memory_mb` exceeding its cap)
 is a stability regression and blocks the release until root-caused - don't
 ship over it.
 
+### 3d. CI green + Docker smoke
+
+- [ ] GitHub Actions CI is green on the release commit (unit + ruff + e2e +
+      docker-smoke jobs in `.github/workflows/ci.yml`).
+- [ ] Locally (optional): `docker compose build && docker compose up -d`
+      reaches a healthy `HEALTHCHECK` within ~60s.
+
 ## 4. Build the installer
 
 ```powershell
@@ -74,6 +81,17 @@ Run from `Jellyball/`. This produces
 build + Inno Setup). Confirm the version in the produced filename matches
 step 1, and that the script printed both `Jellyball.exe` and
 `JellyballConsole.exe` as built before it got to the Inno Setup step.
+
+If code signing is configured (`SIGN_CERT_THUMBPRINT` or
+`AZURE_SIGNING_DLIB` + `AZURE_SIGNING_METADATA`), confirm the script printed
+`Signing ...` for both executables and the installer, then verify:
+
+```powershell
+Get-AuthenticodeSignature .\installer\Output\JellyballSetup-X.Y.Z.exe
+```
+
+Status should be `Valid`. Unsigned builds are acceptable for internal
+testing but should not be the public GitHub release asset.
 
 ## 5. Upgrade-install on the server
 
@@ -123,5 +141,6 @@ git push origin vX.Y.Z
 Pushing the tag triggers `.github/workflows/release.yml`, which builds the
 installer on `windows-latest`, uploads it as a workflow artifact, and
 attaches `JellyballSetup-X.Y.Z.exe` to the GitHub release created for the
-tag. Confirm that release build succeeds and the asset is attached before
+tag. Paste the matching `CHANGELOG.md` section into the GitHub release body.
+Confirm that release build succeeds and the asset is attached before
 announcing the release.

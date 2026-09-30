@@ -28,9 +28,17 @@ from legacy_proxy import CHUNK_CACHE
 import ffmpeg_proc
 from sessions import SESSIONS
 from multiview import _multiview_cooldown_remaining, _MULTIVIEW_FAILURES, _MULTIVIEW_PROCESSES
-from failover import _session_on_placeholder
+from failover import (
+    _session_on_placeholder,
+    EMERGENCY_RESCRAPE_COUNTS,
+    EMERGENCY_RESCRAPE_SECONDS_TOTAL,
+    FAILOVER_DEFERRED_COUNTS,
+    FAILOVER_REASON_COUNTS,
+)
 from channels import _add_manual_team, _set_catalog_entry_enabled
 from tunables import _advanced_settings_snapshot
+from scrapers import provider_breaker_snapshot
+from stream_extractor import PLAYWRIGHT_MAX_PAGES, playwright_pages_in_use
 from version import __version__
 
 router = APIRouter()
@@ -167,6 +175,51 @@ async def prometheus_metrics(auth: bool = Depends(verify_dashboard_auth)):
             lines.append(
                 f'jellyball_session_segment_seconds_p95{{channel="{_prometheus_label(cid)}"}} {snap["segment_ms_p95"] / 1000:.3f}'
             )
+
+    memory_mb = sum(float(snap.get("memory_mb") or 0.0) for snap in snapshots.values())
+    lines += [
+        "# HELP jellyball_sessions_memory_mb Aggregate session buffer memory.",
+        "# TYPE jellyball_sessions_memory_mb gauge",
+        f"jellyball_sessions_memory_mb {memory_mb:.3f}",
+        "# HELP jellyball_failover_reasons_total Failovers by reason since start.",
+        "# TYPE jellyball_failover_reasons_total counter",
+    ]
+    for reason, count in sorted(FAILOVER_REASON_COUNTS.items()):
+        lines.append(
+            f'jellyball_failover_reasons_total{{reason="{_prometheus_label(reason)}"}} {int(count)}'
+        )
+    lines += [
+        "# HELP jellyball_failover_deferred_total Failovers deferred (e.g. token refresh-first).",
+        "# TYPE jellyball_failover_deferred_total counter",
+    ]
+    for reason, count in sorted(FAILOVER_DEFERRED_COUNTS.items()):
+        lines.append(
+            f'jellyball_failover_deferred_total{{reason="{_prometheus_label(reason)}"}} {int(count)}'
+        )
+    lines += [
+        "# HELP jellyball_emergency_rescrape_total Emergency rescrapes since start.",
+        "# TYPE jellyball_emergency_rescrape_total counter",
+        f'jellyball_emergency_rescrape_total{{result="success"}} {int(EMERGENCY_RESCRAPE_COUNTS.get("success", 0))}',
+        f'jellyball_emergency_rescrape_total{{result="empty_or_failed"}} {int(EMERGENCY_RESCRAPE_COUNTS.get("empty_or_failed", 0))}',
+        "# HELP jellyball_emergency_rescrape_seconds_total Time spent in emergency rescrape.",
+        "# TYPE jellyball_emergency_rescrape_seconds_total counter",
+        f"jellyball_emergency_rescrape_seconds_total {EMERGENCY_RESCRAPE_SECONDS_TOTAL:.3f}",
+        "# HELP jellyball_provider_breaker_open 1 when the provider circuit breaker is open.",
+        "# TYPE jellyball_provider_breaker_open gauge",
+    ]
+    for provider, info in sorted(provider_breaker_snapshot().items()):
+        lines.append(
+            f'jellyball_provider_breaker_open{{provider="{_prometheus_label(provider)}"}} '
+            f'{1 if info.get("open") else 0}'
+        )
+    lines += [
+        "# HELP jellyball_playwright_pages_in_use Open Playwright pages/contexts.",
+        "# TYPE jellyball_playwright_pages_in_use gauge",
+        f"jellyball_playwright_pages_in_use {playwright_pages_in_use()}",
+        "# HELP jellyball_playwright_pages_max Configured Playwright page cap.",
+        "# TYPE jellyball_playwright_pages_max gauge",
+        f"jellyball_playwright_pages_max {PLAYWRIGHT_MAX_PAGES}",
+    ]
     return "\n".join(lines) + "\n"
 
 

@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -41,6 +42,29 @@ _SCRAPE_IN_FLIGHT: Set[str] = set()
 _TEAM_SCRAPE_TASKS: Dict[str, asyncio.Task] = {}
 _TEAM_SCRAPE_WAKE_EVENTS: Dict[str, asyncio.Event] = {}
 _TEAM_STATE_LOCKS: Dict[str, asyncio.Lock] = {}
+
+# Prometheus-facing counters (reason -> count). Exposed via routes_api /metrics.
+FAILOVER_REASON_COUNTS: Dict[str, int] = {}
+FAILOVER_DEFERRED_COUNTS: Dict[str, int] = {}
+EMERGENCY_RESCRAPE_COUNTS = {"success": 0, "empty_or_failed": 0}
+EMERGENCY_RESCRAPE_SECONDS_TOTAL = 0.0
+
+
+def _note_failover_reason(reason: str, *, deferred: bool = False, exhausted: bool = False) -> None:
+    key = (reason or "unknown").strip() or "unknown"
+    if deferred:
+        FAILOVER_DEFERRED_COUNTS[key] = int(FAILOVER_DEFERRED_COUNTS.get(key, 0)) + 1
+        return
+    if exhausted:
+        key = f"{key}|exhausted"
+    FAILOVER_REASON_COUNTS[key] = int(FAILOVER_REASON_COUNTS.get(key, 0)) + 1
+
+
+def _note_emergency_rescrape(elapsed_seconds: float, success: bool) -> None:
+    global EMERGENCY_RESCRAPE_SECONDS_TOTAL
+    EMERGENCY_RESCRAPE_SECONDS_TOTAL += max(0.0, float(elapsed_seconds))
+    bucket = "success" if success else "empty_or_failed"
+    EMERGENCY_RESCRAPE_COUNTS[bucket] = int(EMERGENCY_RESCRAPE_COUNTS.get(bucket, 0)) + 1
 
 
 def _team_state_lock(team_id: str) -> asyncio.Lock:
@@ -493,10 +517,37 @@ def _pick_next_candidate(
     return min(eligible, key=rank) if eligible else None
 
 
+def _candidates_likely_share_tokens(candidates: List[dict]) -> bool:
+    """True when standbys are likely to carry equally stale CDN/auth tokens.
+
+    Same scrape wave + same host (or a single provider) means burning through
+    standbys on 401/403 usually fails the whole list before a rescrape lands.
+    """
+    hosts: Set[str] = set()
+    providers: Set[str] = set()
+    for candidate in candidates:
+        host = (urllib.parse.urlsplit(str(candidate.get("url") or "")).hostname or "").lower()
+        if host:
+            hosts.add(host)
+        provider = str(candidate.get("provider") or "").strip().lower()
+        if provider:
+            providers.add(provider)
+    return len(hosts) <= 1 or len(providers) <= 1
+
+
 async def request_failover(team_id: str, source_key: tuple, reason: str, incompatible: bool = False) -> bool:
     """Single failover entry point for channel sessions (real playback) and
     health probes (unwatched channels). A no-op if the active candidate already
-    changed, so concurrent reporters can't double-advance."""
+    changed, so concurrent reporters can't double-advance.
+
+    Serialized with scrape-driven candidate merges via `_team_state_lock`."""
+    async with _team_state_lock(team_id):
+        return await _request_failover_unlocked(team_id, source_key, reason, incompatible=incompatible)
+
+
+async def _request_failover_unlocked(
+    team_id: str, source_key: tuple, reason: str, incompatible: bool = False,
+) -> bool:
     data = stream_state.get(team_id)
     if not data or data.get("type") == "multiview" or _is_placeholder_key(source_key):
         return False
@@ -515,7 +566,12 @@ async def request_failover(team_id: str, source_key: tuple, reason: str, incompa
         active["incompatible_at"] = time.time()
     team_name = data.get("name", team_id)
     if reason == "playlist forbidden":
-        _request_token_refresh(team_id, data)
+        refreshed = _request_token_refresh(team_id, data)
+        if refreshed and _candidates_likely_share_tokens(candidates):
+            # Don't burn same-generation standbys while a rescrape is in flight.
+            LOGGER.info("Deferring failover for token refresh team=%s reason=%s", team_id, reason)
+            _note_failover_reason(reason, deferred=True)
+            return False
     next_index = _pick_next_candidate(candidates, active_index, active.get("codec_signature"))
     if next_index is None:
         if not incompatible and _allow_self_retry(data):
@@ -528,6 +584,7 @@ async def request_failover(team_id: str, source_key: tuple, reason: str, incompa
         data["exhausted_since"] = time.monotonic()
         SESSIONS.poke(team_id)
         _handle_candidates_exhausted(team_id, data, team_name)
+        _note_failover_reason(reason, exhausted=True)
         return False
 
     data["active_index"] = next_index
@@ -545,6 +602,7 @@ async def request_failover(team_id: str, source_key: tuple, reason: str, incompa
     await log_metric_event_async(team_id, new_provider, "failover", reason)
     data["failover_count"] = int(data.get("failover_count", 0)) + 1
     data["last_failover"] = {"at": time.time(), "reason": reason, "to": new_provider}
+    _note_failover_reason(reason)
     _send_failover_alert(team_id, data, team_name, new_provider)
     return True
 
@@ -579,19 +637,22 @@ def _send_failover_alert(team_id: str, data: dict, team_name: str, new_provider:
     )
 
 
-def _request_token_refresh(team_id: str, data: dict) -> None:
+def _request_token_refresh(team_id: str, data: dict) -> bool:
     """The active playlist answered 401/403: its token probably expired, and
     standbys from the same scrape carry tokens just as old. Rescrape now (the
-    merge keeps health history) rather than waiting for the next cycle."""
+    merge keeps health history) rather than waiting for the next cycle.
+
+    Returns True when a refresh scrape was scheduled."""
     now = time.monotonic()
     # monotonic() is near zero just after boot, so an unset timestamp must not
     # be treated as "refreshed 0 seconds ago".
     last = data.get("last_token_refresh")
     if last is not None and now - float(last) < TOKEN_REFRESH_COOLDOWN:
-        return
+        return False
     data["last_token_refresh"] = now
     LOGGER.info("Refreshing stream tokens team=%s", team_id)
     _spawn_background_task(_trigger_scrape(team_id, force=True), f"token refresh rescrape team={team_id}")
+    return True
 
 
 async def _probe_exhausted_candidates(team_id: str, data: dict) -> None:
@@ -649,21 +710,23 @@ async def emergency_rescrape(team_id: str) -> None:
         return
     _SCRAPE_IN_FLIGHT.add(team_id)
     _mark_scrape_started(data)
+    started_at = time.monotonic()
 
-    def _install_partial(streams: List[dict]) -> None:
+    async def _install_partial(streams: List[dict]) -> None:
         # First playable provider result while still off the air: use it now.
-        current = stream_state.get(team_id)
-        if current is None or not current.get("exhausted"):
-            return
-        merged, merged_index = _merge_stream_candidates(
-            current.get("candidates", []), 0, streams, keep_active=False
-        )
-        current["candidates"] = merged
-        current["active_index"] = merged_index
-        current["exhausted"] = False
-        current["is_healthy"] = True
-        SESSIONS.poke(team_id)
-        LOGGER.info("Emergency rescrape found streams early team=%s count=%d", team_id, len(streams))
+        async with _team_state_lock(team_id):
+            current = stream_state.get(team_id)
+            if current is None or not current.get("exhausted"):
+                return
+            merged, merged_index = _merge_stream_candidates(
+                current.get("candidates", []), 0, streams, keep_active=False
+            )
+            current["candidates"] = merged
+            current["active_index"] = merged_index
+            current["exhausted"] = False
+            current["is_healthy"] = True
+            SESSIONS.poke(team_id)
+            LOGGER.info("Emergency rescrape found streams early team=%s count=%d", team_id, len(streams))
 
     try:
         candidates = await master_scrape(
@@ -674,36 +737,39 @@ async def emergency_rescrape(team_id: str) -> None:
             always_live=bool(data.get("always_live")),
             on_partial=_install_partial,
         )
-        current = stream_state.get(team_id)
-        if current is not None:
-            if candidates:
-                # Every known candidate just failed, so nothing is kept active, but
-                # standbys found again keep their health history. If an early
-                # partial result is already playing, keep playing it.
-                playing_early = not current.get("exhausted") and bool(current.get("candidates"))
-                merged, merged_index = _merge_stream_candidates(
-                    current.get("candidates", []), current.get("active_index", 0) if playing_early else 0,
-                    candidates, keep_active=playing_early,
-                )
-                current["candidates"] = merged
-                current["active_index"] = merged_index
-                current["is_healthy"] = True
-                current["exhausted"] = False
-                current["last_candidate_refresh"] = time.time()
-                SESSIONS.poke(team_id)
-            else:
-                LOGGER.warning(
-                    "Keeping existing stream candidates after empty emergency refresh team=%s count=%d",
-                    team_id,
-                    len(current.get("candidates", [])),
-                )
-        _mark_scrape_finished(data, "healthy" if candidates else "empty")
+        async with _team_state_lock(team_id):
+            current = stream_state.get(team_id)
+            if current is not None:
+                if candidates:
+                    # Every known candidate just failed, so nothing is kept active, but
+                    # standbys found again keep their health history. If an early
+                    # partial result is already playing, keep playing it.
+                    playing_early = not current.get("exhausted") and bool(current.get("candidates"))
+                    merged, merged_index = _merge_stream_candidates(
+                        current.get("candidates", []), current.get("active_index", 0) if playing_early else 0,
+                        candidates, keep_active=playing_early,
+                    )
+                    current["candidates"] = merged
+                    current["active_index"] = merged_index
+                    current["is_healthy"] = True
+                    current["exhausted"] = False
+                    current["last_candidate_refresh"] = time.time()
+                    SESSIONS.poke(team_id)
+                else:
+                    LOGGER.warning(
+                        "Keeping existing stream candidates after empty emergency refresh team=%s count=%d",
+                        team_id,
+                        len(current.get("candidates", [])),
+                    )
+            _mark_scrape_finished(data, "healthy" if candidates else "empty")
+            _note_emergency_rescrape(time.monotonic() - started_at, bool(candidates))
     except asyncio.CancelledError:
         _mark_scrape_finished(data, "cancelled")
         raise
     except Exception as exc:
         _mark_scrape_finished(data, "failed", type(exc).__name__)
         _log_failure(f"emergency rescrape team={team_id}", exc, logging.ERROR)
+        _note_emergency_rescrape(time.monotonic() - started_at, False)
     finally:
         _SCRAPE_IN_FLIGHT.discard(team_id)
 

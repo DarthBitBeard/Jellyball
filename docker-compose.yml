@@ -10,11 +10,15 @@ services:
     volumes:
       - ./data:/app/data
     # Every setting in Jellyball/README.md's configuration table can go in a
-    # .env file next to this compose file (copy .env.example). The entries under
-    # `environment:` below are container plumbing and a few common overrides.
+    # .env file next to this compose file (copy .env.example; full annotated
+    # template also lives at Jellyball/.env.example). The host ./data volume
+    # must be writable by uid 1000 (the image's jellyball user).
+    # Entries under `environment:` below are container plumbing and common overrides.
     env_file:
       - path: .env
         required: false
+    security_opt:
+      - no-new-privileges:true
     environment:
       - PORT=8000
       - DB_FILE=/app/data/sports_proxy.db
@@ -23,7 +27,7 @@ services:
       - JELLYBALL_HOST=0.0.0.0
       - MULTIVIEW_HWACCEL=${MULTIVIEW_HWACCEL:-none}
       - DASHBOARD_USERNAME=${DASHBOARD_USERNAME:-admin}
-      # Leave empty to have Jellyball generate one (see `docker logs jellyball`).
+      # Leave empty to have Jellyball generate one (saved under /app/data; see logs).
       - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}

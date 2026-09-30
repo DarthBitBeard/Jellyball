@@ -249,13 +249,25 @@ Machine-readable endpoints (all behind dashboard auth except `/healthz`):
   loopback `Host` header, closing a DNS-rebinding path to the dashboard.
 - **CSRF check.** A pure-ASGI middleware rejects cross-site
   POST/PUT/PATCH/DELETE requests by checking the browser's
-  `Origin`/`Referer` against the request's `Host`. Non-browser clients
-  (curl, scripts) send neither and aren't affected.
+  `Origin`/`Referer` against the request's `Host`. `X-Forwarded-Host` is
+  ignored unless `TRUST_X_FORWARDED_HOST=1` (only enable behind a reverse
+  proxy that overwrites that header). Non-browser clients (curl, scripts)
+  send neither Origin nor Referer and aren't affected.
+- **Open playback surface.** Dashboard auth does **not** cover
+  `/playlist.m3u`, `/epg.xml`, `/stream/*`, `/multiview/*`, or the HMAC-signed
+  legacy relay routes. Anyone who can reach the listen port can enumerate
+  channels and watch streams. Put Jellyball behind a firewall, VPN, or TLS
+  reverse proxy on network binds; do not expose the port to the public
+  internet.
 - **Signed relay URLs.** The legacy `/chunk`, `/resource`, and
   `/substream.m3u8` routes (used for fMP4/demuxed-audio/SAMPLE-AES sources
   that can't go through the main session engine) only serve HMAC-signed
   URLs that Jellyball itself wrote when rewriting a playlist — they are not
   an open fetch relay for arbitrary URLs.
+- **Generated secrets** (`dashboard-password.txt`, `relay-signing.key`) are
+  written with mode `0600` on platforms that support it. The generated
+  dashboard password is not printed to the log; read it from the file (or
+  set `DASHBOARD_PASSWORD` yourself).
 - **Failed-login lockout** per client, masked secret inputs (a blank field
   keeps the existing value; a checkbox is required to clear one), and
   re-entering the Jellyfin API key whenever you change the Jellyfin host.

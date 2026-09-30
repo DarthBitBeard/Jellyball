@@ -10,10 +10,10 @@ import re
 import time
 import urllib.parse
 from collections import OrderedDict
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import httpx
-from playwright.async_api import async_playwright, Browser, Page, Playwright
+from playwright.async_api import async_playwright, Browser, Playwright
 
 from config import _log_failure, _validate_upstream_url, LOGGER
 import state
@@ -39,36 +39,6 @@ _provider_priority = {
     for index, name in enumerate(os.getenv("STREAM_PROVIDER_PRIORITY", "").split(","))
     if name.strip()
 }
-
-# --- OPTIONAL DEPENDENCIES FALLBACKS ---
-try:
-    from thefuzz import fuzz
-except ImportError:
-    from difflib import SequenceMatcher
-    class FuzzFallback:
-        @staticmethod
-        def partial_ratio(s1, s2):
-            return int(SequenceMatcher(None, s1.lower(), s2.lower()).find_longest_match(0, len(s1), 0, len(s2)).size / max(len(s1), 1) * 100)
-        @staticmethod
-        def token_set_ratio(s1, s2):
-            t1 = " ".join(sorted(s1.lower().split()))
-            t2 = " ".join(sorted(s2.lower().split()))
-            return int(SequenceMatcher(None, t1, t2).ratio() * 100)
-    fuzz = FuzzFallback()
-
-
-async def safe_get_content(page: Page, retries: int = 3, delay: float = 1.0) -> str:
-    """Safely retrieves page content, waiting out active page navigations."""
-    for attempt in range(retries):
-        try:
-            return await page.content()
-        except Exception as exc:
-            _log_failure("read Playwright page content", exc)
-            if attempt < retries - 1:
-                await asyncio.sleep(delay)
-            else:
-                return ""
-    return ""
 
 class BaseProvider:
     name = "Base"
@@ -176,6 +146,17 @@ def _provider_breaker_failure(provider: str) -> None:
     record["failures"] += 1
     if record["failures"] >= PROVIDER_BREAKER_FAILURES:
         record["opened_at"] = time.monotonic()
+
+
+def provider_breaker_snapshot() -> Dict[str, dict]:
+    """Public view of circuit-breaker state for /metrics and dashboards."""
+    return {
+        name: {
+            "failures": int(record.get("failures", 0)),
+            "open": _provider_breaker_open(name),
+        }
+        for name, record in _PROVIDER_BREAKERS.items()
+    }
 
 
 def _provider_search_semaphore() -> asyncio.Semaphore:
@@ -1246,12 +1227,12 @@ async def master_scrape(
     team_id: str = "",
     search_terms: Optional[List[str]] = None,
     always_live: bool = False,
-    on_partial: Optional[Callable[[List[dict]], None]] = None,
+    on_partial: Optional[Callable[[List[dict]], Union[None, Awaitable[None]]]] = None,
 ) -> List[dict]:
     """Search every provider for the team's streams. `on_partial`, if given, is
     called with each provider's playable results as they arrive (ranked), so an
     emergency rescrape can put a channel back on air without waiting for the
-    slowest provider's timeout."""
+    slowest provider's timeout. May be sync or async."""
     identity = canonical_team_name(team_name or query)
     if search_terms:
         search_terms = list(dict.fromkeys(term.strip() for term in search_terms if term and term.strip()))
@@ -1313,7 +1294,9 @@ async def master_scrape(
             if playable:
                 try:
                     ranked = rank_streams(playable, await _get_active_provider_priority())
-                    on_partial(ranked[:MAX_STREAM_CANDIDATES])
+                    result = on_partial(ranked[:MAX_STREAM_CANDIDATES])
+                    if asyncio.iscoroutine(result):
+                        await result
                 except Exception as exc:
                     _log_failure("apply partial scrape results", exc)
         return res
