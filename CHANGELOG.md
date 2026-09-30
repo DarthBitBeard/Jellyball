@@ -97,8 +97,7 @@ signed-optional Windows service installer with a supported Docker image.
 - **Dashboard password enforcement.** Binding to anything other than
   loopback now requires a dashboard password. If `DASHBOARD_PASSWORD` isn't
   set, Jellyball generates one on first start and stores it in
-  `dashboard-password.txt` in the data directory (Docker also prints it to
-  `docker logs`).
+  `dashboard-password.txt` in the data directory.
 - **CSRF protection.** A pure-ASGI middleware rejects cross-site
   POST/PUT/PATCH/DELETE requests to the dashboard by checking the browser's
   `Origin`/`Referer` against the request's `Host`.
@@ -244,9 +243,8 @@ signed-optional Windows service installer with a supported Docker image.
   localhost.** If you bind to a network address (`JELLYBALL_HOST=0.0.0.0`,
   a Docker deployment, or a LAN IP) without `DASHBOARD_PASSWORD` set,
   Jellyball generates a random password on first start and writes it to
-  `dashboard-password.txt` in the data directory. In Docker, it's also
-  printed to `docker logs jellyball`. Set `DASHBOARD_PASSWORD` explicitly to
-  choose your own.
+  `dashboard-password.txt` in the data directory. Set `DASHBOARD_PASSWORD`
+  explicitly to choose your own.
 - **Playback Settings → Advanced Settings.** The old dashboard sliders were
   replaced by the Advanced Settings registry on the Settings tab. Any
   slider values you had saved carry over automatically as the equivalent

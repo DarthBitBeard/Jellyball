@@ -27,7 +27,7 @@ services:
       - JELLYBALL_HOST=0.0.0.0
       - MULTIVIEW_HWACCEL=${MULTIVIEW_HWACCEL:-none}
       - DASHBOARD_USERNAME=${DASHBOARD_USERNAME:-admin}
-      # Leave empty to have Jellyball generate one (saved under /app/data; see logs).
+      # Leave empty to generate one (saved under /app/data/dashboard-password.txt).
       - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}

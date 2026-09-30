@@ -84,10 +84,10 @@ Building the installer yourself: see [Building from source](#building-from-sourc
    edit what you need (at minimum, review `DASHBOARD_PASSWORD`).
 2. `docker compose up -d`
 3. Open `http://<server-ip>:8000`. Docker binds `0.0.0.0` by default, so if
-   you didn't set `DASHBOARD_PASSWORD`, check the generated one with
-   `docker logs jellyball` (also saved to `/app/data/dashboard-password.txt`,
-   i.e. `./data/dashboard-password.txt` on the host with the default
-   compose volume mount).
+   you didn't set `DASHBOARD_PASSWORD`, read the generated password from
+   `/app/data/dashboard-password.txt` (i.e. `./data/dashboard-password.txt`
+   on the host with the default compose volume). Logs point at that file;
+   they do not print the password itself.
 
 Multi-View under Docker falls back to software encoding
 (`MULTIVIEW_HWACCEL=none`) unless you build a CUDA-enabled image and wire up
@@ -244,7 +244,8 @@ Machine-readable endpoints (all behind dashboard auth except `/healthz`):
   dashboard password. Anything else — Docker's `0.0.0.0`, a LAN address —
   requires one: if `DASHBOARD_PASSWORD` isn't set, Jellyball generates a
   random one on first start and saves it to `dashboard-password.txt` in the
-  data directory (and prints it to `docker logs` in the container image).
+  data directory (not printed to logs — read the file, or set
+  `DASHBOARD_PASSWORD` yourself).
   Even in open (loopback, no password) mode, requests must present a
   loopback `Host` header, closing a DNS-rebinding path to the dashboard.
 - **CSRF check.** A pure-ASGI middleware rejects cross-site

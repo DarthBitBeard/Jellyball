@@ -69,7 +69,8 @@ docker compose up -d
 ```
 
 Open `http://<server-ip>:8000`. If you didn't set a password, Jellyball
-generates one: see `docker logs jellyball`, or `./data/dashboard-password.txt`.
+generates one and saves it to `./data/dashboard-password.txt` (logs only
+point at that file — they do not print the password).
 
 ### From source
 
