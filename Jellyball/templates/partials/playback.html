@@ -1,0 +1,57 @@
+<div class="card">
+    <h3>Advanced Settings</h3>
+    <p class="hint-text">Leave a field blank to use its default (the .env value, or the built-in default). Changes apply immediately.</p>
+    <form action="/settings/advanced" method="post" style="display: flex; flex-direction: column; gap: 1.25rem;">
+        {% for group in advanced_settings_groups %}
+        <fieldset style="border: 1px solid var(--border); border-radius: 8px; padding: 1rem;">
+            <legend style="padding: 0 0.5rem; font-weight: 700;">{{ group.name }}</legend>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem;">
+                {% for item in group.fields %}
+                <div>
+                    <label style="font-size: 0.85rem; color: var(--text-soft); font-weight: 600; display: block; margin-bottom: 0.35rem;" for="adv-{{ item.name }}">{{ item.label }}{% if item.overridden %} <span class="badge">changed</span>{% endif %}</label>
+                    <input type="number" id="adv-{{ item.name }}" name="{{ item.name }}" step="{{ item.step }}" min="{{ item.min }}" max="{{ item.max }}" value="{{ item.value if item.overridden else '' }}" placeholder="{{ item.default }}">
+                    <p class="hint-text" style="margin: 0.25rem 0 0;">{{ item.hint }}</p>
+                </div>
+                {% endfor %}
+            </div>
+        </fieldset>
+        {% endfor %}
+        <button type="submit" style="width: auto; align-self: flex-start;">💾 Save Advanced Settings</button>
+    </form>
+</div>
+<div class="card">
+    <h3>Update Check</h3>
+    <p class="hint-text">Running Jellyball {{ version }}. When enabled, Jellyball asks GitHub twice a day whether a newer release exists and shows a notice here. Nothing else is sent.</p>
+    <form action="/settings/update-check" method="post" style="display: flex; align-items: center; gap: 0.75rem;">
+        <input type="checkbox" name="enabled" value="true" id="update-toggle" {{ 'checked' if update_check_enabled else '' }} style="width: auto; cursor: pointer;">
+        <label for="update-toggle" style="cursor: pointer;">Check for new versions</label>
+        <button type="submit" style="width: auto; margin-left: auto;">💾 Save</button>
+    </form>
+</div>
+<div class="card">
+    <h3>Off-season Channels</h3>
+    <p class="hint-text">By default a team's channel leaves Jellyfin's channel list and guide between seasons. Keep them listed instead, with an "Off-season" guide entry showing when the season resumes.</p>
+    <form action="/settings/offseason" method="post" style="display: flex; align-items: center; gap: 0.75rem;">
+        <input type="checkbox" name="enabled" value="true" id="offseason-toggle" {{ 'checked' if show_offseason_channels else '' }} style="width: auto; cursor: pointer;">
+        <label for="offseason-toggle" style="cursor: pointer;">Keep off-season channels in Jellyfin</label>
+        <button type="submit" style="width: auto; margin-left: auto;">💾 Save</button>
+    </form>
+</div>
+<div class="card">
+    <h3>Provider Rotation</h3>
+    <p class="hint-text">When enabled, the preferred provider for tie-broken stream matches rotates hourly instead of always favoring the same aggregator, spreading load across sources.</p>
+    <form action="/settings/provider-rotation" method="post" style="display: flex; align-items: center; gap: 0.75rem;">
+        <input type="checkbox" name="enabled" value="true" id="rotation-toggle" {{ 'checked' if provider_rotation_enabled else '' }} style="width: auto; cursor: pointer;">
+        <label for="rotation-toggle" style="cursor: pointer;">Enable provider rotation mode</label>
+        <button type="submit" style="width: auto; margin-left: auto;">💾 Save</button>
+    </form>
+</div>
+<div class="card">
+    <h3>Import/Export Team Configuration</h3>
+    <p class="hint-text">Backup or transfer your team selections to another Jellyball instance.</p>
+    <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
+        <a href="/api/export-config" download="jellyball-config.json" style="display: inline-block; padding: 0.85rem 1.5rem; background: var(--accent); color: white; border-radius: 8px; text-decoration: none; font-weight: 600; cursor: pointer;">📥 Export Configuration</a>
+        <button type="button" onclick="document.getElementById('import-file').click()" style="width: auto; padding: 0.85rem 1.5rem;">📤 Import Configuration</button>
+        <input type="file" id="import-file" accept=".json" style="display: none;" onchange="importConfig(this.files[0])">
+    </div>
+</div>

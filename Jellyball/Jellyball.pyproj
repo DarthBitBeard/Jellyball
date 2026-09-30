@@ -21,8 +21,22 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="main.py" />
-    <Compile Include="sports_catalog.py" />
+    <Compile Include="*.py" />
+    <Compile Include="tools\*.py" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="build-installer.ps1" />
+    <Content Include="jellyball.spec" />
+    <Content Include="installer\jellyball.iss" />
+    <Content Include="requirements.txt" />
+    <Content Include="requirements-build.txt" />
+    <Content Include="Dockerfile" />
+    <Content Include="README.md" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="assets\" />
+    <Folder Include="installer\" />
+    <Folder Include="tools\" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in

@@ -1,0 +1,6 @@
+# Build-only dependencies for producing the Windows installer (PyInstaller +
+# Inno Setup). Not needed to run Jellyball itself - see requirements.txt for
+# runtime dependencies, which this also installs.
+-r requirements.txt
+pyinstaller==6.22.2
+pywin32==312; sys_platform == "win32"

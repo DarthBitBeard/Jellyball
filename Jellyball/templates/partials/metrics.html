@@ -1,0 +1,60 @@
+<div class="card">
+    <h3>Provider Health Leaderboard</h3>
+    <p class="hint-text">Success rates based on failover history. Higher is better.</p>
+    <div style="background: var(--surface-2); padding: 1rem; border-radius: 8px; border: 1px solid var(--border);">
+        {% if provider_health %}
+        {% for p in provider_health %}
+        <div style="margin-bottom: 0.75rem;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
+                <span>{{ p.provider }}</span>
+                <span style="color: {{ p.rate_color }}; font-weight: 700;">{{ '%.1f'|format(p.rate) }}%</span>
+            </div>
+            <div style="background: var(--surface-3); height: 6px; border-radius: 3px; overflow: hidden;">
+                <div style="background: {{ p.rate_color }}; height: 100%; width: {{ '%.1f'|format(p.rate) }}%; transition: width 0.4s var(--ease);"></div>
+            </div>
+            <span class="hint-text">{{ p.total }} total checks</span>
+        </div>
+        {% endfor %}
+        {% else %}
+        <span style="color: var(--text-muted); font-size: 0.85rem;">No provider data yet.</span>
+        {% endif %}
+    </div>
+</div>
+<div class="card">
+    <h3>Stream Stability &amp; Provider Metrics</h3>
+    <div style="margin-bottom: 1.25rem;">
+        <div>
+            {% if failover_stats %}
+            {% for f in failover_stats %}
+            <span class="badge" style="margin-right: 0.5rem; background: var(--border-strong);">{{ f.provider }}: {{ f.count }} failover(s)</span>
+            {% endfor %}
+            {% else %}
+            <span style="color: var(--text-muted); font-size: 0.85rem;">No failover incidents recorded yet.</span>
+            {% endif %}
+        </div>
+    </div>
+    <div style="overflow-x: auto;">
+        <table>
+            <thead>
+                <tr style="border-bottom: 1px solid var(--border-strong); text-align: left; font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase;">
+                    <th style="padding: 0.5rem;">Time (UTC)</th><th style="padding: 0.5rem;">Team</th><th style="padding: 0.5rem;">Event</th><th style="padding: 0.5rem;">Source</th><th style="padding: 0.5rem;">Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if events %}
+                {% for e in events %}
+                <tr style="border-bottom: 1px solid var(--border); font-size: 0.85rem;">
+                    <td style="padding: 0.5rem; color: var(--text-muted);">{{ e.ts }}</td>
+                    <td style="padding: 0.5rem; font-weight: 600;">{{ e.team_id }}</td>
+                    <td style="padding: 0.5rem;"><span style="background: {{ e.badge_color }}; color: white; padding: 0.15rem 0.4rem; border-radius: 4px;">{{ e.ev_type }}</span></td>
+                    <td style="padding: 0.5rem; color: var(--text-soft);">{{ e.prov }}</td>
+                    <td style="padding: 0.5rem; color: var(--text-muted);">{{ e.details }}</td>
+                </tr>
+                {% endfor %}
+                {% else %}
+                <tr><td colspan="5" style="padding: 1rem; text-align: center; color: var(--text-muted); font-size: 0.85rem;">No historical events recorded yet.</td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
