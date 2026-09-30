@@ -7,17 +7,25 @@ __pycache__/
 build/
 dist/
 *.spec.bak
+*.exe
+Jellyball/installer/Output/
 
 # SQLite database & local state
 *.db
 *.sqlite3
+data/
 
 # Environment variables
 .env
 .env.local
+.venv/
+.venv-build/
+venv/
+*.log
 
 # Visual Studio & VS Code
 .vs/
 .vscode/
 *.user
 *.suo
+.aider*

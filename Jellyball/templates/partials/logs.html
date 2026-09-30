@@ -1,0 +1,13 @@
+<div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem; margin-bottom:1rem; flex-wrap: wrap;">
+        <div><h3 style="margin-bottom:0.35rem;">Recent Application Logs</h3><p class="hint-text" style="margin:0;">The most recent 500 Jellyball log entries.</p></div>
+        <button type="button" class="btn-secondary" style="width:auto; white-space:nowrap;" onclick="loadLogs()">Refresh Logs</button>
+    </div>
+    <div style="display:flex; gap:1rem; align-items:center; flex-wrap: wrap; margin-bottom:0.75rem;">
+        <input id="log-filter" type="text" placeholder="Filter log lines..." style="flex:1; min-width:220px;" aria-label="Filter log lines">
+        <label style="display:flex; align-items:center; gap:0.4rem; font-size:0.85rem; color: var(--text-soft); white-space: nowrap;">
+            <input type="checkbox" id="log-autorefresh" style="width:auto; cursor:pointer;"> Auto-refresh
+        </label>
+    </div>
+    <pre id="log-viewer" class="log-viewer">Loading logs...</pre>
+</div>
