@@ -651,25 +651,25 @@ class JellyballChangesTests(unittest.TestCase):
             "#EXTINF:6.000,\n"
             "3166961940.ts\n"
         )
-        manifest_url = "https://4169it.7odxv0l067ka.net:8443/live/stream.m3u8"
+        manifest_url = "https://cdn.example.test:8443/live/stream.m3u8"
         _register_manifest_segments(manifest_text, manifest_url)
 
         # Non-sequential IDs (jump of 369,360) are resolved directly from manifest
         next_chunks = _get_next_manifest_chunks(
-            "https://4169it.7odxv0l067ka.net:8443/live/3165856830.ts",
+            "https://cdn.example.test:8443/live/3165856830.ts",
             count=2,
         )
         self.assertEqual(
             next_chunks,
             [
-                "https://4169it.7odxv0l067ka.net:8443/live/3166226190.ts",
-                "https://4169it.7odxv0l067ka.net:8443/live/3166595550.ts",
+                "https://cdn.example.test:8443/live/3166226190.ts",
+                "https://cdn.example.test:8443/live/3166595550.ts",
             ],
         )
 
         # End of playlist does not extrapolate fake IDs
         last_chunks = _get_next_manifest_chunks(
-            "https://4169it.7odxv0l067ka.net:8443/live/3166961940.ts",
+            "https://cdn.example.test:8443/live/3166961940.ts",
             count=2,
         )
         self.assertEqual(last_chunks, [])
@@ -688,7 +688,7 @@ class JellyballChangesTests(unittest.TestCase):
             try:
                 with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(legacy_proxy, "PREFETCH_CHUNK_COUNT", 0):
                     await prefetch_next_chunks(
-                        "https://4169it.7odxv0l067ka.net:8443/live/3165856830.ts"
+                        "https://cdn.example.test:8443/live/3165856830.ts"
                     )
             finally:
                 await client.aclose()
@@ -708,7 +708,7 @@ class JellyballChangesTests(unittest.TestCase):
             "#EXTINF:6.000,\n"
             "3166595550.ts\n"
         )
-        manifest_url = "https://4169it.7odxv0l067ka.net:8443/live/stream.m3u8"
+        manifest_url = "https://cdn.example.test:8443/live/stream.m3u8"
         _register_manifest_segments(manifest_text, manifest_url)
 
         requested_urls = []
@@ -722,7 +722,7 @@ class JellyballChangesTests(unittest.TestCase):
             try:
                 with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(legacy_proxy, "PREFETCH_CHUNK_COUNT", 2):
                     await prefetch_next_chunks(
-                        "https://4169it.7odxv0l067ka.net:8443/live/3165856830.ts",
+                        "https://cdn.example.test:8443/live/3165856830.ts",
                         referer=manifest_url,
                     )
             finally:
@@ -735,8 +735,8 @@ class JellyballChangesTests(unittest.TestCase):
         self.assertEqual(
             sorted(requested_urls),
             sorted([
-                "https://4169it.7odxv0l067ka.net:8443/live/3166226190.ts",
-                "https://4169it.7odxv0l067ka.net:8443/live/3166595550.ts",
+                "https://cdn.example.test:8443/live/3166226190.ts",
+                "https://cdn.example.test:8443/live/3166595550.ts",
             ]),
         )
 
