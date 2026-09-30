@@ -19,5 +19,6 @@ playwright==1.62.0
 pystray==0.19.5
 pillow==12.1.1
 bcrypt==5.0.0
+cryptography==50.0.1
 tzdata==2025.3
 pywin32==312; sys_platform == "win32"
