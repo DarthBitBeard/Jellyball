@@ -43,6 +43,9 @@ export JELLYBALL_E2E=1
 python -m unittest test_e2e_tools -v
 ```
 
+Optional: run `pip install pre-commit && pre-commit install` to have ruff and a
+few basic hygiene hooks run on every commit.
+
 ## What makes a good PR
 
 - Keep the change focused; separate unrelated fixes
@@ -55,3 +58,6 @@ python -m unittest test_e2e_tools -v
 Use GitHub Issues for bugs and feature requests. Include OS, install method
 (Windows installer / Docker / source), Jellyball version, and relevant log
 lines from the data directory (redact passwords and webhook URLs).
+
+Do not report security problems in a public issue. Follow
+[SECURITY.md](SECURITY.md) instead.

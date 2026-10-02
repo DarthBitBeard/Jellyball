@@ -1,0 +1,65 @@
+name: Bug report
+description: Report something that is not working as expected
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Jellyball version
+      description: "Shown by `/healthz` and on the dashboard."
+    validations:
+      required: true
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How do you run it?
+      options:
+        - Windows installer (service)
+        - Windows installer (tray)
+        - Docker
+        - From source on Windows
+        - From source on Linux
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+    validations:
+      required: true
+  - type: input
+    id: jellyfin-version
+    attributes:
+      label: Jellyfin version
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: "From `jellyball.log` in the data directory. Remove passwords, webhook URLs and API keys first."
+      render: text
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched existing issues first
+          required: true
+        - label: I removed secrets from everything I pasted
+          required: true
