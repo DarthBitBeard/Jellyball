@@ -31,6 +31,7 @@ from scrapers import (
     HtmlAggregatorScraper,
 )
 import catalog
+import dashboard_cards
 from catalog import _season_resume_label, get_catalog_entries
 from alerts import (
     get_jellyfin_config,
@@ -338,6 +339,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         "provider_rotation_enabled": provider_rotation_enabled,
         "dashboard_data": {},
     }
+    context.update(await dashboard_cards.template_context(request))
     return TEMPLATES.TemplateResponse(request, "dashboard.html", context)
 
 def _secret_input(name: str, saved_value: str) -> dict:

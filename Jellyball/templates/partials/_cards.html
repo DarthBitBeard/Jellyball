@@ -1,0 +1,7 @@
+{#- Cards that feature modules registered for one tab (see dashboard_cards.py).
+    Rendered at the end of a tab pane with `pane` set to the tab key. -#}
+{% for card in cards_by_tab.get(pane, []) %}
+{% with ctx = card_contexts[card.name] %}
+{% include card.template %}
+{% endwith %}
+{% endfor %}
