@@ -22,7 +22,20 @@
         <button type="submit" class="btn-secondary" style="border-color: var(--purple); color: var(--purple-text); flex: 1;">🍇 Test Jellyfin Connection</button>
         <span id="jellyfin-status" style="font-size: 0.9rem; min-width: 120px;"></span>
     </form>
-    <p class="hint-text">Tests the API connection and shows whether the refresh task will work correctly.</p>
+    <p class="hint-text">Triggers a guide refresh now and tells you which step failed if it doesn't work: the server can't be reached, the API key is rejected, or no Refresh Guide task exists.</p>
+    {% if jellyfin_status.server or jellyfin_status.last_refresh %}
+    <div id="jellyfin-integration-status" style="margin-top: 0.75rem; font-size: 0.85rem; display: grid; gap: 0.25rem;">
+        {% if jellyfin_status.server %}
+        <div>Jellyfin <strong>{{ jellyfin_status.server.version }}</strong>{% if jellyfin_status.server.name %} &middot; {{ jellyfin_status.server.name }}{% endif %}{% if jellyfin_status.server.tested is sameas false %} <span style="color: var(--warning);">&#9888; outside the tested range ({{ jellyfin_tested_range }})</span>{% endif %}</div>
+        {% endif %}
+        {% if jellyfin_status.last_refresh %}
+        <div>Last guide refresh:
+            {% if jellyfin_status.last_refresh.ok %}<span style="color: var(--success);">&#9989; OK</span> at {{ jellyfin_status.last_refresh.when }}{% if jellyfin_status.last_refresh.header %} (via the {{ jellyfin_status.last_refresh.header }} header){% endif %}
+            {% else %}<span style="color: var(--danger);">&#10060; Failed</span> at {{ jellyfin_status.last_refresh.when }} &mdash; {{ jellyfin_status.last_refresh.reason }}{% endif %}
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
 </div>
 <div class="card">
     <h3>🌐 Provider Domains</h3>

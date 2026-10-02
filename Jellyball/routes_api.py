@@ -23,6 +23,7 @@ from db import (
 from security import verify_dashboard_auth
 from catalog import _season_resume_label, get_catalog_entries, is_stream_window_active
 from alerts import request_jellyfin_guide_refresh_if_changed
+from jellyfin_client import load_status as load_jellyfin_status
 from updates import _update_available, _UPDATE_STATE
 from legacy_proxy import CHUNK_CACHE
 import ffmpeg_proc
@@ -405,4 +406,7 @@ async def api_version(auth: bool = Depends(verify_dashboard_auth)):
         "latest": _UPDATE_STATE.get("latest") or None,
         "update_available": _update_available(),
         "release_url": _UPDATE_STATE.get("url") or None,
+        # Jellyfin version last seen and the outcome of the last guide refresh
+        # (both null until an attempt has been made; no secrets).
+        "jellyfin": await load_jellyfin_status(),
     }

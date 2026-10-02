@@ -50,7 +50,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # tray (pystray needs a display this container doesn't have) and bound to 0.0.0.0
 # so the EXPOSE'd port is actually reachable from outside the container. Because
 # that is a network bind, the dashboard requires a password: set
-# DASHBOARD_PASSWORD, or use the one generated on first start (printed in
-# `docker logs jellyball`, saved to /app/data/dashboard-password.txt).
+# DASHBOARD_PASSWORD, or use the one generated on first start (saved to
+# /app/data/dashboard-password.txt; it is not printed to the logs).
 CMD ["python", "main.py"]
 

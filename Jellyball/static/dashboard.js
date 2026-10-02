@@ -374,6 +374,10 @@ window.addEventListener('DOMContentLoaded', () => {
     const statusMessages = {
         'jellyfin_success': '✅ Jellyfin connection successful!',
         'jellyfin_failed': '❌ Jellyfin connection failed',
+        'jellyfin_failed_config': '❌ Enter the Jellyfin URL and API key first',
+        'jellyfin_failed_unreachable': '❌ Cannot reach Jellyfin - check the server URL and that Jellyfin is running',
+        'jellyfin_failed_auth': '❌ Jellyfin rejected the API key',
+        'jellyfin_failed_task': '❌ Connected, but no Refresh Guide task was found - is Live TV set up in Jellyfin?',
         'jellyfin_key_required': '❌ Re-enter the API key when changing the Jellyfin server',
         'jellyfin_saved': '✅ Jellyfin settings saved',
         'team_added': '✅ Channel added',
