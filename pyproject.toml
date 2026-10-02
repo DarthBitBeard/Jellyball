@@ -130,11 +130,41 @@ extend-immutable-calls = [
 python_version = "3.12"
 ignore_missing_imports = true
 check_untyped_defs = false
-# Lenient on purpose: Jellyball's source has no type annotations to speak of
-# yet, so this section exists as a starting point for opting in gradually. It
-# is intentionally NOT wired into .github/workflows/ci.yml - `mypy Jellyball`
-# currently reports errors (untyped/duck-typed FastAPI + sqlite3 code, a lot
-# of `Any`-shaped dict state) and nothing in source was changed to fix that.
-# Add the CI step once a `mypy Jellyball` run is clean or narrowed with
-# per-module overrides.
 warn_unused_configs = true
+# Type checking is opt-in per module, run by the "typecheck" job in
+# .github/workflows/ci.yml as `mypy --config-file pyproject.toml` from the repo
+# root. Most of Jellyball is unannotated, duck-typed FastAPI/sqlite3 code, so
+# only modules whose own errors are already zero are listed. Add a module here
+# once `mypy` is clean for it; never loosen this list to make a failure go away.
+# Not yet clean (own-file error counts when this list was made): db 1,
+# catalog 2, ffmpeg_proc 2, routes_api 2, routes_dashboard 2, security 2,
+# alerts 3, placeholder 3, hls_session 4, ts_normalize 4, scrapers 4,
+# legacy_proxy 5, multiview 7, network_safety 9, stream_extractor 15, epg 25,
+# failover 30.
+files = [
+    "Jellyball/channels.py",
+    "Jellyball/config.py",
+    "Jellyball/jellyball_launcher.py",
+    "Jellyball/main.py",
+    "Jellyball/routes_stream.py",
+    "Jellyball/sessions.py",
+    "Jellyball/sports_catalog.py",
+    "Jellyball/sports_matcher.py",
+    "Jellyball/state.py",
+    "Jellyball/tunables.py",
+    "Jellyball/updates.py",
+    "Jellyball/version.py",
+]
+mypy_path = "Jellyball"
+# The listed modules import the unlisted ones; report errors only for the listed.
+follow_imports = "silent"
+
+[tool.coverage.run]
+# CI runs it from Jellyball/ with --rcfile=../pyproject.toml (see ci.yml), so
+# "." is the application directory. The report is informational: there is
+# deliberately no minimum yet.
+source = ["."]
+omit = ["*/test_*.py", "*/tools/*", "*/.venv*/*", "*/create_brand_assets.py"]
+
+[tool.coverage.report]
+skip_empty = true
