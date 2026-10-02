@@ -33,6 +33,7 @@ from scrapers import (
 import catalog
 import dashboard_cards
 from catalog import _season_resume_label, get_catalog_entries
+from leagues import LEAGUES
 from alerts import (
     get_jellyfin_config,
     get_notification_config,
@@ -122,12 +123,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
             provider_health.append({"provider": prov, "rate": rate, "rate_color": rate_color, "total": total})
 
     catalog_group_defs = (
-        ("ncaaf", "College Football"),
-        ("ncaam", "College Basketball"),
-        ("nfl", "NFL"),
-        ("mlb", "MLB"),
-        ("nhl", "NHL"),
-        ("nba", "NBA"),
+        *((league.key, league.group_title) for league in LEAGUES),
         ("special", "Always-Live Sports Channels"),
     )
     catalog_groups = []

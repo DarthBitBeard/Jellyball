@@ -11,6 +11,7 @@ from typing import Optional
 import httpx
 
 from config import _log_failure, LOGGER
+from leagues import SCHEDULE_LEAGUES
 import state
 
 
@@ -26,16 +27,6 @@ async def fetch_espn_team_schedule(
     league is unknown."""
     # Late import: catalog imports this module, so it is reached at call time.
     from catalog import _resolve_espn_team
-    api_map = {
-        "nfl": ("football", "nfl"),
-        "ncaaf": ("football", "college-football"),
-        "ncaam": ("basketball", "mens-college-basketball"),
-        "ncaa": ("football", "college-football"),
-        "nba": ("basketball", "nba"),
-        "mlb": ("baseball", "mlb"),
-        "nhl": ("hockey", "nhl"),
-        "soccer": ("soccer", "usa.1")
-    }
 
     matched_sport: Optional[str] = category
     matched_slug: Optional[str] = source_id
@@ -44,20 +35,15 @@ async def fetch_espn_team_schedule(
     if not matched_sport or not matched_slug:
         return None, None, False
 
-    if matched_sport not in api_map:
+    if matched_sport not in SCHEDULE_LEAGUES:
         return None, None, False
 
-    sport, league = api_map[matched_sport]
+    schedule_league = SCHEDULE_LEAGUES[matched_sport]
+    sport, league = schedule_league.espn_sport, schedule_league.espn_league
     url = f"https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams/{matched_slug}/schedule"
 
     now_utc = datetime.now(timezone.utc)
-    duration_by_sport = {
-        "football": timedelta(hours=4),
-        "basketball": timedelta(hours=3),
-        "baseball": timedelta(hours=4),
-        "hockey": timedelta(hours=3),
-        "soccer": timedelta(hours=2.5),
-    }
+    game_duration = schedule_league.game_duration
     upcoming = []
     owns_client = state.SHARED_HTTP_CLIENT is None
     client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=8.0, follow_redirects=True, http2=True)
@@ -75,7 +61,7 @@ async def fetch_espn_team_schedule(
                 if dt_start.tzinfo is None:
                     dt_start = dt_start.replace(tzinfo=timezone.utc)
                 dt_start = dt_start.astimezone(timezone.utc)
-                dt_stop = dt_start + duration_by_sport.get(sport, timedelta(hours=3))
+                dt_stop = dt_start + game_duration
                 if dt_stop >= now_utc - timedelta(hours=1) and dt_start <= now_utc + timedelta(days=14):
                     upcoming.append((dt_start, dt_stop))
         if upcoming:

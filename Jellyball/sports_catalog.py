@@ -13,6 +13,19 @@ from dataclasses import dataclass, replace
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from leagues import (
+    COLLEGE_CATEGORIES,
+    COLLEGE_LOGO_SPORT,
+    COLLEGE_RECORD_CATEGORY,
+    LEAGUES,
+    MLB,
+    NBA,
+    NCAAF,
+    NCAAM,
+    NFL,
+    NHL,
+)
+
 
 @dataclass(frozen=True)
 class TeamSlug:
@@ -27,10 +40,10 @@ class TeamSlug:
 
     @property
     def is_college(self) -> bool:
-        return self.category in {"college", "ncaaf", "ncaam"}
+        return self.category == COLLEGE_RECORD_CATEGORY or self.category in COLLEGE_CATEGORIES
 
     def for_category(self, category: str) -> "TeamSlug":
-        if not self.is_college or category not in {"ncaaf", "ncaam"}:
+        if not self.is_college or category not in COLLEGE_CATEGORIES:
             return self
         return replace(self, category=category)
 
@@ -71,14 +84,14 @@ def _record(
         canonical=normalize_team_label(canonical),
         category=category,
         slug=str(slug),
-        logo_sport=logo_sport or ("ncaa" if category == "college" else category),
+        logo_sport=logo_sport or (COLLEGE_LOGO_SPORT if category == COLLEGE_RECORD_CATEGORY else category),
         aliases=tuple(normalize_team_label(alias) for alias in aliases if normalize_team_label(alias)),
         team_id=str(slug),
     )
 
 
 MLB_TEAMS: Tuple[TeamSlug, ...] = tuple(
-    _record(canonical, slug, aliases, "mlb")
+    _record(canonical, slug, aliases, MLB.key)
     for canonical, slug, aliases in (
         ("arizona diamondbacks", "ari", ("arizona", "diamondbacks", "dbacks", "ari")),
         ("atlanta braves", "atl", ("atlanta", "braves", "atl")),
@@ -115,7 +128,7 @@ MLB_TEAMS: Tuple[TeamSlug, ...] = tuple(
 
 
 NHL_TEAMS: Tuple[TeamSlug, ...] = tuple(
-    _record(canonical, slug, aliases, "nhl")
+    _record(canonical, slug, aliases, NHL.key)
     for canonical, slug, aliases in (
         ("anaheim ducks", "ana", ("anaheim", "ducks", "ana")),
         ("boston bruins", "bos", ("boston", "bruins", "bos")),
@@ -338,7 +351,7 @@ SPECIAL_CHANNELS: Tuple[SpecialChannel, ...] = (
 # deriving a slug from a display name. Generic nicknames remain in aliases so
 # the matcher can use them only when they are unambiguous.
 NFL_TEAMS: Tuple[TeamSlug, ...] = tuple(
-    _record(canonical, slug, aliases, "nfl")
+    _record(canonical, slug, aliases, NFL.key)
     for canonical, slug, aliases in (
         ("arizona cardinals", "ari", ("arizona", "cardinals", "ari", "az")),
         ("atlanta falcons", "atl", ("atlanta", "falcons", "atl")),
@@ -376,7 +389,7 @@ NFL_TEAMS: Tuple[TeamSlug, ...] = tuple(
 )
 
 NBA_TEAMS: Tuple[TeamSlug, ...] = tuple(
-    _record(canonical, slug, aliases, "nba")
+    _record(canonical, slug, aliases, NBA.key)
     for canonical, slug, aliases in (
         ("atlanta hawks", "atl", ("atlanta", "hawks", "atl")),
         ("boston celtics", "bos", ("boston", "celtics", "bos")),
@@ -416,7 +429,7 @@ NBA_TEAMS: Tuple[TeamSlug, ...] = tuple(
 # are an offline fallback; the runtime directory refresh adds the complete
 # season-specific NCAAF and NCAAM team lists when ESPN is reachable.
 COLLEGE_TEAMS: Tuple[TeamSlug, ...] = tuple(
-    _record(canonical, team_id, aliases, "college", "ncaa")
+    _record(canonical, team_id, aliases, COLLEGE_RECORD_CATEGORY, COLLEGE_LOGO_SPORT)
     for canonical, team_id, aliases in (
         ("alabama crimson tide", "333", ("alabama", "crimson tide", "bama", "roll tide")),
         ("appalachian state mountaineers", "2026", ("appalachian state", "app state", "mountaineers")),
@@ -541,24 +554,24 @@ def build_static_slug_map() -> Dict[str, Tuple[str, str]]:
 def category_hint(value: str) -> str:
     normalized = normalize_team_label(value)
     if re.search(r"\b(?:nfl|pro football)\b", normalized):
-        return "nfl"
+        return NFL.key
     if re.search(r"\b(?:nba|pro basketball)\b", normalized):
-        return "nba"
+        return NBA.key
     if re.search(r"\b(?:mlb|major league baseball|baseball)\b", normalized):
-        return "mlb"
+        return MLB.key
     if re.search(r"\b(?:nhl|pro hockey|hockey)\b", normalized):
-        return "nhl"
+        return NHL.key
     if re.search(r"\b(?:ncaaf|cfb|college football)\b", normalized):
-        return "ncaaf"
+        return NCAAF.key
     if re.search(r"\b(?:ncaam|mens college basketball|men college basketball|college basketball)\b", normalized):
-        return "ncaam"
+        return NCAAM.key
     return ""
 
 
 def _filter_category(records: Iterable[TeamSlug], category: str) -> List[TeamSlug]:
     if not category:
         return list(records)
-    if category in {"ncaaf", "ncaam"}:
+    if category in COLLEGE_CATEGORIES:
         return [record for record in records if record.is_college]
     return [record for record in records if record.category == category]
 
@@ -608,7 +621,7 @@ def find_team_identity(
     else:
         selected = next(iter(unique.values()))
 
-    if selected.is_college and selected_category in {"ncaaf", "ncaam"}:
+    if selected.is_college and selected_category in COLLEGE_CATEGORIES:
         return selected.for_category(selected_category)
     return selected
 
@@ -656,12 +669,12 @@ def parse_espn_team_directory(data: Mapping[str, Any], category: str) -> Tuple[T
             str(team.get("abbreviation") or ""),
             slug.replace("-", " "),
         }
-        is_college = category in {"ncaaf", "ncaam"}
+        is_college = category in COLLEGE_CATEGORIES
         record = TeamSlug(
             canonical=normalize_team_label(canonical),
-            category="college" if is_college else category,
+            category=COLLEGE_RECORD_CATEGORY if is_college else category,
             slug=slug,
-            logo_sport="ncaa" if is_college else category,
+            logo_sport=COLLEGE_LOGO_SPORT if is_college else category,
             aliases=tuple(sorted({normalize_team_label(alias) for alias in aliases if normalize_team_label(alias)})),
             team_id=team_id or slug,
         )
@@ -680,13 +693,9 @@ def merge_team_indexes(*indexes: Mapping[str, Sequence[TeamSlug]]) -> Dict[str, 
     return {alias: tuple(records) for alias, records in merged.items()}
 
 
+# Both derived from the league registry (leagues.py); test_leagues.py freezes them.
 ESPN_DIRECTORY_ENDPOINTS: Dict[str, Tuple[str, str]] = {
-    "nfl": ("football", "nfl"),
-    "ncaaf": ("football", "college-football"),
-    "nba": ("basketball", "nba"),
-    "ncaam": ("basketball", "mens-college-basketball"),
-    "mlb": ("baseball", "mlb"),
-    "nhl": ("hockey", "nhl"),
+    league.key: (league.espn_sport, league.espn_league) for league in LEAGUES
 }
 
 
@@ -694,12 +703,7 @@ ESPN_DIRECTORY_ENDPOINTS: Dict[str, Tuple[str, str]] = {
 # covering preseason through the championship. A category with no entry here
 # (e.g. manually added "custom" teams) is treated as always in season.
 SEASON_WINDOWS: Dict[str, Tuple[int, int, int, int]] = {
-    "nfl": (8, 1, 2, 15),      # Hall of Fame Game/preseason through the Super Bowl
-    "ncaaf": (8, 1, 1, 22),    # fall camp/preseason through the CFP national championship
-    "nba": (10, 1, 6, 30),     # preseason through the NBA Finals
-    "ncaam": (11, 1, 4, 10),   # season tip-off through the men's national championship
-    "nhl": (9, 15, 6, 30),     # preseason through the Stanley Cup Final
-    "mlb": (2, 15, 11, 10),    # spring training through the World Series
+    league.key: league.season_window for league in LEAGUES if league.season_window is not None
 }
 
 

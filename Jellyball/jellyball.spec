@@ -124,6 +124,7 @@ for _dashboard_dir_name in ("templates", "static"):
 
 binaries = []
 hiddenimports = [
+    "leagues",
     "sports_catalog",
     "sports_matcher",
     "stream_extractor",

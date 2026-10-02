@@ -14,6 +14,7 @@ import httpx
 
 from config import _log_failure, _safe_team_id, LOGGER
 import state
+from leagues import CATALOG_CATEGORIES, COLLEGE_CATEGORIES, LEAGUES
 from network_safety import bounded_float
 from sports_catalog import (
     ESPN_DIRECTORY_ENDPOINTS,
@@ -39,7 +40,7 @@ CATALOG_FAILURE_RETRY_SECONDS = bounded_float(os.getenv("CATALOG_FAILURE_RETRY_S
 def _static_catalog_records(category: str) -> List[TeamSlug]:
     records: List[TeamSlug] = []
     for record in STATIC_TEAM_RECORDS:
-        if category in {"ncaaf", "ncaam"}:
+        if category in COLLEGE_CATEGORIES:
             if record.is_college:
                 records.append(record.for_category(category))
         elif record.category == category:
@@ -82,7 +83,7 @@ async def get_team_catalog() -> Dict[str, Tuple[TeamSlug, ...]]:
         if _CATALOG_CACHE and now - _CATALOG_CACHE_LOADED_AT < CATALOG_REFRESH_SECONDS:
             return dict(_CATALOG_CACHE)
 
-        categories = ("ncaaf", "ncaam", "nfl", "mlb", "nhl", "nba")
+        categories = CATALOG_CATEGORIES
         grouped: Dict[str, Dict[Tuple[str, str, str], TeamSlug]] = {
             category: {
                 _catalog_record_key(record): record
@@ -101,11 +102,11 @@ async def get_team_catalog() -> Dict[str, Tuple[TeamSlug, ...]]:
         )
         try:
             remote_results = await asyncio.gather(
-                *(_fetch_espn_directory(category, client) for category in ("ncaaf", "ncaam")),
+                *(_fetch_espn_directory(category, client) for category in COLLEGE_CATEGORIES),
                 return_exceptions=True,
             )
             remote_success = False
-            for category, result in zip(("ncaaf", "ncaam"), remote_results):
+            for category, result in zip(COLLEGE_CATEGORIES, remote_results):
                 if isinstance(result, tuple) and result:
                     remote_success = True
                     grouped[category] = {
@@ -137,10 +138,7 @@ def _catalog_team_id(category: str, source_id: str, name: str) -> str:
     return _safe_team_id(f"{category}_{source_id or name}")
 
 
-_COLLEGE_CATEGORY_LABELS = {
-    "ncaaf": "Football",
-    "ncaam": "Men's Basketball",
-}
+_COLLEGE_CATEGORY_LABELS = {league.key: league.sport_label for league in LEAGUES if league.sport_label}
 
 
 def _sport_labeled_name(name: str, category: str) -> str:
@@ -171,14 +169,7 @@ _SPECIAL_CHANNELS_BY_LABEL = {
     for label in (channel.name, *channel.search_terms)
     if _normalize_channel_label(label)
 }
-_CATEGORY_GROUP_LABELS = {
-    "ncaaf": "College Football",
-    "ncaam": "College Basketball",
-    "nfl": "NFL",
-    "mlb": "MLB",
-    "nhl": "NHL",
-    "nba": "NBA",
-}
+_CATEGORY_GROUP_LABELS = {league.key: league.group_title for league in LEAGUES}
 
 
 def _special_channel_for(data: dict):
@@ -274,7 +265,7 @@ def _special_catalog_entry(channel) -> dict:
 async def get_catalog_entries() -> List[dict]:
     grouped = await get_team_catalog()
     entries: List[dict] = []
-    for category in ("ncaaf", "ncaam", "nfl", "mlb", "nhl", "nba"):
+    for category in CATALOG_CATEGORIES:
         entries.extend(_team_catalog_entry(category, record) for record in grouped.get(category, ()))
     entries.extend(_special_catalog_entry(channel) for channel in SPECIAL_CHANNELS)
     return entries
@@ -336,17 +327,12 @@ def _resolve_espn_team(team_name: str) -> tuple[Optional[str], Optional[str], st
     return None, None, identity
 
 
+_CATEGORY_LOGO_SPORTS = {league.key: league.logo_sport for league in LEAGUES}
+
+
 def resolve_espn_logo(team_name: str, category: str = "", source_id: str = "") -> str:
-    category_logo_sports = {
-        "nfl": "nfl",
-        "ncaaf": "ncaa",
-        "ncaam": "ncaa",
-        "nba": "nba",
-        "mlb": "mlb",
-        "nhl": "nhl",
-    }
-    if category in category_logo_sports and source_id:
-        return f"{_ESPN_LOGO_CDN}/{category_logo_sports[category]}/500/{source_id}.png?v=titan2"
+    if category in _CATEGORY_LOGO_SPORTS and source_id:
+        return f"{_ESPN_LOGO_CDN}/{_CATEGORY_LOGO_SPORTS[category]}/500/{source_id}.png?v=titan2"
     sport, slug, _ = _resolve_espn_team(team_name)
     if sport and slug:
         return f"{_ESPN_LOGO_CDN}/{sport}/500/{slug}.png?v=titan2"
