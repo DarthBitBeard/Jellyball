@@ -1,15 +1,15 @@
 # Runtime dependencies, pinned for reproducible installer and Docker builds.
 # Bump deliberately and re-run the test suite; Playwright's version also pins
 # the Chromium revision that gets bundled.
-fastapi==0.128.8
-starlette==0.52.1
-uvicorn==0.52.4
+fastapi==0.142.2
+starlette==1.7.0
+uvicorn==0.54.0
 httptools==0.8.0
 httpx[http2]==0.28.1
 h2==4.4.1
-beautifulsoup4==4.14.3
+beautifulsoup4==4.15.0
 lxml==6.1.3
-python-dotenv==1.2.1
+python-dotenv==1.2.4
 python-multipart==0.0.32
 jinja2==3.1.6
 markupsafe==3.0.3
@@ -17,8 +17,8 @@ thefuzz==0.22.1
 rapidfuzz==3.14.6
 playwright==1.62.0
 pystray==0.19.5
-pillow==12.1.1
+pillow==12.3.0
 bcrypt==5.0.0
-cryptography==50.0.1
-tzdata==2025.3
+cryptography==50.0.2
+tzdata==2026.4
 pywin32==312; sys_platform == "win32"

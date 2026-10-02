@@ -5,6 +5,17 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+### Security
+
+- **Dependency refresh closes every published advisory.** `pip-audit` reported
+  24 advisories in three pinned packages: Starlette (5, fixed in 1.3.1),
+  Pillow (18, fixed in 12.3.0) and python-dotenv (1). Starlette moves from
+  0.52.1 to 1.7.0, which brings FastAPI 0.128.8 to 0.142.2 and uvicorn
+  0.52.4 to 0.54.0; Pillow is now 12.3.0 and python-dotenv 1.2.4. Also
+  refreshed: cryptography 50.0.2, beautifulsoup4 4.15.0, tzdata 2026.4.
+  Playwright stays at 1.62.0 because it pins the bundled Chromium build. No
+  configuration or URL changes.
+
 ## [2.0.1] - 2026-10-02
 
 A small Jellyfin 12 compatibility fix for the automatic guide refresh, plus
