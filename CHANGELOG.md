@@ -16,6 +16,21 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
   Playwright stays at 1.62.0 because it pins the bundled Chromium build. No
   configuration or URL changes.
 
+### Added
+
+- **Automatic database backup before a schema migration.** When an upgrade
+  has to change the database layout, Jellyball first copies the database to
+  `sports_proxy.db.bak-<version>` next to it (the newest three copies are
+  kept; a brand-new install makes none). The README's troubleshooting section
+  explains how to roll back with a copy.
+
+### Internal
+
+- A 2.0.0 compatibility test suite freezes channel ids, `tvg-id`s, the exact
+  M3U playlist, XMLTV channel ids, the public routes and database upgrades, so
+  refactors cannot silently break an existing Jellyfin setup. CI also gained
+  non-required coverage, mypy, Python 3.13 and `pip-audit` jobs.
+
 ## [2.0.1] - 2026-10-02
 
 A small Jellyfin 12 compatibility fix for the automatic guide refresh, plus
