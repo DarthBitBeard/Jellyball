@@ -501,6 +501,13 @@ All five are also editable in Advanced Settings ("Legacy proxy" group).
 - **Locked out of the dashboard**: check `dashboard-password.txt` in the
   data directory for a generated password, or set `DASHBOARD_PASSWORD`
   yourself and restart.
+- **Rolling back an upgrade**: before the first start after an update that
+  changes the database layout, Jellyball copies the database next to itself
+  as `sports_proxy.db.bak-<version>` (the newest three copies are kept). To
+  go back, stop Jellyball, install the older version, delete
+  `sports_proxy.db-wal` and `sports_proxy.db-shm` if they exist, and replace
+  `sports_proxy.db` with the copy. Stale `-wal`/`-shm` files left next to a
+  restored database can corrupt it.
 
 ---
 

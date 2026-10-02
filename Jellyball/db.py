@@ -17,9 +17,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from config import _log_failure, DATA_DIR, LOGGER
+from version import __version__
 
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
+# How many pre-migration database backups to keep (see _backup_before_migrating).
+BACKUPS_TO_KEEP = 3
 
 _configured_db = Path(os.getenv("DB_FILE", "sports_proxy.db"))
 DB_FILE = str(_configured_db if _configured_db.is_absolute() else DATA_DIR / _configured_db)
@@ -157,14 +160,68 @@ SCHEMA_MIGRATIONS = [
 ]
 
 
+def _database_has_user_data(conn: sqlite3.Connection) -> bool:
+    """True when the database already holds someone's data, i.e. it is not the
+    empty file a first start has just created."""
+    for table in ("teams", "app_settings", "multiview_channels"):
+        try:
+            if conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                return True
+        except sqlite3.OperationalError:
+            continue  # table absent (a very old database): nothing to protect there
+    return False
+
+
+def _prune_old_backups(keep: int = BACKUPS_TO_KEEP) -> None:
+    db_path = Path(DB_FILE)
+    backups = [p for p in db_path.parent.glob(db_path.name + ".bak-*") if not p.name.endswith(".part")]
+    backups.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for stale in backups[keep:]:
+        try:
+            stale.unlink()
+        except OSError as exc:
+            _log_failure(f"remove old database backup {stale.name}", exc, logging.WARNING)
+
+
+def _backup_before_migrating(conn: sqlite3.Connection) -> Optional[str]:
+    """Copy the database to `<DB_FILE>.bak-<app version>` before its schema is
+    migrated, so an upgrade that goes wrong can be undone by restoring that file
+    while the service is stopped. The first backup made by a given app version
+    is kept; only the newest BACKUPS_TO_KEEP are retained. A failure is logged
+    and does not block the upgrade: migrations are transactional, and a service
+    that will not start is worse than a missing safety copy."""
+    target = f"{DB_FILE}.bak-{__version__}"
+    if os.path.exists(target):
+        return target
+    partial = target + ".part"
+    try:
+        destination = sqlite3.connect(partial)
+        try:
+            conn.backup(destination)
+        finally:
+            destination.close()
+        os.replace(partial, target)
+    except Exception as exc:
+        _log_failure("back up the database before migrating it", exc, logging.WARNING)
+        try:
+            os.remove(partial)
+        except OSError:
+            pass
+        return None
+    LOGGER.info("Backed up the database to %s before migrating its schema", target)
+    _prune_old_backups()
+    return target
+
+
 def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT)"
     )
     applied = {row[0] for row in conn.execute("SELECT version FROM schema_migrations").fetchall()}
-    for version, migration in SCHEMA_MIGRATIONS:
-        if version in applied:
-            continue
+    pending = [(version, migration) for version, migration in SCHEMA_MIGRATIONS if version not in applied]
+    if pending and _database_has_user_data(conn):
+        _backup_before_migrating(conn)
+    for version, migration in pending:
         migration(conn)
         conn.execute(
             "INSERT OR REPLACE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
