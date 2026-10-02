@@ -2,7 +2,7 @@
 # Bump deliberately and re-run the test suite; Playwright's version also pins
 # the Chromium revision that gets bundled.
 fastapi==0.128.8
-starlette==0.52.1
+starlette==1.7.0
 uvicorn==0.52.4
 httptools==0.8.0
 httpx[http2]==0.28.1
