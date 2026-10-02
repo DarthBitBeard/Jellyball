@@ -143,6 +143,7 @@ hiddenimports = [
     "alerts",
     "updates",
     "legacy_proxy",
+    "upstream",
     "ffmpeg_proc",
     "placeholder",
     "sessions",

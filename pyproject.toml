@@ -166,6 +166,7 @@ files = [
     "Jellyball/state.py",
     "Jellyball/tunables.py",
     "Jellyball/updates.py",
+    "Jellyball/upstream.py",
     "Jellyball/version.py",
 ]
 mypy_path = "Jellyball"

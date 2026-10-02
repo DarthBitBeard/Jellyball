@@ -21,7 +21,8 @@ from state import _media_client, _spawn_background_task, PLACEHOLDER_SESSION_ID,
 from db import _METRIC_WRITER
 import engine_settings
 import engine_stats
-from legacy_proxy import _fetch_upstream_body, _hls_response, _legacy_proxy_stream, HLS_MEDIA_TYPE
+from upstream import _fetch_upstream_body, _hls_response, HLS_MEDIA_TYPE
+from legacy_proxy import _legacy_proxy_stream
 import ffmpeg_proc
 import placeholder
 from placeholder import _ensure_placeholder_running, _placeholder_cooldown_remaining

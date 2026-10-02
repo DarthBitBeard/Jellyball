@@ -21,7 +21,7 @@ import config
 from config import _log_failure, DATA_DIR, LOGGER
 from state import _spawn_background_task, PLACEHOLDER_SESSION_ID, stream_state
 from alerts import send_alert
-from legacy_proxy import HLS_MEDIA_TYPE
+from upstream import HLS_MEDIA_TYPE
 import ffmpeg_proc
 from ffmpeg_proc import (
     _create_run_job,
