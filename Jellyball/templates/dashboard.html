@@ -23,7 +23,7 @@
             <p>Multi-Aggregator Scraper &amp; Jellyfin Live TV Gateway</p>
             <div class="status-badges">
                 <span class="badge" title="{{ auth_badge.title }}">{{ auth_badge.text }}</span>
-                <span class="badge">{{ jellyfin_badge.text }}</span>
+                <span class="badge"{% if jellyfin_badge.title %} title="{{ jellyfin_badge.title }}"{% endif %}{% if jellyfin_badge.failing %} style="border-color: var(--danger); color: var(--danger);"{% endif %}>{{ jellyfin_badge.text }}</span>
                 <span class="badge">{{ webhook_discord_badge.text }}</span>
                 <span class="badge">{{ webhook_telegram_badge.text }}</span>
             </div>

@@ -5,38 +5,50 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-02
+
+A small Jellyfin 12 compatibility fix for the automatic guide refresh, plus
+documentation corrections. Nothing in the streaming path changed, and no
+configuration, URL or database change is needed to upgrade.
+
 ### Fixed
 
-- HLS sessions no longer advance `last_useq` on failed segment downloads, so a
-  transient CDN blip is retried on the next poll instead of permanently skipped.
-- Failover and emergency-rescrape candidate mutations are serialized on the
-  per-team state lock, closing races between `request_failover` and partial
-  scrape installs.
-- On `playlist forbidden`, same-host / same-provider standbys are no longer
-  burned before a token refresh rescrape lands.
+- **Automatic guide refresh on Jellyfin 12.** Jellyfin 12 deprecated the
+  legacy `X-Emby-Token` header that Jellyball used to authenticate its
+  "Refresh Guide" call, and a rejected call failed silently. Jellyball now
+  sends `Authorization: MediaBrowser Token="…"` first, falls back to the
+  legacy header, and remembers which one works, so it runs on Jellyfin 10.11
+  and 12.x.
+- A stale saved "Refresh Guide" task ID (for example after Jellyfin was
+  reinstalled) is rediscovered once automatically instead of failing forever.
+- Documentation that did not match the product: the dashboard-auth note now
+  lists the FastAPI `/docs`, `/redoc` and `/openapi.json` pages, which are
+  unauthenticated; the bandwidth cap is per session, not per client; removed
+  mentions of Jellyfin "event-time lookups", a manual-add control and a
+  test-alert button that the dashboard does not have; documented
+  `TRUST_X_FORWARDED_HOST`; and corrected the Docker note that the generated
+  dashboard password is printed to the logs (it is only written to
+  `dashboard-password.txt`).
 
-### Security
+### Added
 
-- CSRF Origin checks ignore `X-Forwarded-Host` unless `TRUST_X_FORWARDED_HOST=1`.
-- Generated `dashboard-password.txt` and `relay-signing.key` are written with
-  mode `0600`; the generated dashboard password is no longer logged in plaintext.
+- **Visible Jellyfin status.** The Alerts & Integrations tab shows the Jellyfin
+  version and the outcome of the last guide refresh (OK, or why it failed:
+  server unreachable, API key rejected, or no "Refresh Guide" task). A failing
+  refresh also flags the Jellyfin badge in the dashboard header, and "Test
+  Jellyfin Connection" now names the step that failed. `/api/version` reports
+  the same data under `jellyfin`. A failure is logged once with its HTTP
+  status (repeats at most hourly) and never includes the API key.
 
 ### Changed
 
-- `/metrics` exports failover-reason counters, deferred-failover counts,
-  emergency-rescrape totals/duration, provider circuit-breaker state, Playwright
-  page usage, and aggregate session memory.
-- `stream_state` entries are typed via `ChannelState` / `new_channel_state()`.
-- Release workflow signing env vars match `build-installer.ps1`
-  (`AZURE_SIGNING_DLIB` / `AZURE_SIGNING_METADATA`).
-- CI runs e2e tool wrappers (Windows) and a Docker compose health smoke (Ubuntu).
+- Outbound Jellyfin and webhook requests identify as `Jellyball/<version>`.
+- The OpenAPI title is "Jellyball" (it was an internal codename).
+- The 2.0.0 entry below now also lists the post-release-candidate hardening
+  that the `v2.0.0` tag already contained, and carries the actual release
+  date.
 
-### Removed
-
-- Dead `FuzzFallback` / unused `fuzz` import and `safe_get_content` from
-  `scrapers.py`; unused `CACHE_TTL_SECONDS` from `legacy_proxy.py`.
-
-## [2.0.0] - 2026-09-27
+## [2.0.0] - 2026-09-30
 
 Jellyball 2.0.0 is a stability and packaging release. The streaming core was
 rebuilt around per-channel sessions with a real TS normalizer so failovers no
@@ -157,6 +169,13 @@ signed-optional Windows service installer with a supported Docker image.
 - `DEFAULT_USER_AGENT`'s bundled fallback Chrome version was bumped to
   match the pinned Playwright browser build (override with
   `JELLYBALL_USER_AGENT`).
+- `/metrics` exports failover-reason counters, deferred-failover counts,
+  emergency-rescrape totals/duration, provider circuit-breaker state, Playwright
+  page usage, and aggregate session memory.
+- `stream_state` entries are typed via `ChannelState` / `new_channel_state()`.
+- Release workflow signing env vars match `build-installer.ps1`
+  (`AZURE_SIGNING_DLIB` / `AZURE_SIGNING_METADATA`).
+- CI runs e2e tool wrappers (Windows) and a Docker compose health smoke (Ubuntu).
 
 ### Fixed
 
@@ -185,6 +204,13 @@ signed-optional Windows service installer with a supported Docker image.
   reuse, reconnecting on `sqlite3.ProgrammingError`/`OperationalError`).
 - A DNS-only-private redirect target is now rejected by the live-stream
   health probe (SSRF hardening), not just the initial URL.
+- HLS sessions no longer advance `last_useq` on failed segment downloads, so a
+  transient CDN blip is retried on the next poll instead of permanently skipped.
+- Failover and emergency-rescrape candidate mutations are serialized on the
+  per-team state lock, closing races between `request_failover` and partial
+  scrape installs.
+- On `playlist forbidden`, same-host / same-provider standbys are no longer
+  burned before a token refresh rescrape lands.
 
 ### Security
 
@@ -205,6 +231,9 @@ signed-optional Windows service installer with a supported Docker image.
   HMAC-signed URLs now (see "Added" above).
 - Redirect hops and nested playlist/segment URL resolution in the live
   probe now use the DNS-checking URL validator, not the sync-only one.
+- CSRF Origin checks ignore `X-Forwarded-Host` unless `TRUST_X_FORWARDED_HOST=1`.
+- Generated `dashboard-password.txt` and `relay-signing.key` are written with
+  mode `0600`; the generated dashboard password is no longer logged in plaintext.
 
 ### Removed
 
@@ -217,6 +246,8 @@ signed-optional Windows service installer with a supported Docker image.
 - The dashboard's old "Playback Settings" sliders (see Advanced Settings
   above — saved slider values are carried over as the equivalent Advanced
   Settings override).
+- Dead `FuzzFallback` / unused `fuzz` import and `safe_get_content` from
+  `scrapers.py`; unused `CACHE_TTL_SECONDS` from `legacy_proxy.py`.
 
 ### Deprecated
 

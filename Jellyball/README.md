@@ -135,6 +135,18 @@ that was previously enabled is stopped and removed.
    Jellyfin's scheduler records the proxied stream into your normal TV
    library folder.
 
+**Automatic guide refresh (optional).** In Jellyball's **Alerts &
+Integrations** tab enter the Jellyfin URL and an API key (Jellyfin
+**Dashboard → API Keys**) and Jellyball asks Jellyfin to refresh its guide
+whenever the channel list or schedule changes. It authenticates with
+`Authorization: MediaBrowser Token="…"` and falls back to the legacy
+`X-Emby-Token` header, so it works on Jellyfin 10.11 and 12.x. The tab shows
+the Jellyfin version and the result of the last refresh; **Test Jellyfin
+Connection** triggers a refresh and says which step failed (server
+unreachable, API key rejected, or no *Refresh Guide* task found). A failing
+refresh also flags the Jellyfin badge in the dashboard header and is logged
+once with its HTTP status (never the key).
+
 Per-channel stream URLs are `/stream/{id}.m3u8` (HLS media playlists served
 by the session engine); you don't need to reference these directly, they
 come from the M3U playlist.
@@ -207,7 +219,7 @@ significantly higher CPU usage per composited grid.
 
 ## Dashboard tour
 
-- **Channels & Streams** — catalog selection, manual team tracking,
+- **Channels & Streams** — catalog selection,
   Multi-View creation, per-channel status/override/rescrape.
 - **Stability Metrics** — failover/uptime history per channel.
 - **Performance** — cache hit rates and provider timing.
@@ -218,13 +230,12 @@ significantly higher CPU usage per composited grid.
   of removing it), and the opt-in **update check** (polls GitHub Releases
   twice a day; shows a banner when a newer release exists; also reported at
   `/api/version`).
-- **Alerts & Integrations** — Discord/Telegram webhook config, test-alert
-  button, and the **Provider Domains** card (`POST /settings/providers`) to
-  change an aggregator's base URL live without restarting Jellyball or
-  editing `.env`.
+- **Alerts & Integrations** — Discord/Telegram webhook config and the
+  **Provider Domains** card (`POST /settings/providers`) to change an aggregator's
+  base URL live without restarting Jellyball or editing `.env`.
 - **Logs** — tails `jellyball.log`.
 
-Machine-readable endpoints (all behind dashboard auth except `/healthz`):
+Machine-readable endpoints (behind dashboard auth, except `/healthz` and FastAPI's own `/docs`, `/redoc` and `/openapi.json`, which are currently unauthenticated and only describe the API surface):
 
 | Endpoint | Purpose |
 | :--- | :--- |
@@ -307,6 +318,7 @@ below, commented out at its default.
 | `STREAM_PROVIDER_PRIORITY` | *(empty)* | Comma-separated provider names to break candidate ties, e.g. `iSportSurge,MyBuffStreams` |
 | `JELLYBALL_USER_AGENT` | *(Chrome build matching the pinned Playwright)* | Override the scraping/probe User-Agent |
 | `ALLOW_PRIVATE_UPSTREAMS` | `0` | Allow scraping/probing private or loopback addresses (testing only) |
+| `TRUST_X_FORWARDED_HOST` | `0` | Also trust `X-Forwarded-Host` for the dashboard's CSRF Origin check (enable only behind a reverse proxy that overwrites that header) |
 | `DNS_RESOLVE_TIMEOUT` | `2.0` | Timeout for a single DNS resolution during URL validation |
 
 ### Jellyfin
@@ -314,7 +326,7 @@ below, commented out at its default.
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `JELLYFIN_URL` | `http://localhost:8096` | Jellyfin base URL |
-| `JELLYFIN_API_KEY` | *(empty)* | API key for guide-refresh and event-time lookups |
+| `JELLYFIN_API_KEY` | *(empty)* | API key used to trigger Jellyfin's Refresh Guide task |
 | `JELLYFIN_TASK_ID` | *(empty)* | "Refresh Guide Data" task ID (auto-detected if blank) |
 | `JELLYFIN_AUTO_REFRESH_MIN_INTERVAL` | `600` | Minimum seconds between automatic guide-refresh triggers |
 
@@ -398,7 +410,7 @@ Webhook delivery retries up to twice (honoring `Retry-After`, capped at
 | `SESSION_IDLE_SECONDS` | `60` | Stop a channel's session after this many idle seconds | Adv |
 | `STREAM_STARTUP_TIMEOUT` | `20` | Wait this long for a channel to start before "No Signal" (s) | Adv |
 | `STARTUP_PLACEHOLDER_SECONDS` | `30` | How long "No Signal" is shown for a slow start (s) | Adv |
-| `STREAM_MAX_BANDWIDTH` | `0` (unlimited) | Per-client bandwidth cap, bits/second | |
+| `STREAM_MAX_BANDWIDTH` | `0` (unlimited) | Per-session bandwidth cap, bits/second (picks the highest HLS variant at or below it, else the lowest) | |
 | `SESSION_LIVE_EDGE_SEGMENTS` | `3` | Segments of buffer handed to a player at tune-in | Adv |
 | `SESSION_WINDOW_SECONDS` | `30` | Length of the proxy-built playlist window (s) | Adv |
 | `SESSION_STALE_SECONDS` | `15` | Fail over when no new segment arrives for at least this long (s) | Adv |

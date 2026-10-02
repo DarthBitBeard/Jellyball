@@ -368,7 +368,7 @@ class RequestDiagnosticsMiddleware:
             await response(scope, receive, send)
 
 
-app = FastAPI(title="Jellyfin Sports Proxy - Titan Engine", version=__version__, lifespan=lifespan)
+app = FastAPI(title="Jellyball", version=__version__, lifespan=lifespan)
 app.add_middleware(CsrfOriginMiddleware)
 app.add_middleware(RequestDiagnosticsMiddleware)
 

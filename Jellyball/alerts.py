@@ -13,9 +13,11 @@ import httpx
 
 from config import _log_failure, _validate_upstream_url, LOGGER
 from state import _spawn_background_task, stream_state
-from db import get_setting_async, log_metric_event_async, set_setting_async
+from db import get_setting_async
 import catalog
+from jellyfin_client import RefreshResult, refresh_guide
 from network_safety import bounded_float
+from version import __version__
 
 
 async def get_notification_config() -> dict:
@@ -95,7 +97,7 @@ async def send_alert(title: str, message: str, level: str = "warning"):
     tg_chat_id = config["telegram_chat_id"]
 
     color_map = {"info": 3066993, "warning": 16753920, "danger": 14431526, "success": 3647337}
-    headers = {"User-Agent": "Jellyball-Proxy/1.0"}
+    headers = {"User-Agent": f"Jellyball/{__version__}"}
     tasks = []
 
     if discord_url:
@@ -129,42 +131,14 @@ async def get_jellyfin_config() -> dict:
         "jellyfin_task_id": await get_setting_async("jellyfin_task_id", os.getenv("JELLYFIN_TASK_ID", ""))
     }
 
+async def refresh_jellyfin_guide() -> RefreshResult:
+    """Trigger Jellyfin's Refresh Guide task. The result says which step failed
+    (unreachable / API key rejected / no such task); see jellyfin_client."""
+    return await refresh_guide(await get_jellyfin_config())
+
+
 async def trigger_jellyfin_refresh() -> bool:
-    cfg = await get_jellyfin_config()
-    jellyfin_url = _validate_upstream_url(cfg["jellyfin_url"], allow_private=True)
-    api_key = cfg["jellyfin_api_key"]
-    task_id = cfg["jellyfin_task_id"]
-
-    if not jellyfin_url or not api_key:
-        return False
-
-    headers = {"X-Emby-Token": api_key, "User-Agent": "Jellyball-Proxy/1.0"}
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        if not task_id:
-            try:
-                tasks_resp = await client.get(f"{jellyfin_url}/ScheduledTasks", headers=headers)
-                if tasks_resp.status_code == 200:
-                    for t in tasks_resp.json():
-                        if t.get("Key") == "RefreshGuide" or "refresh guide" in t.get("Name", "").lower():
-                            task_id = t.get("Id", "")
-                            await set_setting_async("jellyfin_task_id", task_id)
-                            break
-            except Exception as exc:
-                _log_failure("discover Jellyfin guide task", exc)
-
-        if not task_id:
-            return False
-
-        url = f"{jellyfin_url}/ScheduledTasks/Running/{task_id}"
-        try:
-            response = await client.post(url, headers=headers)
-            if response.status_code in [200, 204]:
-                await log_metric_event_async("Jellyfin", "API", "guide_refresh", "Triggered Live TV Guide Refresh task")
-                return True
-            return False
-        except Exception as exc:
-            _log_failure("trigger Jellyfin guide refresh", exc)
-            return False
+    return (await refresh_jellyfin_guide()).ok
 
 
 JELLYFIN_AUTO_REFRESH_MIN_INTERVAL = bounded_float(

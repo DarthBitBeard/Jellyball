@@ -35,10 +35,12 @@ from catalog import _season_resume_label, get_catalog_entries
 from alerts import (
     get_jellyfin_config,
     get_notification_config,
+    refresh_jellyfin_guide,
     request_jellyfin_guide_refresh_if_changed,
     send_alert,
     trigger_jellyfin_refresh,
 )
+from jellyfin_client import TESTED_RANGE_TEXT, load_status as load_jellyfin_status
 from updates import _update_available, _UPDATE_STATE, check_for_update
 import ffmpeg_proc
 from ffmpeg_proc import FFMPEG_PATH
@@ -80,6 +82,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
     provider_totals = dashboard_metrics["provider_totals"]
     notif_cfg = await get_notification_config()
     jellyfin_cfg = await get_jellyfin_config()
+    jellyfin_status = await load_jellyfin_status()
     provider_rotation_enabled = await get_setting_async("provider_rotation_mode", "0") == "1"
     provider_url_rows = [
         {
@@ -170,7 +173,19 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         auth_badge = {"text": "\U0001f512 Password Protected", "title": ""}
     webhook_discord_badge = {"text": "Discord Alert On" if notif_cfg["discord_webhook_url"] else "Discord Off"}
     webhook_telegram_badge = {"text": "Telegram Alert On" if (notif_cfg["telegram_bot_token"] and notif_cfg["telegram_chat_id"]) else "Telegram Off"}
-    jellyfin_badge = {"text": "\U0001f347 Jellyfin Auto-Refresh On" if jellyfin_cfg["jellyfin_api_key"] else "\U0001f347 Jellyfin Manual"}
+    jellyfin_badge = {
+        "text": "\U0001f347 Jellyfin Auto-Refresh On" if jellyfin_cfg["jellyfin_api_key"] else "\U0001f347 Jellyfin Manual",
+        "title": "",
+        "failing": False,
+    }
+    last_refresh = jellyfin_status["last_refresh"]
+    if jellyfin_cfg["jellyfin_api_key"] and last_refresh and not last_refresh.get("ok"):
+        # A broken guide refresh used to be invisible; surface it in the header.
+        jellyfin_badge = {
+            "text": "\U0001f347 Jellyfin Refresh Failing",
+            "title": f"{last_refresh.get('when', '')}: {last_refresh.get('reason', '')} (see Alerts & Integrations)",
+            "failing": True,
+        }
 
     def _channel_watch_fields(t_id: str, data: dict) -> dict:
         session = SESSIONS.peek(t_id)
@@ -311,6 +326,8 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         "events": events,
         "provider_url_rows": provider_url_rows,
         "jellyfin_cfg": jellyfin_cfg,
+        "jellyfin_status": jellyfin_status,
+        "jellyfin_tested_range": TESTED_RANGE_TEXT,
         "notif_cfg": notif_cfg,
         "jellyfin_api_key_secret": _secret_input("jellyfin_api_key", jellyfin_cfg['jellyfin_api_key']),
         "discord_webhook_secret": _secret_input("discord_webhook_url", notif_cfg['discord_webhook_url']),
@@ -383,10 +400,22 @@ async def update_jellyfin_settings(
     await set_setting_async("jellyfin_task_id", jellyfin_task_id.strip())
     return RedirectResponse(url="/?tab=alerts&status=jellyfin_saved", status_code=303)
 
+# Which step of the guide refresh failed -> the toast the dashboard shows.
+_JELLYFIN_TEST_STATUS = {
+    "config": "jellyfin_failed_config",
+    "reach": "jellyfin_failed_unreachable",
+    "auth": "jellyfin_failed_auth",
+    "discover": "jellyfin_failed_task",
+}
+
+
 @router.post("/settings/test_jellyfin")
 async def test_jellyfin_refresh_endpoint(auth: bool = Depends(verify_dashboard_auth)):
-    success = await trigger_jellyfin_refresh()
-    status_code = "jellyfin_success" if success else "jellyfin_failed"
+    result = await refresh_jellyfin_guide()
+    if result.ok:
+        status_code = "jellyfin_success"
+    else:
+        status_code = _JELLYFIN_TEST_STATUS.get(result.stage, "jellyfin_failed")
     return RedirectResponse(url=f"/?tab=alerts&status={status_code}", status_code=303)
 
 @router.post("/settings/test_alert")
