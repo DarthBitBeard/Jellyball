@@ -231,13 +231,20 @@ PUBLIC_ROUTES_2_0_0 = {
 }
 
 
+def _registered_routes() -> set:
+    """(METHOD, path template) for every route of the app, read from the OpenAPI
+    schema. That is the supported public view of the route table: `app.routes`
+    changed shape between FastAPI releases (newer ones wrap each included router
+    in a private object), and `app.openapi()` caches, so build the schema afresh."""
+    from fastapi.openapi.utils import get_openapi
+
+    schema = get_openapi(title="routes", version="0", routes=main.app.routes)
+    return {(method.upper(), path) for path, operations in schema["paths"].items() for method in operations}
+
+
 class RouteContractTests(unittest.TestCase):
     def test_every_2_0_0_public_route_is_still_registered(self):
-        registered = set()
-        for route in main.app.routes:
-            for method in getattr(route, "methods", None) or ():
-                registered.add((method, route.path))
-        self.assertEqual(sorted(PUBLIC_ROUTES_2_0_0 - registered), [])
+        self.assertEqual(sorted(PUBLIC_ROUTES_2_0_0 - _registered_routes()), [])
 
 
 # --- database upgrades --------------------------------------------------------
