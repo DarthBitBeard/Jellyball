@@ -1,5 +1,6 @@
 """Channel catalog: the ESPN team directory, special channels, logos,
-team schedules, season windows and per-channel listing/metadata helpers.
+season windows and per-channel listing/metadata helpers. Team schedules are
+fetched by espn_schedule.py.
 """
 
 import asyncio
@@ -23,6 +24,8 @@ from sports_catalog import (
     TeamSlug,
 )
 from sports_matcher import canonical_team_name
+# Defined in espn_schedule.py; re-exported here for `from catalog import ...`.
+from espn_schedule import fetch_espn_team_schedule
 
 
 CATALOG_REFRESH_SECONDS = bounded_float(os.getenv("CATALOG_REFRESH_SECONDS", "3600"), 3600.0, 60.0, 86400.0)
@@ -349,76 +352,6 @@ def resolve_espn_logo(team_name: str, category: str = "", source_id: str = "") -
         return f"{_ESPN_LOGO_CDN}/{sport}/500/{slug}.png?v=titan2"
     return ""
 
-
-async def fetch_espn_team_schedule(
-    team_name: str,
-    query: str = "",
-    category: str = "",
-    source_id: str = "",
-) -> tuple[Optional[datetime], Optional[datetime], bool]:
-    api_map = {
-        "nfl": ("football", "nfl"),
-        "ncaaf": ("football", "college-football"),
-        "ncaam": ("basketball", "mens-college-basketball"),
-        "ncaa": ("football", "college-football"),
-        "nba": ("basketball", "nba"),
-        "mlb": ("baseball", "mlb"),
-        "nhl": ("hockey", "nhl"),
-        "soccer": ("soccer", "usa.1")
-    }
-
-    matched_sport = category
-    matched_slug = source_id
-    if not matched_sport or not matched_slug:
-        matched_sport, matched_slug, _ = _resolve_espn_team(team_name or query)
-    if not matched_sport or not matched_slug:
-        return None, None, False
-    
-    if matched_sport not in api_map:
-        return None, None, False
-        
-    sport, league = api_map[matched_sport]
-    url = f"https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams/{matched_slug}/schedule"
-    
-    now_utc = datetime.now(timezone.utc)
-    duration_by_sport = {
-        "football": timedelta(hours=4),
-        "basketball": timedelta(hours=3),
-        "baseball": timedelta(hours=4),
-        "hockey": timedelta(hours=3),
-        "soccer": timedelta(hours=2.5),
-    }
-    upcoming = []
-    owns_client = state.SHARED_HTTP_CLIENT is None
-    client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=8.0, follow_redirects=True, http2=True)
-    try:
-        resp = await client.get(url)
-        if resp.status_code != 200:
-            LOGGER.warning("ESPN schedule request team=%s status=%s", team_name or query, resp.status_code)
-            return None, None, False
-        data = resp.json()
-        events = data.get("events", [])
-        for ev in events:
-            date_str = ev.get("date")
-            if date_str:
-                dt_start = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                if dt_start.tzinfo is None:
-                    dt_start = dt_start.replace(tzinfo=timezone.utc)
-                dt_start = dt_start.astimezone(timezone.utc)
-                dt_stop = dt_start + duration_by_sport.get(sport, timedelta(hours=3))
-                if dt_stop >= now_utc - timedelta(hours=1) and dt_start <= now_utc + timedelta(days=14):
-                    upcoming.append((dt_start, dt_stop))
-        if upcoming:
-            start, stop = min(upcoming, key=lambda event: event[0])
-            return start, stop, True
-        return None, None, True
-    except Exception as exc:
-        _log_failure(f"fetch ESPN schedule team={team_name or query}", exc)
-        return None, None, False
-    finally:
-        if owns_client:
-            await client.aclose()
-    return None, None, False
 
 def xmltv_ts(dt: datetime) -> str:
     return dt.strftime("%Y%m%d%H%M%S +0000")

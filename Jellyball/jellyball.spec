@@ -140,6 +140,7 @@ hiddenimports = [
     "security",
     "scrapers",
     "catalog",
+    "espn_schedule",
     "alerts",
     "updates",
     "legacy_proxy",
