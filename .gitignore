@@ -15,6 +15,11 @@ Jellyball/installer/Output/
 *.sqlite3
 data/
 
+# Test coverage output
+.coverage
+coverage.xml
+htmlcov/
+
 # Environment variables
 .env
 .env.local
