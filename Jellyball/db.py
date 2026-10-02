@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from config import _log_failure, DATA_DIR, LOGGER
+import migrations_engine
+import migrations_jellyfin
+import migrations_providers
+import migrations_setup
+import migrations_sports
 from version import __version__
 
 
@@ -149,15 +154,45 @@ def _migrate_add_team_indexes(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_teams_is_favorite ON teams (is_favorite)")
 
 
-# Ordered list of (version, migration_function). Append future migrations
-# here rather than editing an earlier one — each function receives the open
-# connection and must be idempotent, since a fresh DB's CREATE TABLE
-# statements above may already include what an earlier migration would
-# otherwise add.
-SCHEMA_MIGRATIONS = [
+# (version, migration_function) pairs. Append future migrations rather than
+# editing an earlier one — each function receives the open connection and
+# must be idempotent, since a fresh DB's CREATE TABLE statements above may
+# already include what an earlier migration would otherwise add.
+CORE_MIGRATIONS = [
     (1, _migrate_add_team_columns),
     (2, _migrate_add_team_indexes),
 ]
+
+# Feature lanes keep their migrations in their own migrations_<lane>.py and
+# own a reserved range of version numbers (inclusive), so work in parallel
+# never picks the same number or edits the same list. test_migrations_registry
+# checks that every lane stays inside its range and that no version repeats.
+MIGRATION_RANGES = {
+    "core": (1, 99),
+    "jellyfin": (100, 199),
+    "sports": (200, 299),
+    "providers": (300, 399),
+    "setup": (400, 499),
+    "engine": (500, 599),
+}
+_LANE_MIGRATION_MODULES = {
+    "jellyfin": migrations_jellyfin,
+    "sports": migrations_sports,
+    "providers": migrations_providers,
+    "setup": migrations_setup,
+    "engine": migrations_engine,
+}
+
+
+def _collect_migrations() -> list:
+    """Every lane's migrations merged into one list ordered by version."""
+    merged = list(CORE_MIGRATIONS)
+    for module in _LANE_MIGRATION_MODULES.values():
+        merged.extend(module.MIGRATIONS)
+    return sorted(merged, key=lambda item: item[0])
+
+
+SCHEMA_MIGRATIONS = _collect_migrations()
 
 
 def _database_has_user_data(conn: sqlite3.Connection) -> bool:
