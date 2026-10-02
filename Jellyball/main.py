@@ -87,6 +87,13 @@ from tunables import _load_tunable_overrides
 import routes_stream
 import routes_api
 import routes_dashboard
+# Feature-lane routers (empty until each lane adds its endpoints and dashboard
+# cards). Imported statically: PyInstaller cannot see dynamic discovery.
+import routes_engine
+import routes_jellyfin
+import routes_providers
+import routes_setup
+import routes_sports
 from network_safety import bounded_float
 from sports_matcher import get_team_search_terms
 from version import __version__
@@ -383,6 +390,15 @@ app.include_router(routes_stream.router)
 app.include_router(legacy_proxy.router)
 app.include_router(epg.router)
 app.include_router(routes_dashboard.router)
+# Included last, so a lane can never shadow an established route.
+for _lane_router in (
+    routes_jellyfin.router,
+    routes_sports.router,
+    routes_providers.router,
+    routes_setup.router,
+    routes_engine.router,
+):
+    app.include_router(_lane_router)
 
 
 # pystray/PIL are imported lazily in tray mode only: on a headless Linux host
