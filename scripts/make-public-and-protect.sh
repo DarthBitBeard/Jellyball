@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # Run this as the repo owner (DarthBitBeard) after `gh auth login`.
 # The cloud agent token cannot change visibility or branch protection.
+# HISTORICAL: already run (2026-09-30); refuses to run unless I_KNOW_THIS_IS_HISTORICAL=1.
 set -euo pipefail
+
+if [ "${I_KNOW_THIS_IS_HISTORICAL:-}" != "1" ]; then
+  echo 'This one-time script already ran (2026-09-30) and is kept for history only.' >&2
+  echo 'Its classic branch protection conflicts with the "Protect master" ruleset.' >&2
+  echo 'Use scripts/setup-branch-protection.sh instead.' >&2
+  echo 'To run this script anyway, set I_KNOW_THIS_IS_HISTORICAL=1.' >&2
+  exit 1
+fi
 
 REPO="${REPO:-DarthBitBeard/Jellyball}"
 BRANCH="${BRANCH:-master}"
