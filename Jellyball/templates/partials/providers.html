@@ -1,0 +1,8 @@
+<div class="card" id="provider-status-card" data-initial="{{ (ctx.providers or [])|tojson|forceescape }}">
+    <h3>🛰️ Provider Status</h3>
+    <p class="hint-text">Each provider's last success, how many events its index page listed (zero on every search means the site has likely changed or gone), and its circuit breaker. Test runs one search without touching these numbers. Enable and priority apply to the next search (a lower priority number ranks first).</p>
+    {% if ctx.error %}<p style="color: var(--danger-text);">Could not load provider status: {{ ctx.error }}</p>{% endif %}
+    <div id="provider-status-list" style="display: flex; flex-direction: column; gap: 0.75rem;">
+        <p style="color: var(--text-muted);">Loading...</p>
+    </div>
+</div>

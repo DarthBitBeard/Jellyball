@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 import config
 from config import _log_failure, _safe_team_id, LOG_FILE
 from state import is_multiview, stream_state
+import provider_tools
 from db import (
     _bulk_set_favorite_sync,
     _export_teams_sync,
@@ -398,12 +399,24 @@ async def get_playback_stats(auth: bool = Depends(verify_dashboard_auth)):
 
 @router.post("/api/test-stream/{team_id}")
 async def test_stream(team_id: str, auth: bool = Depends(verify_dashboard_auth)):
+    """Probe the channel's candidates for real (playlist plus one segment) instead of
+    echoing the in-memory health flag; the flag is still returned for comparison."""
     try:
         data = stream_state.get(team_id)
         candidates = data.get("candidates", []) if data else []
-        is_live = (len(candidates) > 0 or is_multiview(data)) and data.get("is_healthy", False)
+        probe = await provider_tools.probe_candidates(candidates)
+        # A Multi-View has no candidates of its own; it is live while its grid is healthy.
+        is_live = probe["live"] > 0 or bool(is_multiview(data) and data.get("is_healthy", False))
         await asyncio.to_thread(_record_stream_test_sync, team_id, is_live, len(candidates))
-        return {"team_id": team_id, "is_live": is_live, "candidate_count": len(candidates), "status": "✅ Live" if is_live else "❌ Offline"}
+        return {
+            "team_id": team_id,
+            "is_live": is_live,
+            "candidate_count": len(candidates),
+            "probed": probe["probed"],
+            "live_candidates": probe["live"],
+            "reported_healthy": bool(data and data.get("is_healthy", False)),
+            "status": "✅ Live" if is_live else "❌ Offline",
+        }
     except Exception as exc:
         _log_failure(f"test stream {team_id}", exc)
         return {"status": "error"}
