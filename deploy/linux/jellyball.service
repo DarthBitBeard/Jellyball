@@ -1,0 +1,56 @@
+# systemd unit for Jellyball on Linux. Install steps: deploy/linux/README.md
+#
+#   sudo cp jellyball.service /etc/systemd/system/jellyball.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now jellyball
+#
+# Layout this unit expects (all created by the README steps):
+#   /opt/jellyball/app     the Jellyball source (the Jellyball/ folder of a release)
+#   /opt/jellyball/venv    its Python virtual environment (with Playwright's Chromium)
+#   /etc/jellyball/jellyball.env   optional settings (KEY=value lines, see .env.example)
+#   /var/lib/jellyball     data: settings database, logs, generated dashboard password
+
+[Unit]
+Description=Jellyball sports proxy (Jellyfin Live TV tuner and guide)
+Documentation=https://github.com/DarthBitBeard/Jellyball
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jellyball
+Group=jellyball
+
+# StateDirectory creates /var/lib/jellyball owned by the service user.
+StateDirectory=jellyball
+WorkingDirectory=/opt/jellyball/app
+
+Environment=JELLYBALL_DATA_DIR=/var/lib/jellyball
+Environment=JELLYBALL_HEADLESS=1
+# Playwright was installed into the venv with PLAYWRIGHT_BROWSERS_PATH=0 (see
+# the README); this is also what Jellyball selects on its own when unset.
+Environment=PLAYWRIGHT_BROWSERS_PATH=0
+# Optional; the leading "-" means a missing file is not an error. Real
+# environment variables win over the data directory's .env.
+EnvironmentFile=-/etc/jellyball/jellyball.env
+
+ExecStart=/opt/jellyball/venv/bin/python /opt/jellyball/app/main.py
+
+# Jellyball exits non-zero when it cannot bind its port or crashes; restart it.
+Restart=on-failure
+RestartSec=10
+# uvicorn gets 10 s to drain streams, then the lifespan stops ffmpeg children.
+TimeoutStopSec=45
+
+# Hardening that does not interfere with headless Chromium or ffmpeg.
+# (MemoryDenyWriteExecute and RestrictNamespaces are deliberately NOT set:
+# Chromium needs both.)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
