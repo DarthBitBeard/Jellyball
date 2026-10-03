@@ -344,7 +344,7 @@ def prune_database_logs_once() -> None:
     """Delete old rows from every table that grows without bound, not just stream_events."""
     with _db_session() as conn:
         conn.execute("DELETE FROM stream_events WHERE timestamp < datetime('now', '-7 days')")
-        conn.execute("DELETE FROM provider_performance WHERE timestamp < datetime('now', '-7 days')")
+        conn.execute("DELETE FROM provider_performance WHERE timestamp < datetime('now', '-14 days')")
         conn.execute("DELETE FROM stream_test_results WHERE timestamp < datetime('now', '-7 days')")
         conn.execute("DELETE FROM playback_events WHERE timestamp < datetime('now', '-30 days')")
         conn.execute("DELETE FROM cache_metrics WHERE timestamp < datetime('now', '-7 days')")
@@ -746,7 +746,7 @@ def _performance_stats_sync() -> dict:
         # dark overnight (domain seizure, redesign, ownership change) and, unlike an
         # outright exception, a dead site often just returns zero results forever —
         # nothing else would ever flag that. A 5-day window (provider_performance is
-        # pruned at 7 days) with zero successes across enough attempts is a much
+        # pruned at 14 days) with zero successes across enough attempts is a much
         # stronger "this is actually gone" signal than the noisy 1-hour rate above.
         cursor.execute(
             """SELECT provider, SUM(success), COUNT(*) FROM provider_performance

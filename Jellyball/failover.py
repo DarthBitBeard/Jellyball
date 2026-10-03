@@ -594,14 +594,18 @@ async def _request_failover_unlocked(
     # from an earlier stint made its first failed probe fail over at once).
     candidates[next_index]["consecutive_failures"] = 0
     new_provider = candidates[next_index].get("provider", "Unknown")
+    old_provider = active.get("provider", "Unknown")
     SESSIONS.poke(team_id)
     LOGGER.info(
         "Failover team=%s from=%s to=%s reason=%s",
-        team_id, active.get("provider", "Unknown"), new_provider, reason,
+        team_id, old_provider, new_provider, reason,
     )
-    await log_metric_event_async(team_id, new_provider, "failover", reason)
+    # The event belongs to the provider that failed (the leaderboard counts
+    # failovers against the provider that was serving); the successor is kept in
+    # the details so neither side of the switch is lost.
+    await log_metric_event_async(team_id, old_provider, "failover", f"{reason} (to {new_provider})")
     data["failover_count"] = int(data.get("failover_count", 0)) + 1
-    data["last_failover"] = {"at": time.time(), "reason": reason, "to": new_provider}
+    data["last_failover"] = {"at": time.time(), "reason": reason, "from": old_provider, "to": new_provider}
     _note_failover_reason(reason)
     _send_failover_alert(team_id, data, team_name, new_provider)
     return True

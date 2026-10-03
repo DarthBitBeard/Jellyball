@@ -102,6 +102,7 @@ class LaneMigrationsRunTests(unittest.TestCase):
         jellyfin = [(100, self._fake("jellyfin_one"))]
         with patch.object(db.migrations_sports, "MIGRATIONS", sports), \
                 patch.object(db.migrations_jellyfin, "MIGRATIONS", jellyfin), \
+                patch.object(db.migrations_providers, "MIGRATIONS", []), \
                 patch.object(db, "SCHEMA_MIGRATIONS", db._collect_migrations()):
             db.init_db()
             db.init_db()  # a second start applies nothing again

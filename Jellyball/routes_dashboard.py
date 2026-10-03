@@ -32,6 +32,7 @@ from scrapers import (
 )
 import catalog
 import dashboard_cards
+import provider_telemetry
 from catalog import _season_resume_label, get_catalog_entries
 from leagues import LEAGUES
 from alerts import (
@@ -109,18 +110,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         if data.get("catalog_key")
     }
 
-    provider_health = []
-    if metrics["failovers_by_provider"]:
-        provider_stats = {}
-        for prov, count in metrics["failovers_by_provider"].items():
-            total = provider_totals.get(prov, 0) or 1
-            success_rate = max(0, 100 - (count * 100 / total)) if total > 0 else 100
-            provider_stats[prov] = (success_rate, count, total)
-
-        for prov in sorted(provider_stats.keys(), key=lambda p: provider_stats[p][0], reverse=True):
-            rate, fails, total = provider_stats[prov]
-            rate_color = "var(--success)" if rate > 90 else ("var(--warning)" if rate > 70 else "var(--danger)")
-            provider_health.append({"provider": prov, "rate": rate, "rate_color": rate_color, "total": total})
+    provider_health = await asyncio.to_thread(provider_telemetry.leaderboard_sync)
 
     catalog_group_defs = (
         *((league.key, league.group_title) for league in LEAGUES),
