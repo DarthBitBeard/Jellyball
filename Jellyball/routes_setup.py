@@ -23,15 +23,17 @@ from typing import Dict, List, Optional, Set
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 
+import diagnostics
+import http_hardening
 from alerts import get_jellyfin_config, refresh_jellyfin_guide
 from catalog import get_catalog_entries
 from channels import _set_catalog_entry_enabled
-from config import _public_base_url, _resource_path, _validate_upstream_url
+from config import _log_failure, _public_base_url, _resource_path, _validate_upstream_url
+from dashboard_cards import Card, register_card
 from db import set_setting_async
-import http_hardening
 from jellyfin_client import refresh_guide
 from leagues import LEAGUES
 from routes_dashboard import _catalog_selection_changes
@@ -246,3 +248,26 @@ async def swagger_ui(auth: bool = Depends(verify_dashboard_auth)) -> HTMLRespons
 async def redoc(auth: bool = Depends(verify_dashboard_auth)) -> HTMLResponse:
     _require_api_docs()
     return get_redoc_html(openapi_url="/openapi.json", title="Jellyball API")
+
+
+# --- X6: diagnostics bundle -----------------------------------------------------
+
+@router.get("/api/diagnostics.zip")
+async def diagnostics_bundle(auth: bool = Depends(verify_dashboard_auth)) -> Response:
+    """A redacted support bundle (see diagnostics.py for what is removed)."""
+    try:
+        payload = diagnostics.build_zip(await diagnostics.collect())
+    except Exception as exc:
+        _log_failure("build diagnostics bundle", exc)
+        raise HTTPException(status_code=500, detail="Could not build the diagnostics bundle") from exc
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{diagnostics.bundle_filename()}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+register_card(Card(tab="logs", name="setup_diagnostics", template="partials/setup_diagnostics.html", order=50))
