@@ -49,6 +49,11 @@ body:
     attributes:
       label: Steps to reproduce
   - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics bundle (2.1.0 and later)
+      description: "Dashboard -> Logs -> Download diagnostics makes a zip with secrets already removed. Read it, then drag it here."
+  - type: textarea
     id: logs
     attributes:
       label: Relevant log lines

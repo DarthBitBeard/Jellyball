@@ -180,6 +180,7 @@ hiddenimports = [
     "migrations_engine",
     # Setup, security and support lane (2.1.0 X-items).
     "http_hardening",
+    "diagnostics",
     "uvicorn.logging",
     "uvicorn.loops",
     "uvicorn.loops.auto",
