@@ -46,13 +46,26 @@ CHECKS = (
 )
 
 
+def _stop(server: subprocess.Popen) -> None:
+    """Stop the server and everything it started (the bundle spawns child processes
+    that would otherwise keep the data directory open on Windows)."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(server.pid)], capture_output=True)
+    else:
+        server.terminate()
+    try:
+        server.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        server.kill()
+
+
 def main(argv) -> int:
     if not argv:
         print(__doc__)
         return 2
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
-    with tempfile.TemporaryDirectory() as data_dir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as data_dir:
         env = dict(os.environ, PORT=str(port), JELLYBALL_DATA_DIR=data_dir, JELLYBALL_HEADLESS="1",
                    DASHBOARD_PASSWORD="", PYTHONUTF8="1")
         log_path = os.path.join(data_dir, "server.out")
@@ -72,11 +85,7 @@ def main(argv) -> int:
                     if not verdict:
                         failures.append(path)
             finally:
-                server.terminate()
-                try:
-                    server.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    server.kill()
+                _stop(server)
         if failures:
             print("--- server output ---")
             with open(log_path, "rb") as log:
