@@ -21,8 +21,9 @@ Rules (from the lane header):
 import urllib.parse
 from typing import Dict, List, Optional, Set
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from alerts import get_jellyfin_config, refresh_jellyfin_guide
@@ -30,6 +31,7 @@ from catalog import get_catalog_entries
 from channels import _set_catalog_entry_enabled
 from config import _public_base_url, _resource_path, _validate_upstream_url
 from db import set_setting_async
+import http_hardening
 from jellyfin_client import refresh_guide
 from leagues import LEAGUES
 from routes_dashboard import _catalog_selection_changes
@@ -219,3 +221,28 @@ async def setup_verify(request: Request, auth: bool = Depends(verify_dashboard_a
         "status": result.status,
         "reason": result.reason,
     }
+
+
+# --- X3: API documentation, opt-in and behind the login -----------------------
+
+def _require_api_docs() -> None:
+    if not http_hardening.API_DOCS_ENABLED:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+@router.get("/openapi.json", include_in_schema=False)
+async def openapi_schema(request: Request, auth: bool = Depends(verify_dashboard_auth)):
+    _require_api_docs()
+    return JSONResponse(request.app.openapi())
+
+
+@router.get("/docs", include_in_schema=False)
+async def swagger_ui(auth: bool = Depends(verify_dashboard_auth)) -> HTMLResponse:
+    _require_api_docs()
+    return get_swagger_ui_html(openapi_url="/openapi.json", title="Jellyball API")
+
+
+@router.get("/redoc", include_in_schema=False)
+async def redoc(auth: bool = Depends(verify_dashboard_auth)) -> HTMLResponse:
+    _require_api_docs()
+    return get_redoc_html(openapi_url="/openapi.json", title="Jellyball API")
