@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import catalog
 import epg
+import espn_schedule
 import scrapers
 import state
 import stream_extractor
@@ -155,7 +156,8 @@ class EspnScheduleContractTests(unittest.IsolatedAsyncioTestCase):
         seen = []
         client = json_client(document, status, seen)
         try:
-            with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(catalog, "datetime", FrozenDatetime):
+            with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(catalog, "datetime", FrozenDatetime), \
+                    patch.object(espn_schedule, "datetime", FrozenDatetime):
                 result = await catalog.fetch_espn_team_schedule("Test Team", **kwargs)
         finally:
             await client.aclose()
