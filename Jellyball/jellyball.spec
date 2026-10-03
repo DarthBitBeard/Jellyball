@@ -163,6 +163,8 @@ hiddenimports = [
     "routes_providers",
     "routes_setup",
     "routes_engine",
+    "engine_settings",
+    "engine_stats",
     "migrations_jellyfin",
     "migrations_sports",
     "migrations_providers",

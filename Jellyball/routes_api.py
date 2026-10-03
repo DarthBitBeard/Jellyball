@@ -26,6 +26,7 @@ from alerts import request_jellyfin_guide_refresh_if_changed
 from jellyfin_client import load_status as load_jellyfin_status
 from updates import _update_available, _UPDATE_STATE
 from legacy_proxy import CHUNK_CACHE
+import engine_stats
 import ffmpeg_proc
 from sessions import SESSIONS
 from multiview import _multiview_cooldown_remaining, _MULTIVIEW_FAILURES, _MULTIVIEW_PROCESSES
@@ -212,6 +213,15 @@ async def prometheus_metrics(auth: bool = Depends(verify_dashboard_auth)):
         lines.append(
             f'jellyball_provider_breaker_open{{provider="{_prometheus_label(provider)}"}} '
             f'{1 if info.get("open") else 0}'
+        )
+    lines += [
+        "# HELP jellyball_legacy_fallbacks_total Sessions handed to the legacy proxy, by reason and provider.",
+        "# TYPE jellyball_legacy_fallbacks_total counter",
+    ]
+    for row in engine_stats.legacy_fallback_counts():
+        lines.append(
+            f'jellyball_legacy_fallbacks_total{{reason="{_prometheus_label(row["reason"])}",'
+            f'provider="{_prometheus_label(row["provider"])}"}} {row["count"]}'
         )
     lines += [
         "# HELP jellyball_playwright_pages_in_use Open Playwright pages/contexts.",

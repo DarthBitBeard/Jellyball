@@ -1,0 +1,17 @@
+<div class="card" id="engine-audio-language">
+    <h3>Preferred Audio Language</h3>
+    <p class="hint-text">When a source carries several audio tracks, use the one in this language if it exists (a main track over hearing- or visually-impaired ones). The default keeps the first audio track, as before. Applies the next time a channel switches source.</p>
+    {% if ctx.error %}
+    <p style="color: var(--danger);">{{ ctx.error }}</p>
+    {% endif %}
+    <form action="/settings/audio-language" method="post" style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
+        <label for="preferred_audio_language">Language</label>
+        <select name="preferred_audio_language" id="preferred_audio_language">
+            <option value="" {% if not ctx.current %}selected{% endif %}>First audio track (default)</option>
+            {% for code, label in (ctx.languages or {}).items() %}
+            <option value="{{ code }}" {% if ctx.current == code %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit" class="btn">Save</button>
+    </form>
+</div>

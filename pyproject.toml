@@ -144,6 +144,8 @@ warn_unused_configs = true
 files = [
     "Jellyball/channels.py",
     "Jellyball/dashboard_cards.py",
+    "Jellyball/engine_settings.py",
+    "Jellyball/engine_stats.py",
     "Jellyball/migrations_engine.py",
     "Jellyball/migrations_jellyfin.py",
     "Jellyball/migrations_providers.py",
