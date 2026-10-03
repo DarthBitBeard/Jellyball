@@ -58,7 +58,7 @@ from catalog import _special_channel_for, _sport_labeled_name, resolve_espn_logo
 from updates import update_check_loop
 import legacy_proxy
 from legacy_proxy import _STARTUP_BUFFER_TASKS, PREFETCH_CONCURRENCY
-from ffmpeg_proc import _check_ffmpeg_available, _child_process_creationflags
+from ffmpeg_proc import _check_ffmpeg_available, _child_process_creationflags, run_roots
 import placeholder
 from placeholder import _stop_placeholder_process
 from sessions import SESSIONS
@@ -128,9 +128,9 @@ async def lifespan(app: FastAPI):
     # Before wiping the run dirs: their pid files identify ffmpeg left running
     # by a crashed previous instance (and those would keep the files locked).
     _kill_orphaned_ffmpeg()
-    shutil.rmtree(multiview.MULTIVIEW_OUTPUT_ROOT, ignore_errors=True)
+    for run_root in run_roots():
+        shutil.rmtree(run_root.path, ignore_errors=True)
     multiview.MULTIVIEW_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-    shutil.rmtree(placeholder.PLACEHOLDER_OUTPUT_DIR, ignore_errors=True)
     # Advanced settings saved from the dashboard override the env defaults.
     _load_tunable_overrides()
     catalog.SHOW_OFFSEASON_CHANNELS = get_setting("show_offseason_channels", "0") == "1"
@@ -269,8 +269,8 @@ async def lifespan(app: FastAPI):
     await _METRIC_WRITER.stop()
     close_all_db_connections()
     _STARTUP_BUFFER_TASKS.clear()
-    shutil.rmtree(multiview.MULTIVIEW_OUTPUT_ROOT, ignore_errors=True)
-    shutil.rmtree(placeholder.PLACEHOLDER_OUTPUT_DIR, ignore_errors=True)
+    for run_root in run_roots():
+        shutil.rmtree(run_root.path, ignore_errors=True)
         
     if scrapers.SHARED_BROWSER:
         try:

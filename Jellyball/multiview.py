@@ -147,6 +147,14 @@ _MULTIVIEW_START_TASKS: Dict[str, asyncio.Task] = {}
 _MULTIVIEW_LAST_VIEWER: Dict[str, float] = {}
 
 
+def _multiview_live_run_dirs() -> Set[Path]:
+    return {entry["output_dir"] for entry in _MULTIVIEW_PROCESSES.values()} | _MULTIVIEW_PENDING_RUN_DIRS
+
+
+# <root>/<channel>/runN. Read at call time, so a patched MULTIVIEW_OUTPUT_ROOT is what gets swept.
+ffmpeg_proc.register_run_root(lambda: MULTIVIEW_OUTPUT_ROOT, per_channel=True, live_dirs=_multiview_live_run_dirs)
+
+
 def _multiview_hold_remaining(channel_id: str) -> float:
     hold = _MULTIVIEW_HOLDS.get(channel_id)
     if not hold:
@@ -495,12 +503,7 @@ def _kill_orphaned_ffmpeg() -> int:
     api = _win32_process_api()
     if api is None:
         return 0
-    pid_files: List[Path] = []
-    for root, pattern in ((MULTIVIEW_OUTPUT_ROOT, f"*/run*/{RUN_PID_FILE}"), (placeholder.PLACEHOLDER_OUTPUT_DIR, f"run*/{RUN_PID_FILE}")):
-        try:
-            pid_files += list(root.glob(pattern))
-        except OSError:
-            continue
+    pid_files = ffmpeg_proc.run_pid_files()
     killed = 0
     for pid_file in pid_files:
         try:
@@ -1227,8 +1230,10 @@ async def multiview_idle_monitor() -> None:
 
 
 def _sweep_output_dirs_sync(live_dirs: Set[Path], min_age: float) -> List[Path]:
-    """Blocking. Delete Multi-View run dirs (<root>/<channel>/runN) and
-    placeholder run dirs that no live run owns, plus channel dirs left empty.
+    """Blocking. Delete the run dirs under every registered run root
+    (ffmpeg_proc.run_roots(): Multi-View's <root>/<channel>/runN, the
+    placeholder's <root>/runN, ...) that no live run owns, plus per-channel
+    dirs left empty.
     Dirs younger than `min_age` seconds are kept: a spawn may have just
     created one it hasn't registered yet."""
     removed: List[Path] = []
@@ -1249,29 +1254,29 @@ def _sweep_output_dirs_sync(live_dirs: Set[Path], min_age: float) -> List[Path]:
         except OSError:
             return []
 
-    for channel_dir in children(MULTIVIEW_OUTPUT_ROOT):
-        if not channel_dir.is_dir():
+    for root in ffmpeg_proc.run_roots():
+        if not root.per_channel:
+            for run_dir in children(root.path):
+                if stale(run_dir) and _rmtree_with_retries(run_dir, attempts=2, delay=0.5):
+                    removed.append(run_dir)
             continue
-        for run_dir in children(channel_dir):
-            if stale(run_dir) and _rmtree_with_retries(run_dir, attempts=2, delay=0.5):
-                removed.append(run_dir)
-        if channel_dir not in live_parents and not children(channel_dir):
-            try:
-                channel_dir.rmdir()
-                removed.append(channel_dir)
-            except OSError:
-                pass
-    for run_dir in children(placeholder.PLACEHOLDER_OUTPUT_DIR):
-        if stale(run_dir) and _rmtree_with_retries(run_dir, attempts=2, delay=0.5):
-            removed.append(run_dir)
+        for channel_dir in children(root.path):
+            if not channel_dir.is_dir():
+                continue
+            for run_dir in children(channel_dir):
+                if stale(run_dir) and _rmtree_with_retries(run_dir, attempts=2, delay=0.5):
+                    removed.append(run_dir)
+            if channel_dir not in live_parents and not children(channel_dir):
+                try:
+                    channel_dir.rmdir()
+                    removed.append(channel_dir)
+                except OSError:
+                    pass
     return removed
 
 
 async def _sweep_output_dirs(min_age: float = 60.0) -> List[Path]:
-    live: Set[Path] = {entry["output_dir"] for entry in _MULTIVIEW_PROCESSES.values()}
-    live |= _MULTIVIEW_PENDING_RUN_DIRS | _PLACEHOLDER_PENDING_DIRS
-    if placeholder._PLACEHOLDER_STATE:
-        live.add(placeholder._PLACEHOLDER_STATE["output_dir"])
+    live: Set[Path] = ffmpeg_proc.live_run_dirs()
     removed = await asyncio.to_thread(_sweep_output_dirs_sync, live, min_age)
     if removed:
         LOGGER.info("Removed %d leftover Multi-View/placeholder output dir(s)", len(removed))

@@ -17,7 +17,7 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, Iterable, List, NamedTuple, Optional, Set, Tuple, Union
 
 from config import _log_failure, BUNDLE_DIR, LOGGER
 from state import _spawn_background_task
@@ -406,6 +406,69 @@ def _create_run_job(pid: int):
 
 
 RUN_PID_FILE = "ffmpeg.pid"
+
+
+# --- Run roots ----------------------------------------------------------------
+# Directories that hold ffmpeg run directories (Multi-View, the placeholder,
+# any later feature). Each owner registers its root when imported; the startup
+# kill of orphaned ffmpeg, the periodic sweep of leftover run directories and
+# the startup/shutdown wipe all iterate this registry instead of naming roots.
+
+
+class RunRoot(NamedTuple):
+    path: Path
+    # True: <root>/<channel>/runN (empty channel dirs are swept too);
+    # False: <root>/runN.
+    per_channel: bool
+
+
+_RUN_ROOTS: List[Tuple[Callable[[], Path], bool, Optional[Callable[[], Iterable[Path]]]]] = []
+
+
+def register_run_root(
+    path: Union[Path, Callable[[], Path]],
+    *,
+    per_channel: bool = False,
+    live_dirs: Optional[Callable[[], Iterable[Path]]] = None,
+) -> None:
+    """Register a directory of ffmpeg run directories. `path` may be a
+    callable, read on every use (so a module constant patched in a test is
+    honoured). `live_dirs` returns the run directories in use right now
+    (running or still starting), which the sweep never deletes."""
+    if isinstance(path, Path):
+        fixed = path
+
+        def getter() -> Path:
+            return fixed
+    else:
+        getter = path
+    _RUN_ROOTS.append((getter, per_channel, live_dirs))
+
+
+def run_roots() -> List[RunRoot]:
+    """The registered roots, in registration order, resolved now."""
+    return [RunRoot(Path(getter()), per_channel) for getter, per_channel, _ in _RUN_ROOTS]
+
+
+def live_run_dirs() -> Set[Path]:
+    """Every run directory a registered owner reports as in use."""
+    live: Set[Path] = set()
+    for _, _, live_dirs in _RUN_ROOTS:
+        if live_dirs is not None:
+            live |= set(live_dirs())
+    return live
+
+
+def run_pid_files() -> List[Path]:
+    """The pid file of every run directory under the registered roots."""
+    pid_files: List[Path] = []
+    for root in run_roots():
+        pattern = f"*/run*/{RUN_PID_FILE}" if root.per_channel else f"run*/{RUN_PID_FILE}"
+        try:
+            pid_files += list(root.path.glob(pattern))
+        except OSError:
+            continue
+    return pid_files
 
 
 def _write_run_pid_file(run_dir: Path, pid: int) -> None:
