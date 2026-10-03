@@ -1,0 +1,133 @@
+{
+  "data": {
+    "duration": "1440",
+    "providerId": "9100001138",
+    "startTime": "1790965088",
+    "items": [
+      {
+        "channel": {
+          "fullName": "ESPN",
+          "name": "ESPN",
+          "number": null,
+          "sourceId": 9200006937,
+          "legacySourceId": null,
+          "networkName": "ESPN",
+          "networkId": 37,
+          "logo": "/provider/8/4/8-9200006937_light.png"
+        },
+        "programSchedules": [
+          {
+            "airingAttrib": 524292,
+            "catId": 2,
+            "startTime": 1790964000,
+            "endTime": 1790967600,
+            "programId": 9002335201,
+            "title": "Bussin' & Pate On Campus",
+            "rating": null,
+            "programDetails": "https://backend.tvguide.com/tvschedules/tvguide/programdetails/9002335201/web"
+          },
+          {
+            "airingAttrib": 524292,
+            "catId": 2,
+            "startTime": 1790967600,
+            "endTime": 1790971200,
+            "programId": 9000063226,
+            "title": "NBA Today",
+            "rating": null,
+            "programDetails": "https://backend.tvguide.com/tvschedules/tvguide/programdetails/9000063226/web"
+          },
+          {
+            "airingAttrib": 524308,
+            "catId": 2,
+            "startTime": 1790971200,
+            "endTime": 1790974800,
+            "programId": 9000008279,
+            "title": "NFL Live",
+            "rating": null,
+            "programDetails": "https://backend.tvguide.com/tvschedules/tvguide/programdetails/9000008279/web"
+          },
+          {
+            "airingAttrib": 524308,
+            "catId": 2,
+            "startTime": 1790974800,
+            "endTime": 1790976600,
+            "programId": 9000000555,
+            "title": "SportsCenter",
+            "rating": null,
+            "programDetails": "https://backend.tvguide.com/tvschedules/tvguide/programdetails/9000000555/web"
+          }
+        ]
+      },
+      {
+        "channel": {
+          "fullName": "FOX Sports 1",
+          "name": "FS1",
+          "number": null,
+          "sourceId": 9233008440,
+          "legacySourceId": null,
+          "networkName": null,
+          "networkId": 0,
+          "logo": "/provider/8/4/8-9233008440_light.png"
+        },
+        "programSchedules": [
+          {
+            "airingAttrib": 524308,
+            "catId": 2,
+            "startTime": 1790956800,
+            "endTime": 1790965800,
+            "programId": 9000039381,
+            "title": "The Herd with Colin Cowherd",
+            "rating": null,
+            "programDetails": "https://backend.tvguide.com/tvschedules/tvguide/programdetails/9000039381/web"
+          },
+          {
+            "airingAttrib": 524289,
+            "catId": 2,
+            "startTime": 1790965800,
+            "endTime": 1790974800,
+            "programId": 9002371083,
+            "title": "UEFA Nations League Soccer",
+            "rating": null,
+            "programDetails": "https://backend.tvguide.com/tvschedules/tvguide/programdetails/9002371083/web"
+          },
+          {
+            "airingAttrib": 524304,
+            "catId": 2,
+            "startTime": 1790974800,
+            "endTime": 1790978400,
+            "programId": 9000039381,
+            "title": "The Herd with Colin Cowherd",
+            "rating": null,
+            "programDetails": "https://backend.tvguide.com/tvschedules/tvguide/programdetails/9000039381/web"
+          },
+          {
+            "airingAttrib": 524288,
+            "catId": 5,
+            "startTime": 1790978400,
+            "endTime": 1790980200,
+            "programId": 9002369981,
+            "title": "The Joel Klatt Show: A College Football on FOX Podcast",
+            "rating": null,
+            "programDetails": "https://backend.tvguide.com/tvschedules/tvguide/programdetails/9002369981/web"
+          }
+        ]
+      }
+    ]
+  },
+  "links": {
+    "self": {
+      "href": "https://backend.tvguide.com/tvschedules/tvguide/9100001138/web?start=1790965088&duration=1440"
+    },
+    "prev": {
+      "href": "https://backend.tvguide.com/tvschedules/tvguide/9100001138/web?start=1790878688&duration=1440"
+    },
+    "next": {
+      "href": "https://backend.tvguide.com/tvschedules/tvguide/9100001138/web?start=1791051488&duration=1440"
+    }
+  },
+  "meta": {
+    "componentName": null,
+    "componentDisplayName": null,
+    "componentType": null
+  }
+}
