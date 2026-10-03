@@ -556,7 +556,6 @@ async def create_multiview(
         name=name,
         query="",
         type="multiview",
-        candidates=[{"synthetic": True}],
         category="multiview",
         content_type="multiview",
         always_live=True,

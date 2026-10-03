@@ -8,7 +8,7 @@ lifespan in main.py, so other modules read them as `state.SHARED_HTTP_CLIENT`
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Set, TypedDict
+from typing import Any, Dict, List, Mapping, Optional, Set, TypedDict
 
 import httpx
 
@@ -112,6 +112,15 @@ def new_channel_state(**fields: Any) -> ChannelState:
     }
     state.update(fields)  # type: ignore[typeddict-item]
     return state
+
+
+def is_multiview(data: Optional[Mapping[str, Any]]) -> bool:
+    """A Multi-View channel: its picture comes from its own ffmpeg grid, so it
+    has no stream candidates (`candidates` is empty) and yet always has a
+    source. Code that asks "does this channel have a source?" by looking at
+    `candidates` must also accept a Multi-View (it used to carry a fake
+    candidate for that)."""
+    return data is not None and data.get("type") == "multiview"
 
 
 def _spawn_background_task(coroutine, operation: str) -> asyncio.Task:

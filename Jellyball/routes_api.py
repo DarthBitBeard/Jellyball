@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 import config
 from config import _log_failure, _safe_team_id, LOG_FILE
-from state import stream_state
+from state import is_multiview, stream_state
 from db import (
     _bulk_set_favorite_sync,
     _export_teams_sync,
@@ -401,7 +401,7 @@ async def test_stream(team_id: str, auth: bool = Depends(verify_dashboard_auth))
     try:
         data = stream_state.get(team_id)
         candidates = data.get("candidates", []) if data else []
-        is_live = len(candidates) > 0 and data.get("is_healthy", False)
+        is_live = (len(candidates) > 0 or is_multiview(data)) and data.get("is_healthy", False)
         await asyncio.to_thread(_record_stream_test_sync, team_id, is_live, len(candidates))
         return {"team_id": team_id, "is_live": is_live, "candidate_count": len(candidates), "status": "✅ Live" if is_live else "❌ Offline"}
     except Exception as exc:

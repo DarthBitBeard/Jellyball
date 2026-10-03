@@ -14,7 +14,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from config import _log_failure, DATA_DIR, LOGGER
 import migrations_engine
@@ -460,7 +460,27 @@ def delete_team(team_id: str):
 async def delete_team_async(team_id: str) -> None:
     await asyncio.to_thread(delete_team, team_id)
 
-def load_teams() -> list:
+class TeamRow(NamedTuple):
+    """One `teams` row as load_teams() returns it. Values are as stored: a NULL
+    left by an old database arrives as None, so callers keep their fallbacks.
+    Still a tuple (same field order), so it unpacks and compares like one."""
+
+    team_id: str
+    name: str
+    query: str
+    logo_url: str
+    start_time: str
+    stop_time: str
+    category: str
+    source_id: str
+    content_type: str
+    search_terms: str  # JSON list
+    always_live: int
+    catalog_key: str
+    auto_disable_after: str
+
+
+def load_teams() -> List[TeamRow]:
     with _db_session() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -469,7 +489,7 @@ def load_teams() -> list:
                       auto_disable_after
                FROM teams"""
         )
-        return cursor.fetchall()
+        return [TeamRow._make(row) for row in cursor.fetchall()]
 
 
 def save_multiview_channel(
@@ -515,7 +535,21 @@ async def delete_multiview_channel_async(channel_id: str) -> None:
     await asyncio.to_thread(delete_multiview_channel, channel_id)
 
 
-def load_multiview_channels() -> list:
+class MultiviewRow(NamedTuple):
+    """One `multiview_channels` row as load_multiview_channels() returns it
+    (a tuple in column order, like TeamRow)."""
+
+    channel_id: str
+    name: str
+    layout: str
+    member_team_ids: str  # JSON list
+    active_audio_team_id: str
+    tvg_id: str
+    group_title: str
+    logo_url: str
+
+
+def load_multiview_channels() -> List[MultiviewRow]:
     with _db_session() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -523,7 +557,7 @@ def load_multiview_channels() -> list:
                       tvg_id, group_title, logo_url
                FROM multiview_channels"""
         )
-        return cursor.fetchall()
+        return [MultiviewRow._make(row) for row in cursor.fetchall()]
 
 
 def log_metric_event(team_id: str, provider: str, event_type: str, details: str):
