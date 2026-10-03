@@ -630,4 +630,21 @@ Alerts are rate-limited per channel (`FAILOVER_ALERT_COOLDOWN`).
 
 ---
 
+## More documentation
+
+| Guide | What it covers |
+| :--- | :--- |
+| [`docs/DOCKER.md`](../docs/DOCKER.md) | Image and tags, GPUs, reverse proxy and TLS |
+| [`deploy/linux/README.md`](../deploy/linux/README.md) | systemd service without Docker |
+| [`docs/JELLYFIN.md`](../docs/JELLYFIN.md) | Jellyfin setup, Jellyfin 12 notes, client compatibility |
+| [`docs/PROVIDERS.md`](../docs/PROVIDERS.md) | How providers work and what to do when one breaks |
+| [`docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md) | Symptoms and fixes |
+| [`docs/UPGRADING.md`](../docs/UPGRADING.md) | Upgrading, backups and rollback |
+| [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) | How the code fits together |
+
+Unattended Windows installs accept `/PORT=`, `/USER=`, `/LAN=1|0` and
+`/DATADIR=` (see the header of `Jellyball/installer/jellyball.iss`).
+
+---
+
 For what changed in this release, see [`CHANGELOG.md`](../CHANGELOG.md).

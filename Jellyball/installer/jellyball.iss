@@ -8,8 +8,9 @@
 ; service running as the virtual account NT SERVICE\Jellyball, and writes a
 ; one-time configuration file at %ProgramData%\Jellyball\.env.
 ;
-; Unattended installs take optional switches (all ignored when upgrading over
-; an existing .env, which is never rewritten):
+; Unattended installs take optional switches. /PORT, /USER and /LAN only seed a
+; NEW .env (an existing one is never rewritten); /DATADIR selects the data
+; folder and does not move existing data, so omit it when upgrading:
 ;   /PORT=8000          server port (1-65535)
 ;   /USER=admin         dashboard username
 ;   /LAN=1|0            1 = listen on the network (default), 0 = this computer only
