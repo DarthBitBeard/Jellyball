@@ -9,6 +9,8 @@ per-chunk overhead to the segment relay path and is testable without a server.
 import ipaddress
 import os
 import re
+import time
+from collections import OrderedDict
 from typing import Iterable, List, Optional, Sequence, Tuple, Union
 
 from fastapi.responses import PlainTextResponse
@@ -242,6 +244,23 @@ def playback_allowed(address: Optional[IPAddress], allow_list: Optional[Sequence
     return address.is_loopback or _in_networks(address, allow_list)
 
 
+_REFUSAL_LOG_INTERVAL = 60.0
+_LAST_REFUSAL_LOG: "OrderedDict[str, float]" = OrderedDict()
+
+
+def _log_refusal(address: str, path: str) -> None:
+    """One line per address per minute: a scanner must not flood the log."""
+    now = time.monotonic()
+    last = _LAST_REFUSAL_LOG.get(address)
+    if last is not None and now - last < _REFUSAL_LOG_INTERVAL:
+        return
+    _LAST_REFUSAL_LOG[address] = now
+    _LAST_REFUSAL_LOG.move_to_end(address)
+    while len(_LAST_REFUSAL_LOG) > 256:
+        _LAST_REFUSAL_LOG.popitem(last=False)
+    LOGGER.warning("Refused playback request from %s path=%s (PLAYBACK_ALLOW_CIDRS)", address, path)
+
+
 class PlaybackAccessMiddleware:
     """Pure ASGI: refuse playback endpoints to clients outside
     PLAYBACK_ALLOW_CIDRS (403). Does nothing while the setting is empty."""
@@ -254,8 +273,7 @@ class PlaybackAccessMiddleware:
         if allow_list is not None and scope["type"] == "http" and is_playback_path(scope.get("path") or ""):
             address = client_ip(scope)
             if not playback_allowed(address, allow_list):
-                LOGGER.warning("Refused playback request from %s path=%s (PLAYBACK_ALLOW_CIDRS)",
-                               address if address is not None else "unknown", scope.get("path"))
+                _log_refusal(str(address) if address is not None else "unknown", scope.get("path") or "")
                 response = PlainTextResponse("Playback is not allowed from this address", status_code=403)
                 await response(scope, receive, send)
                 return

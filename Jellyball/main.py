@@ -461,6 +461,8 @@ class RateLimitMiddleware:
 # login when JELLYBALL_API_DOCS=1.
 app = FastAPI(title="Jellyball", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(CsrfOriginMiddleware)
+# PLAYBACK_ALLOW_CIDRS (no-op while unset).
+app.add_middleware(http_hardening.PlaybackAccessMiddleware)
 app.add_middleware(RequestDiagnosticsMiddleware)
 app.add_middleware(RateLimitMiddleware)
 # Outermost, so the CSRF 403 and the diagnostics 500 carry the headers too.
@@ -578,10 +580,11 @@ def build_server(host: str, port: int):
         timeout_keep_alive=30,
         # Streaming responses would otherwise hold shutdown open indefinitely.
         timeout_graceful_shutdown=10,
-        # Honour X-Forwarded-For/X-Forwarded-Proto only from these addresses
-        # (comma-separated; default loopback). Lets the login lockout and
-        # request logs see the real client IP behind a reverse proxy.
-        forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
+        # Honour X-Forwarded-For/X-Forwarded-Proto only from these addresses:
+        # TRUSTED_PROXIES when set, else FORWARDED_ALLOW_IPS (default loopback).
+        # Lets the login lockout and request logs see the real client IP behind
+        # a reverse proxy.
+        forwarded_allow_ips=http_hardening.uvicorn_forwarded_allow_ips() or os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
         ssl_certfile=ssl_certfile,
         ssl_keyfile=ssl_keyfile,
     )
