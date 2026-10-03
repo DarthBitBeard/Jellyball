@@ -1,17 +1,16 @@
 """JSON / text API routes: /healthz, /api/*, /metrics."""
 
 import asyncio
-import json
 import os
 import shutil
 import time
-from datetime import datetime, timezone
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 import config
+import config_transfer
 from config import _log_failure, _safe_team_id, LOG_FILE
 from state import is_multiview, stream_state
 import provider_tools
@@ -25,7 +24,6 @@ from db import (
 )
 from security import verify_dashboard_auth
 from catalog import _season_resume_label, get_catalog_entries, is_stream_window_active
-from alerts import request_jellyfin_guide_refresh_if_changed
 from jellyfin_client import load_status as load_jellyfin_status
 from updates import _update_available, _UPDATE_STATE
 import engine_stats
@@ -41,7 +39,6 @@ from failover import (
     FAILOVER_DEFERRED_COUNTS,
     FAILOVER_REASON_COUNTS,
 )
-from channels import _add_manual_team, _set_catalog_entry_enabled
 from tunables import _advanced_settings_snapshot
 from scrapers import provider_breaker_snapshot
 from stream_extractor import PLAYWRIGHT_MAX_PAGES, playwright_pages_in_use
@@ -420,84 +417,35 @@ async def ffmpeg_status(auth: bool = Depends(verify_dashboard_auth)):
 
 @router.get("/api/export-config", response_class=JSONResponse)
 async def export_config(auth: bool = Depends(verify_dashboard_auth)):
+    """Channels, Multi-View channels and non-secret settings (config_transfer)."""
     try:
-        teams = await asyncio.to_thread(_export_teams_sync)
-        config = {
-            "version": "2.0",
-            "app_version": __version__,
-            "exported_at": datetime.now(timezone.utc).isoformat(),
-            "teams": teams
-        }
-        return JSONResponse(config)
+        return JSONResponse(await config_transfer.build_export())
     except Exception as exc:
         _log_failure("export config", exc)
         raise HTTPException(status_code=500, detail="Export failed")
 
 
-IMPORT_MAX_TEAMS = 500
-IMPORT_MAX_BYTES = 2 * 1024 * 1024
+IMPORT_MAX_TEAMS = config_transfer.IMPORT_MAX_TEAMS
+IMPORT_MAX_BYTES = config_transfer.IMPORT_MAX_BYTES
 
 
 @router.post("/api/import-config")
 async def import_config(file: Request, auth: bool = Depends(verify_dashboard_auth)):
-    """Import channels from an export. Goes through the same sanitizing path as
-    the dashboard form and starts each new channel right away (imports used to
-    sit inert in the DB until a restart). Existing channels are left alone."""
+    """Import a 2.0 (channels only) or 2.1 export. Channels go through the same
+    sanitizing path as the dashboard form and start right away; existing
+    channels are left alone; secrets are never imported (config_transfer)."""
     try:
         raw = await file.body()
         if len(raw) > IMPORT_MAX_BYTES:
             raise HTTPException(status_code=413, detail="Import file too large")
-        body = json.loads(raw.decode("utf-8"))
-        teams = body.get("teams", []) if isinstance(body, dict) else None
-        if not isinstance(teams, list):
-            raise ValueError("teams must be a list")
+        body = config_transfer.parse_import_body(raw)
     except HTTPException:
         raise
     except Exception as exc:
         _log_failure("import config", exc)
         raise HTTPException(status_code=400, detail="Import failed: not a Jellyball export")
-
-    catalog_by_key = {entry["catalog_key"]: entry for entry in await get_catalog_entries()}
-    imported, skipped, favorites = 0, 0, []
-    for team in teams[:IMPORT_MAX_TEAMS]:
-        if not isinstance(team, dict):
-            skipped += 1
-            continue
-        requested_id = _safe_team_id(str(team.get("team_id") or team.get("name") or ""))
-        if requested_id in stream_state:
-            skipped += 1
-            continue
-        catalog_entry = catalog_by_key.get(str(team.get("catalog_key") or ""))
-        if catalog_entry is not None:
-            # A catalog channel: enable the real catalog entry (keeps its
-            # search terms, schedule and guide metadata) instead of a copy.
-            if catalog_entry["team_id"] in stream_state:
-                skipped += 1
-                continue
-            await _set_catalog_entry_enabled(catalog_entry, True)
-            imported += 1
-            if team.get("is_favorite"):
-                favorites.append(catalog_entry["team_id"])
-            continue
-        team_id = await _add_manual_team(
-            str(team.get("name") or ""),
-            str(team.get("query") or ""),
-            team_id=requested_id,
-            logo_url=str(team.get("logo_url") or ""),
-            category=str(team.get("category") or "imported"),
-        )
-        if team_id is None:
-            skipped += 1
-            continue
-        imported += 1
-        if team.get("is_favorite"):
-            favorites.append(team_id)
-    skipped += max(0, len(teams) - IMPORT_MAX_TEAMS)
-    if favorites:
-        await asyncio.to_thread(_bulk_set_favorite_sync, favorites, True)
-    if imported:
-        request_jellyfin_guide_refresh_if_changed()
-    return JSONResponse({"status": "imported", "count": imported, "skipped": skipped})
+    result = await config_transfer.apply_import(body, await get_catalog_entries())
+    return JSONResponse(result)
 
 
 @router.get("/api/settings/advanced", response_class=JSONResponse)

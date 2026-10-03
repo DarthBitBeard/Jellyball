@@ -181,6 +181,7 @@ hiddenimports = [
     # Setup, security and support lane (2.1.0 X-items).
     "http_hardening",
     "diagnostics",
+    "config_transfer",
     "uvicorn.logging",
     "uvicorn.loops",
     "uvicorn.loops.auto",

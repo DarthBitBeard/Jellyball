@@ -68,8 +68,8 @@
     </form>
 </div>
 <div class="card">
-    <h3>Import/Export Team Configuration</h3>
-    <p class="hint-text">Backup or transfer your team selections to another Jellyball instance.</p>
+    <h3>Import/Export Configuration</h3>
+    <p class="hint-text">Back up or move your channels, Multi-View channels and settings to another Jellyball instance. Secrets (Jellyfin API key, webhook URL, bot token, chat ID, dashboard password) are never exported: re-enter them after an import. Importing never changes a channel you already have; files exported by Jellyball 2.0 still import.</p>
     <div style="display: flex; gap: 1rem; flex-wrap: wrap;">
         <a href="/api/export-config" download="jellyball-config.json" style="display: inline-block; padding: 0.85rem 1.5rem; background: var(--accent); color: white; border-radius: 8px; text-decoration: none; font-weight: 600; cursor: pointer;">📥 Export Configuration</a>
         <button type="button" onclick="document.getElementById('import-file').click()" style="width: auto; padding: 0.85rem 1.5rem;">📤 Import Configuration</button>

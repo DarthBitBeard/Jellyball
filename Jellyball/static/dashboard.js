@@ -495,7 +495,9 @@ function importConfig(file) {
             });
             if (resp.ok) {
                 const result = await resp.json();
-                showToast(`✅ Imported ${result.count} teams`);
+                const mv = (result.multiview && result.multiview.imported) || 0;
+                const applied = (result.settings && result.settings.applied || []).length;
+                showToast(`✅ Imported ${result.count} channels, ${mv} Multi-View, ${applied} settings`);
                 setTimeout(() => window.location.reload(), 2000);
             } else {
                 showToast('Import failed', 3000, true);
