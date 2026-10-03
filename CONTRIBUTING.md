@@ -43,6 +43,14 @@ export JELLYBALL_E2E=1
 python -m unittest test_e2e_tools -v
 ```
 
+Optional (needs Docker; runs a real Jellyfin, pulling about 745 MB the first time):
+
+```bash
+export JELLYBALL_JELLYFIN_IT=1
+python -m unittest test_jellyfin_integration -v
+python tools/jellyfin_harness.py probe     # print what the real server answers
+```
+
 Optional: run `pip install pre-commit && pre-commit install` to have ruff and a
 few basic hygiene hooks run on every commit.
 

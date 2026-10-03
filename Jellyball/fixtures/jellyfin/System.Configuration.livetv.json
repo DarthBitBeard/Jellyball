@@ -1,0 +1,59 @@
+{
+  "EnableRecordingSubfolders": false,
+  "EnableOriginalAudioWithEncodedRecordings": false,
+  "TunerHosts": [
+    {
+      "Id": "09ca1893dc9841a6b58a2b5efc892bda",
+      "Url": "http://host.docker.internal:<FEED_PORT>/playlist.m3u",
+      "Type": "m3u",
+      "FriendlyName": "Jellyball Harness",
+      "ImportFavoritesOnly": false,
+      "AllowHWTranscoding": true,
+      "AllowFmp4TranscodingContainer": false,
+      "AllowStreamSharing": true,
+      "FallbackMaxStreamingBitrate": 30000000,
+      "EnableStreamLooping": false,
+      "TunerCount": 0,
+      "IgnoreDts": true,
+      "ReadAtNativeFramerate": false
+    }
+  ],
+  "ListingProviders": [
+    {
+      "Id": "176967b9a143459697cccda8b086d6c0",
+      "Type": "xmltv",
+      "Path": "http://host.docker.internal:<FEED_PORT>/epg.xml",
+      "EnabledTuners": [],
+      "EnableAllTuners": true,
+      "NewsCategories": [
+        "news",
+        "journalism",
+        "documentary",
+        "current affairs"
+      ],
+      "SportsCategories": [
+        "sports",
+        "basketball",
+        "baseball",
+        "football"
+      ],
+      "KidsCategories": [
+        "kids",
+        "family",
+        "children",
+        "childrens",
+        "disney"
+      ],
+      "MovieCategories": [
+        "movie"
+      ],
+      "ChannelMappings": []
+    }
+  ],
+  "PrePaddingSeconds": 0,
+  "PostPaddingSeconds": 0,
+  "MediaLocationsCreated": [],
+  "RecordingPostProcessorArguments": "\"{path}\"",
+  "SaveRecordingNFO": true,
+  "SaveRecordingImages": true
+}

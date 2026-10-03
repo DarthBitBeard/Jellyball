@@ -1,0 +1,48 @@
+{
+  "Items": [
+    {
+      "Name": "Harness Bills Game 1",
+      "ServerId": "<SERVER_ID>",
+      "Id": "61ed38d45632a155ba92056fc8919eec",
+      "ChannelId": "f793ab36f8ced3482f60d5f4b83a5d06",
+      "RunTimeTicks": 36000000000,
+      "Type": "Program",
+      "ImageTags": {},
+      "BackdropImageTags": [],
+      "ImageBlurHashes": {},
+      "MediaType": "Unknown",
+      "EndDate": "2026-10-03T03:00:00.0000000Z",
+      "StartDate": "2026-10-03T02:00:00.0000000Z"
+    },
+    {
+      "Name": "Harness ESPN Game 1",
+      "ServerId": "<SERVER_ID>",
+      "Id": "dffa4661a5c92696dd26d45ec380e198",
+      "ChannelId": "da1f132abf42409515ef64f9cbe3b1f7",
+      "RunTimeTicks": 36000000000,
+      "Type": "Program",
+      "ImageTags": {},
+      "BackdropImageTags": [],
+      "ImageBlurHashes": {},
+      "MediaType": "Unknown",
+      "EndDate": "2026-10-03T03:00:00.0000000Z",
+      "StartDate": "2026-10-03T02:00:00.0000000Z"
+    },
+    {
+      "Name": "Harness Wolverines Game 1",
+      "ServerId": "<SERVER_ID>",
+      "Id": "f8cdb6687d2f445b29fc83ff6e7461f3",
+      "ChannelId": "e8f6740002d8a17523d8b1e0d2d5c774",
+      "RunTimeTicks": 36000000000,
+      "Type": "Program",
+      "ImageTags": {},
+      "BackdropImageTags": [],
+      "ImageBlurHashes": {},
+      "MediaType": "Unknown",
+      "EndDate": "2026-10-03T03:00:00.0000000Z",
+      "StartDate": "2026-10-03T02:00:00.0000000Z"
+    }
+  ],
+  "TotalRecordCount": 108,
+  "StartIndex": 0
+}

@@ -1,0 +1,5 @@
+{
+  "Type": "xmltv",
+  "Path": "http://host.docker.internal:<FEED_PORT>/epg.xml",
+  "EnableAllTuners": true
+}

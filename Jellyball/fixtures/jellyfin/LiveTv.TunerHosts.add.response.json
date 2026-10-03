@@ -1,0 +1,15 @@
+{
+  "Id": "09ca1893dc9841a6b58a2b5efc892bda",
+  "Url": "http://host.docker.internal:<FEED_PORT>/playlist.m3u",
+  "Type": "m3u",
+  "FriendlyName": "Jellyball Harness",
+  "ImportFavoritesOnly": false,
+  "AllowHWTranscoding": true,
+  "AllowFmp4TranscodingContainer": false,
+  "AllowStreamSharing": true,
+  "FallbackMaxStreamingBitrate": 30000000,
+  "EnableStreamLooping": false,
+  "TunerCount": 0,
+  "IgnoreDts": true,
+  "ReadAtNativeFramerate": false
+}

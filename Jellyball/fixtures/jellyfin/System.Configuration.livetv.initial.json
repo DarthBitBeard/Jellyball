@@ -1,0 +1,12 @@
+{
+  "EnableRecordingSubfolders": false,
+  "EnableOriginalAudioWithEncodedRecordings": false,
+  "TunerHosts": [],
+  "ListingProviders": [],
+  "PrePaddingSeconds": 0,
+  "PostPaddingSeconds": 0,
+  "MediaLocationsCreated": [],
+  "RecordingPostProcessorArguments": "\"{path}\"",
+  "SaveRecordingNFO": true,
+  "SaveRecordingImages": true
+}

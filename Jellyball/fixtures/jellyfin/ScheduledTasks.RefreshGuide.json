@@ -1,0 +1,15 @@
+{
+  "Name": "Refresh Guide",
+  "State": "Idle",
+  "Id": "bea9b218c97bbf98c5dc1303bdb9a0ca",
+  "Triggers": [
+    {
+      "Type": "IntervalTrigger",
+      "IntervalTicks": 864000000000
+    }
+  ],
+  "Description": "Downloads channel information from live tv services.",
+  "Category": "Live TV",
+  "IsHidden": true,
+  "Key": "RefreshGuide"
+}

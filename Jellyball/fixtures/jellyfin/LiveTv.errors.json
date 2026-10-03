@@ -1,0 +1,170 @@
+[
+  {
+    "case": "tuner: empty body",
+    "request": "POST /LiveTv/TunerHosts",
+    "body_sent": {},
+    "status": 404,
+    "content_type": "text/plain",
+    "response": "Error processing request."
+  },
+  {
+    "case": "tuner: no Type",
+    "request": "POST /LiveTv/TunerHosts",
+    "body_sent": {
+      "Url": "http://host.docker.internal:<FEED_PORT>/playlist.m3u"
+    },
+    "status": 404,
+    "content_type": "text/plain",
+    "response": "Error processing request."
+  },
+  {
+    "case": "tuner: unknown Type",
+    "request": "POST /LiveTv/TunerHosts",
+    "body_sent": {
+      "Type": "bogus",
+      "Url": "http://host.docker.internal:<FEED_PORT>/playlist.m3u"
+    },
+    "status": 404,
+    "content_type": "text/plain",
+    "response": "Error processing request."
+  },
+  {
+    "case": "tuner: no Url",
+    "request": "POST /LiveTv/TunerHosts",
+    "body_sent": {
+      "Type": "m3u"
+    },
+    "status": 500,
+    "content_type": "text/plain",
+    "response": "Error processing request."
+  },
+  {
+    "case": "tuner: Url refuses connections",
+    "request": "POST /LiveTv/TunerHosts",
+    "body_sent": {
+      "Type": "m3u",
+      "Url": "http://host.docker.internal:1/x.m3u"
+    },
+    "status": 500,
+    "content_type": "text/plain",
+    "response": "Error processing request."
+  },
+  {
+    "case": "tuner: Url answers 404",
+    "request": "POST /LiveTv/TunerHosts",
+    "body_sent": {
+      "Type": "m3u",
+      "Url": "http://host.docker.internal:<FEED_PORT>/nope.m3u"
+    },
+    "status": 500,
+    "content_type": "text/plain",
+    "response": "Error processing request."
+  },
+  {
+    "case": "tuner: Url serves XMLTV, not M3U",
+    "request": "POST /LiveTv/TunerHosts",
+    "body_sent": {
+      "Type": "m3u",
+      "Url": "http://host.docker.internal:<FEED_PORT>/epg.xml"
+    },
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "response": "stored: {\"Type\": \"m3u\", \"Url\": \"http://host.docker.internal:<FEED_PORT>/epg.xml\"}"
+  },
+  {
+    "case": "listing: no Type",
+    "request": "POST /LiveTv/ListingProviders",
+    "body_sent": {
+      "Path": "http://host.docker.internal:<FEED_PORT>/epg.xml"
+    },
+    "status": 404,
+    "content_type": "text/plain",
+    "response": "Error processing request."
+  },
+  {
+    "case": "listing: unknown Type",
+    "request": "POST /LiveTv/ListingProviders",
+    "body_sent": {
+      "Type": "bogus",
+      "Path": "http://host.docker.internal:<FEED_PORT>/epg.xml"
+    },
+    "status": 404,
+    "content_type": "text/plain",
+    "response": "Error processing request."
+  },
+  {
+    "case": "listing: no Path",
+    "request": "POST /LiveTv/ListingProviders",
+    "body_sent": {
+      "Type": "xmltv"
+    },
+    "status": 500,
+    "content_type": "text/plain",
+    "response": "Error processing request."
+  },
+  {
+    "case": "listing: missing local file",
+    "request": "POST /LiveTv/ListingProviders",
+    "body_sent": {
+      "Type": "xmltv",
+      "Path": "/nonexistent/guide.xml"
+    },
+    "status": 404,
+    "content_type": "text/plain",
+    "response": "Error processing request."
+  },
+  {
+    "case": "listing: Path refuses connections",
+    "request": "POST /LiveTv/ListingProviders",
+    "body_sent": {
+      "Type": "xmltv",
+      "Path": "http://host.docker.internal:1/x.xml"
+    },
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "response": "stored: {\"Type\": \"xmltv\", \"Path\": \"http://host.docker.internal:1/x.xml\", \"EnableAllTuners\": true}"
+  },
+  {
+    "case": "listing: Type and Path only",
+    "request": "POST /LiveTv/ListingProviders",
+    "body_sent": {
+      "Type": "xmltv",
+      "Path": "http://host.docker.internal:<FEED_PORT>/epg.xml"
+    },
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "response": "stored: {\"Type\": \"xmltv\", \"Path\": \"http://host.docker.internal:<FEED_PORT>/epg.xml\", \"EnableAllTuners\": true}"
+  },
+  {
+    "case": "delete tuner: unknown id",
+    "request": "DELETE /LiveTv/TunerHosts?id=doesnotexist",
+    "body_sent": null,
+    "status": 204,
+    "content_type": "",
+    "response": ""
+  },
+  {
+    "case": "delete tuner: no id",
+    "request": "DELETE /LiveTv/TunerHosts",
+    "body_sent": null,
+    "status": 204,
+    "content_type": "",
+    "response": ""
+  },
+  {
+    "case": "delete listing: unknown id",
+    "request": "DELETE /LiveTv/ListingProviders?id=doesnotexist",
+    "body_sent": null,
+    "status": 204,
+    "content_type": "",
+    "response": ""
+  },
+  {
+    "case": "start task: unknown id",
+    "request": "POST /ScheduledTasks/Running/00000000000000000000000000000000",
+    "body_sent": null,
+    "status": 404,
+    "content_type": "application/json; charset=utf-8",
+    "response": "{\"type\":\"https://tools.ietf.org/html/rfc9110#section-15.5.5\",\"title\":\"Not Found\",\"status\":404,\"traceId\":\"00-748552bf245f287a1de7476c0a94aeb2-6141e5bd2f3d817b-00"
+  }
+]
