@@ -143,6 +143,17 @@ warn_unused_configs = true
 # failover 30.
 files = [
     "Jellyball/channels.py",
+    "Jellyball/dashboard_cards.py",
+    "Jellyball/migrations_engine.py",
+    "Jellyball/migrations_jellyfin.py",
+    "Jellyball/migrations_providers.py",
+    "Jellyball/migrations_setup.py",
+    "Jellyball/migrations_sports.py",
+    "Jellyball/routes_engine.py",
+    "Jellyball/routes_jellyfin.py",
+    "Jellyball/routes_providers.py",
+    "Jellyball/routes_setup.py",
+    "Jellyball/routes_sports.py",
     "Jellyball/config.py",
     "Jellyball/jellyball_launcher.py",
     "Jellyball/main.py",
