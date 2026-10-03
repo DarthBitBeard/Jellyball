@@ -455,7 +455,11 @@ class RateLimitMiddleware:
         await response(scope, receive, send)
 
 
-app = FastAPI(title="Jellyball", version=__version__, lifespan=lifespan)
+
+# FastAPI's own /docs, /redoc and /openapi.json are off: they were the only
+# unauthenticated admin surface. routes_setup serves them behind the dashboard
+# login when JELLYBALL_API_DOCS=1.
+app = FastAPI(title="Jellyball", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(CsrfOriginMiddleware)
 app.add_middleware(RequestDiagnosticsMiddleware)
 app.add_middleware(RateLimitMiddleware)
