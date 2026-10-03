@@ -53,6 +53,7 @@ from db import (
 )
 import security
 from security import _configure_dashboard_auth, CsrfOriginMiddleware
+import http_hardening
 import scrapers
 import catalog
 from catalog import _special_channel_for, _sport_labeled_name, resolve_espn_logo
@@ -458,6 +459,8 @@ app = FastAPI(title="Jellyball", version=__version__, lifespan=lifespan)
 app.add_middleware(CsrfOriginMiddleware)
 app.add_middleware(RequestDiagnosticsMiddleware)
 app.add_middleware(RateLimitMiddleware)
+# Outermost, so the CSRF 403 and the diagnostics 500 carry the headers too.
+app.add_middleware(http_hardening.SecurityHeadersMiddleware)
 
 # Dashboard static assets (the templates are routes_dashboard.TEMPLATES). Resolved
 # with _resource_path so the source tree and the PyInstaller bundle both work.
