@@ -1,5 +1,14 @@
 name: Release
 
+# Pushing a tag vX.Y.Z (or vX.Y.Z-beta.1, -rc.1, ...) runs the tests, builds the
+# Windows installer and the Docker image, and creates the GitHub release with
+# the installer, SHA256SUMS and notes taken from that version's CHANGELOG.md
+# section. A tag containing "-" is published as a pre-release.
+#
+# This workflow only runs when a tag is pushed (or by hand, which builds the
+# installer as an artifact and publishes nothing): nothing here is triggered by
+# a pull request or a branch push.
+
 on:
   push:
     tags:
@@ -16,10 +25,51 @@ on:
         default: ""
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  IMAGE_NAME: ghcr.io/darthbitbeard/jellyball
 
 jobs:
+  # Gate: nothing is built or published unless the tag matches version.py, the
+  # CHANGELOG has a section for it, and the unit suite and linters pass.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: Jellyball/requirements.txt
+
+      - name: Tag matches version.py and the changelog has notes for it
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          file_version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' Jellyball/version.py)
+          if [ "$version" != "$file_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Jellyball/version.py ($file_version)"
+            exit 1
+          fi
+          python Jellyball/tools/changelog.py notes "$version" > /dev/null
+
+      - name: Install dependencies
+        run: pip install -r Jellyball/requirements.txt ruff==0.16.9 mypy==2.4.0
+
+      - name: Run unit tests
+        working-directory: Jellyball
+        run: python -m unittest discover -p "test_*.py"
+
+      - name: Lint (ruff)
+        run: ruff check Jellyball
+
+      - name: Type-check
+        run: mypy --config-file pyproject.toml
+
   build-installer:
+    needs: verify
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -68,16 +118,101 @@ jobs:
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         run: ./build-installer.ps1
 
+      # build-installer.ps1 writes SHA256SUMS (computed after signing) next to
+      # the installer; both files travel together.
       - name: Upload installer artifact
         uses: actions/upload-artifact@v7
         with:
           name: JellyballSetup
-          path: Jellyball/installer/Output/JellyballSetup-*.exe
+          path: |
+            Jellyball/installer/Output/JellyballSetup-*.exe
+            Jellyball/installer/Output/SHA256SUMS
           if-no-files-found: error
 
-      - name: Attach installer to GitHub release
+  # The container image: linux/amd64 only for now. On a tag it is pushed to
+  # GHCR with build provenance and an SBOM attached; on a manual run it is
+  # built but not pushed.
+  docker-image:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
         if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # vX.Y.Z -> X.Y.Z, X.Y and latest; vX.Y.Z-beta.1 -> only X.Y.Z-beta.1
+      # (pre-release tags never move "latest" or the X.Y tag).
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          flavor: |
+            latest=auto
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./Jellyball
+          file: ./Jellyball/Dockerfile
+          platforms: linux/amd64
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-installer, docker-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: JellyballSetup
+          path: release-assets
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          python Jellyball/tools/changelog.py notes "${GITHUB_REF_NAME#v}" > release-notes.md
+          test -s release-notes.md
+
+      - name: Verify the checksum of the installer we are about to publish
+        working-directory: release-assets
+        run: sha256sum -c SHA256SUMS
+
+      # Pre-release when the tag has a suffix: v2.1.0-beta.1, v2.1.0-rc.1, ...
+      - name: Create the GitHub release
         uses: softprops/action-gh-release@v3
         with:
-          files: Jellyball/installer/Output/JellyballSetup-*.exe
+          body_path: release-notes.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            release-assets/JellyballSetup-*.exe
+            release-assets/SHA256SUMS
           fail_on_unmatched_files: true
