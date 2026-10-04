@@ -30,6 +30,12 @@ class FakeSettings:
         self.values[key] = value
 
 
+def _reset_engine_cache():
+    """Test-only reset for engine_settings' 30s cache (no production invalidation path)."""
+    engine_settings._cache["value"] = None
+    engine_settings._cache["at"] = 0.0
+
+
 class AudioLanguageSettingTests(unittest.TestCase):
     def setUp(self):
         self.fake = FakeSettings()
@@ -39,12 +45,12 @@ class AudioLanguageSettingTests(unittest.TestCase):
         ]
         for p in self._patches:
             p.start()
-        engine_settings._clear_cache()
+        _reset_engine_cache()
 
     def tearDown(self):
         for p in self._patches:
             p.stop()
-        engine_settings._clear_cache()
+        _reset_engine_cache()
 
     def test_default_is_no_preference(self):
         self.assertIsNone(engine_settings.preferred_audio_language())
@@ -193,12 +199,12 @@ class HttpSurfaceTests(unittest.TestCase):
         fake = FakeSettings()
         with patch.object(engine_settings, "get_setting", fake.get), \
                 patch.object(engine_settings, "set_setting", fake.set):
-            engine_settings._clear_cache()
+            _reset_engine_cache()
             response = _request(
                 "POST", "/settings/audio-language", data={"preferred_audio_language": "deu"},
                 headers={"Origin": "http://127.0.0.1:8000"},
             )
-            engine_settings._clear_cache()
+            _reset_engine_cache()
         self.assertEqual(response.status_code, 303)
         self.assertEqual(fake.values[engine_settings.AUDIO_LANGUAGE_KEY], "deu")
 

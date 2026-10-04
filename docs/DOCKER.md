@@ -153,13 +153,14 @@ What the proxy must get right:
   that header.
 * **Do not buffer streams**: turn off response buffering and allow long reads
   (live segments are served as they arrive).
-* **Client address**: the login lockout is per client address. If the proxy
-  does not pass the real client address, all users share one lockout (8 failures
-  lock everyone for five minutes). Jellyball runs on uvicorn, which honours
-  `X-Forwarded-For`/`X-Forwarded-Proto` only from addresses listed in the
-  `FORWARDED_ALLOW_IPS` environment variable (default `127.0.0.1`); when the
-  proxy runs in another container add its address or network there. This is
-  uvicorn behaviour that has not been tested with Jellyball.
+* **Client address**: the login lockout is per client address and username.
+  If the proxy does not pass the real client address, all users behind it
+  share one peer address (the lockout is still per username, so one
+  attacker's failures cannot lock everyone out). Jellyball passes the
+  `FORWARDED_ALLOW_IPS` environment variable (default `127.0.0.1`,
+  comma-separated) to uvicorn, which then honours `X-Forwarded-For`/
+  `X-Forwarded-Proto` only from those addresses; when the proxy runs in
+  another container add its address or network there.
 * TLS terminates at the proxy; Jellyball itself speaks plain HTTP.
 
 ### Caddy
