@@ -12,7 +12,7 @@ You do **not** need write access to this repository.
 2. **Clone your fork** and create a branch off `master`
 3. **Push** commits to your fork
 4. Open a **pull request** into `DarthBitBeard/Jellyball` → `master`
-5. Wait for CI (unit tests, ruff, e2e, Docker smoke) and maintainer review
+5. Wait for CI (unit tests + ruff on Windows and Linux are required; e2e and Docker smoke also run as informational checks) and maintainer review
 
 ```bash
 git clone https://github.com/<your-username>/Jellyball.git
