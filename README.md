@@ -85,6 +85,10 @@ cp .env.example .env
 python main.py
 ```
 
+On Linux, install the browser with `python -m playwright install --with-deps
+chromium` instead (needs root): without the system libraries Chromium cannot
+launch and Jellyball silently falls back to HTTP-only stream extraction.
+
 ## Connect Jellyfin
 
 1. Open the Jellyball dashboard, go to **Channels & Streams**, expand a Sports

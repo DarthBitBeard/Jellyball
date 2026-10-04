@@ -3,6 +3,7 @@
 and when the lookup counts as failed."""
 
 import asyncio
+import socket
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -14,6 +15,13 @@ import config
 import espn_schedule
 import failover
 import state
+from network_safety import clear_dns_cache
+
+
+def _public_getaddrinfo(host, port, *args, **kwargs):
+    """Stub DNS: every hostname resolves to a public address, so
+    validate_http_url_async's DNS check doesn't depend on real network access."""
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
 
 
 NOW = datetime(2026, 10, 4, 18, 0, tzinfo=timezone.utc)
@@ -52,14 +60,17 @@ def _fetch(handler, *args, **kwargs):
         return handler(request)
 
     async def go():
+        clear_dns_cache()
         client = httpx.AsyncClient(transport=httpx.MockTransport(recording_handler))
         try:
             with patch.object(state, "SHARED_HTTP_CLIENT", client), \
                     patch.object(espn_schedule, "datetime", _FrozenDatetime), \
-                    patch.object(config.LOGGER, "warning"), patch.object(config.LOGGER, "log"):
+                    patch.object(config.LOGGER, "warning"), patch.object(config.LOGGER, "log"), \
+                    patch.object(socket, "getaddrinfo", side_effect=_public_getaddrinfo):
                 return await espn_schedule.fetch_espn_team_schedule(*args, **kwargs)
         finally:
             await client.aclose()
+            clear_dns_cache()
 
     return asyncio.run(go()), [str(request.url) for request in requests]
 
