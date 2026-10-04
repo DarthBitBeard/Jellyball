@@ -21,7 +21,7 @@ import provider_settings
 import provider_telemetry as telemetry
 import state
 from db import _db_session, get_setting, get_setting_async
-from network_safety import bounded_float, bounded_int, validate_http_url
+from network_safety import bounded_float, bounded_int, safe_get, validate_http_url
 from sports_matcher import canonical_team_name, clean_sports_text, get_team_search_terms, match_team
 from stream_extractor import (
     DEFAULT_USER_AGENT,
@@ -724,10 +724,10 @@ class IptvOrgScraper(BaseProvider):
                 return _IPTV_ORG_CACHE
 
             owns_client = http_client is None
-            client = http_client or httpx.AsyncClient(timeout=15.0, follow_redirects=True)
+            client = http_client or httpx.AsyncClient(timeout=15.0, follow_redirects=False)
             try:
-                resp = await client.get(url, headers={"User-Agent": DEFAULT_USER_AGENT})
-                if resp.status_code == 200:
+                resp = await safe_get(client, url, headers={"User-Agent": DEFAULT_USER_AGENT})
+                if resp is not None and resp.status_code == 200:
                     _IPTV_ORG_CACHE = _parse_m3u_playlist(resp.text)
                     _IPTV_ORG_CACHE_LOADED_AT = now
             except Exception as exc:

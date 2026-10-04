@@ -11,6 +11,8 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 
+from network_safety import safe_get
+
 from config import _m3u_attribute, _m3u_title, _public_base_url, _xml_attr, _xml_text, LOGGER
 import state
 from state import stream_state
@@ -135,11 +137,11 @@ async def _fetch_tvguide_epg() -> Dict[str, List[dict]]:
         "User-Agent": DEFAULT_USER_AGENT,
         "Referer": "https://www.tvguide.com/",
     }
-    client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=10.0, follow_redirects=True)
+    client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=10.0, follow_redirects=False)
     owns_client = state.SHARED_HTTP_CLIENT is None
     try:
-        resp = await client.get(url, headers=headers)
-        if resp.status_code == 200:
+        resp = await safe_get(client, url, headers=headers)
+        if resp is not None and resp.status_code == 200:
             items = resp.json().get("data", {}).get("items", [])
             schedules: Dict[str, List[dict]] = {}
             for item in items:

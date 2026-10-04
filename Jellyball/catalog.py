@@ -15,7 +15,7 @@ import httpx
 from config import _log_failure, _safe_team_id, LOGGER
 import state
 from leagues import CATALOG_CATEGORIES, COLLEGE_CATEGORIES, LEAGUES
-from network_safety import bounded_float
+from network_safety import bounded_float, safe_get
 from sports_catalog import (
     ESPN_DIRECTORY_ENDPOINTS,
     parse_espn_team_directory,
@@ -59,9 +59,10 @@ async def _fetch_espn_directory(category: str, client: httpx.AsyncClient) -> Tup
     sport, league = endpoint
     url = f"https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams"
     try:
-        response = await client.get(url, params={"limit": "1000"})
-        if response.status_code != 200:
-            LOGGER.warning("ESPN catalog request category=%s status=%s", category, response.status_code)
+        response = await safe_get(client, url, params={"limit": "1000"})
+        if response is None or response.status_code != 200:
+            LOGGER.warning("ESPN catalog request category=%s status=%s", category,
+                           response.status_code if response is not None else "fetch-failed")
             return ()
         records = parse_espn_team_directory(response.json(), category)
         return tuple(record.for_category(category) for record in records)
@@ -97,7 +98,7 @@ async def get_team_catalog() -> Dict[str, Tuple[TeamSlug, ...]]:
         owns_client = state.SHARED_HTTP_CLIENT is None
         client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(
             timeout=10.0,
-            follow_redirects=True,
+            follow_redirects=False,
             http2=True,
         )
         try:

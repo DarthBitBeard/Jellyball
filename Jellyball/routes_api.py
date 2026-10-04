@@ -419,7 +419,7 @@ async def test_stream(team_id: str, auth: bool = Depends(verify_dashboard_auth))
         }
     except Exception as exc:
         _log_failure(f"test stream {team_id}", exc)
-        return {"status": "error"}
+        raise HTTPException(status_code=500, detail="Stream test failed")
 
 
 @router.get("/api/version")

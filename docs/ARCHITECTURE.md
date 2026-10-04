@@ -123,6 +123,10 @@ any of them breaks Jellyfin installations that already map channels.
 ## Planned for 2.1.0 (not in the code yet)
 
 Stored per-game schedules and richer guide entries, a connect-Jellyfin wizard,
-per-provider health and enable/disable controls, a diagnostics bundle and a
-login page. See the 2.1.0 changelog when it ships rather than relying on this
-list.
+a diagnostics bundle and a login page. See the 2.1.0 changelog when it ships
+rather than relying on this list.
+
+## Shipped in 2.1.0
+
+Per-provider health and enable/disable controls: the Provider Status card on
+the Performance tab (`routes_providers.py`, `provider_settings.py`).

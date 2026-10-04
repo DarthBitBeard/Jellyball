@@ -10,7 +10,9 @@ import socket
 import threading
 import time
 import urllib.parse
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
+
+import httpx
 
 
 _LOCAL_HOSTNAMES = {
@@ -257,3 +259,47 @@ async def validate_http_url_async(value: str, *, allow_private: Optional[bool] =
     hostname_key = hostname.rstrip(".")
     decision = await _resolve_dns_verdict(hostname_key, port, allow_private, DNS_RESOLVE_TIMEOUT)
     return safe_url if decision else None
+
+
+async def safe_get(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    max_redirects: int = 5,
+    allow_private: Optional[bool] = None,
+    **kwargs: Any,
+) -> Optional[httpx.Response]:
+    """GET with manual redirect following and per-hop SSRF validation.
+
+    Mirrors httpx's automatic redirect handling for GET (301/302/303/307/308,
+    headers forwarded, one-shot ``params`` applied to the first request only)
+    but runs the initial URL and every redirect hop through
+    :func:`validate_http_url_async`, so a compromised or DNS-hijacked upstream
+    cannot bounce the fetcher onto a private, loopback, or link-local address.
+
+    Returns the final response, or ``None`` when any hop fails validation, the
+    redirect chain is too long or location-less, or the request raises. Callers
+    should treat ``None`` like any other fetch failure.
+    """
+    kwargs = dict(kwargs)
+    kwargs["follow_redirects"] = False
+    current_url = url
+    for _ in range(max_redirects + 1):
+        safe_url = await validate_http_url_async(current_url, allow_private=allow_private)
+        if not safe_url:
+            return None
+        try:
+            response = await client.get(safe_url, **kwargs)
+        except Exception:
+            return None
+        if 300 <= response.status_code < 400:
+            location = response.headers.get("location")
+            if not location:
+                return None
+            current_url = urllib.parse.urljoin(str(response.url), location)
+            # The Location URL is authoritative on redirect hops; do not
+            # re-apply the first request's query params (matches httpx).
+            kwargs.pop("params", None)
+            continue
+        return response
+    return None

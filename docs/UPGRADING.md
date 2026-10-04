@@ -90,8 +90,9 @@ Follow "Upgrading and rolling back" in
 ### From source
 
 Stop Jellyball, `git checkout vX.Y.Z`, `pip install -r requirements.txt`,
-`python -m playwright install chromium` (Playwright's version pins the browser
-build), start it again.
+`python -m playwright install chromium` (on Linux use `--with-deps`, which
+needs root, so the browser gets its system libraries; Playwright's version
+pins the browser build), start it again.
 
 ### Beta and release-candidate versions
 

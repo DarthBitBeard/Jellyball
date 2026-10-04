@@ -44,8 +44,3 @@ def save_audio_language(raw: object) -> str:
     _cache["value"] = code
     _cache["at"] = time.monotonic()
     return code
-
-
-def _clear_cache() -> None:
-    _cache["value"] = None
-    _cache["at"] = 0.0

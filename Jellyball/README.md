@@ -105,6 +105,10 @@ cp .env.example .env   # edit as needed
 python main.py
 ```
 
+On Linux, install the browser with `python -m playwright install --with-deps
+chromium` instead (needs root): without the system libraries Chromium cannot
+launch and Jellyball silently falls back to HTTP-only stream extraction.
+
 Requires Python 3.12+. On first launch, Jellyball creates its data directory
 (`%LOCALAPPDATA%\Jellyball` on Windows, `~/.local/share/Jellyball` on Linux,
 or `$JELLYBALL_DATA_DIR` if set) with a starter `.env`, `sports_proxy.db`,

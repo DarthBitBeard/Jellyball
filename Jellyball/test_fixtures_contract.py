@@ -147,7 +147,7 @@ def shifted(document, offsets):
     return result
 
 
-class EspnScheduleContractTests(unittest.IsolatedAsyncioTestCase):
+class EspnScheduleContractTests(OfflineCase):
     NFL = fixture_json("espn", "nfl_team_schedule_buf.json")
     MLS = fixture_json("espn", "mls_team_schedule_inter_miami.json")
     FAR = timedelta(days=40)
@@ -214,7 +214,7 @@ class EspnScheduleContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, (None, None, False))
 
 
-class EspnDirectoryContractTests(unittest.IsolatedAsyncioTestCase):
+class EspnDirectoryContractTests(OfflineCase):
     NFL = fixture_json("espn", "nfl_teams.json")
     COLLEGE = fixture_json("espn", "college_football_teams.json")
 
@@ -260,10 +260,11 @@ class EspnDirectoryContractTests(unittest.IsolatedAsyncioTestCase):
 # --------------------------------------------------------------------------- #
 # TVGuide
 # --------------------------------------------------------------------------- #
-class TvGuideContractTests(unittest.IsolatedAsyncioTestCase):
+class TvGuideContractTests(OfflineCase):
     DOCUMENT = fixture_json("tvguide", "schedule.json")
 
     def setUp(self):
+        super().setUp()
         saved = (epg._TVGUIDE_EPG_CACHE, epg._TVGUIDE_EPG_CACHED_AT)
         epg._TVGUIDE_EPG_CACHE, epg._TVGUIDE_EPG_CACHED_AT = {}, 0.0
         self.addCleanup(lambda: (setattr(epg, "_TVGUIDE_EPG_CACHE", saved[0]), setattr(epg, "_TVGUIDE_EPG_CACHED_AT", saved[1])))

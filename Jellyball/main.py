@@ -456,6 +456,10 @@ def build_server(host: str, port: int):
         timeout_keep_alive=30,
         # Streaming responses would otherwise hold shutdown open indefinitely.
         timeout_graceful_shutdown=10,
+        # Honour X-Forwarded-For/X-Forwarded-Proto only from these addresses
+        # (comma-separated; default loopback). Lets the login lockout and
+        # request logs see the real client IP behind a reverse proxy.
+        forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
     )
     return uvicorn.Server(config)
 
@@ -582,7 +586,7 @@ class TrayApplication:
                 webbrowser.open(f"http://127.0.0.1:{config.PORT}/")
                 return
             if not _wait_for_port(host, config.PORT, 10.0):
-                selected_port = _find_available_port(config.PORT)
+                selected_port = _find_available_port(config.PORT, host)
                 LOGGER.warning(
                     "Configured port %s is in use by another program; using %s for this desktop session "
                     "(Jellyfin tuner URLs pointing at %s will not work until it is free)",

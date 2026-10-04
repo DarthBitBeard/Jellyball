@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import shutil
+import socket
 import tempfile
 import unittest
 import asyncio
@@ -79,7 +80,7 @@ from state import stream_state
 from config import _upstream_media_headers
 
 from stream_extractor import extract_streams_from_text, verify_stream_live
-from network_safety import validate_http_url
+from network_safety import clear_dns_cache, validate_http_url
 from starlette.requests import Request
 from sports_catalog import SPECIAL_CHANNELS
 import config
@@ -89,6 +90,12 @@ import db
 import scrapers
 import legacy_proxy
 import multiview
+
+
+def _public_getaddrinfo(host, port, *args, **kwargs):
+    """Stub DNS: every hostname resolves to a public address, so
+    validate_http_url_async's DNS check doesn't depend on real network access."""
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
 
 
 class JellyballChangesTests(unittest.TestCase):
@@ -582,8 +589,15 @@ class JellyballChangesTests(unittest.TestCase):
                 scraper = IptvOrgScraper()
                 transport = httpx.MockTransport(lambda request: httpx.Response(200, text=playlist))
                 async with httpx.AsyncClient(transport=transport) as client:
-                    with patch("scrapers.verify_stream_live", return_value=True):
-                        return await scraper.search(["espn"], http_client=client)
+                    # The playlist fetch now validates every redirect hop with a
+                    # DNS check; stub DNS so the test doesn't need real network.
+                    clear_dns_cache()
+                    with patch.object(socket, "getaddrinfo", side_effect=_public_getaddrinfo), \
+                            patch("scrapers.verify_stream_live", return_value=True):
+                        try:
+                            return await scraper.search(["espn"], http_client=client)
+                        finally:
+                            clear_dns_cache()
 
             results = asyncio.run(exercise())
         finally:

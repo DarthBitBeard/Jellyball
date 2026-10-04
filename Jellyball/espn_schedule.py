@@ -10,6 +10,8 @@ from typing import Optional
 
 import httpx
 
+from network_safety import safe_get
+
 from config import _log_failure, LOGGER
 from leagues import SCHEDULE_LEAGUES
 import state
@@ -46,11 +48,12 @@ async def fetch_espn_team_schedule(
     game_duration = schedule_league.game_duration
     upcoming = []
     owns_client = state.SHARED_HTTP_CLIENT is None
-    client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=8.0, follow_redirects=True, http2=True)
+    client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=8.0, follow_redirects=False, http2=True)
     try:
-        resp = await client.get(url)
-        if resp.status_code != 200:
-            LOGGER.warning("ESPN schedule request team=%s status=%s", team_name or query, resp.status_code)
+        resp = await safe_get(client, url)
+        if resp is None or resp.status_code != 200:
+            LOGGER.warning("ESPN schedule request team=%s status=%s", team_name or query,
+                           resp.status_code if resp is not None else "fetch-failed")
             return None, None, False
         data = resp.json()
         events = data.get("events", [])

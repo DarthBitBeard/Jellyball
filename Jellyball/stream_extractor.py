@@ -222,7 +222,10 @@ def unpack_js(script: str) -> str:
             unpacked = p
             for i in range(c - 1, -1, -1):
                 if k[i]:
-                    unpacked = re.sub(r'\\b' + decode_base(i, a) + r'\\b', k[i], unpacked)
+                    # Replacement via a function: k[i] comes from the page and
+                    # may contain backslashes or \1-style group references that
+                    # re.sub would otherwise interpret.
+                    unpacked = re.sub(r'\\b' + decode_base(i, a) + r'\\b', lambda _m, word=k[i]: word, unpacked)
             unpacked_script = unpacked_script.replace(match.group(0), unpacked)
         except Exception:
             continue
