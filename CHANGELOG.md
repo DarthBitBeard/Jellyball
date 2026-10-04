@@ -13,8 +13,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
   0.52.1 to 1.7.0, which brings FastAPI 0.128.8 to 0.142.2 and uvicorn
   0.52.4 to 0.54.0; Pillow is now 12.3.0 and python-dotenv 1.2.4. Also
   refreshed: cryptography 50.0.2, beautifulsoup4 4.15.0, tzdata 2026.4.
-  Playwright stays at 1.62.0 because it pins the bundled Chromium build. No
-  configuration or URL changes.
+  Playwright moves to 1.63.0 and PyInstaller to 6.22.3, keeping the bundled
+  Chromium build. No configuration or URL changes.
 
 ### Added
 

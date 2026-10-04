@@ -323,6 +323,7 @@ async function testTeamStream(teamId) {
     }
     try {
         const resp = await fetch(`/api/test-stream/${teamId}`, { method: 'POST' });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const result = await resp.json();
         if (resultEl) {
             const count = result.candidate_count || 0;
