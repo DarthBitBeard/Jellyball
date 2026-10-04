@@ -5,6 +5,36 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-04
+
+### Added
+
+- **Automatic database backup before a schema migration.** When an upgrade
+  has to change the database layout, Jellyball first copies the database to
+  `sports_proxy.db.bak-<version>` next to it (the newest three copies are
+  kept; a brand-new install makes none). The README's troubleshooting section
+  explains how to roll back with a copy.
+- Docker image on GHCR: Tagged releases publish `ghcr.io/darthbitbeard/jellyball` (linux/amd64, with build provenance and an SBOM; pre-releases get only their exact tag). `docker-compose.yml` now pulls that image by default, declares a healthcheck, and still builds locally with `docker compose build`. Set `JELLYBALL_IMAGE` to pin a version.
+- Documentation: New `docs/` guides: ARCHITECTURE, PROVIDERS, JELLYFIN (including Jellyfin 12 notes and a client compatibility table, all clients still unverified), TROUBLESHOOTING, DOCKER (GPU, reverse proxy and TLS) and UPGRADING (backups and rollback).
+- Checksums for every release: The release now includes a `SHA256SUMS` file for the installer (written by `build-installer.ps1` after signing, in `sha256sum` format).
+- Installer switches for unattended installs: `JellyballSetup-<version>.exe /VERYSILENT` now accepts `/PORT=`, `/USER=`, `/LAN=1|0` and `/DATADIR="D:\Folder"` (the data folder, handed to the service as its own `JELLYBALL_DATA_DIR`). Invalid values stop the install with a message. There is no password switch on purpose: a silent install without one lets Jellyball generate a password on first start in `dashboard-password.txt` in the data folder, and the installer log (`/LOG=`) names that file, never the password.
+- Count fallbacks to the legacy proxy by reason (fMP4, SAMPLE-AES, separate audio) and provider, in /metrics and on the Performance tab.
+- Linux systemd service: `deploy/linux/` has a `jellyball.service` unit and an install guide for running Jellyball without Docker.
+- Live Sessions panel on the Performance tab: per-channel bitrate, p95 latency, edge age, memory and failovers with sparklines, plus provider breaker state.
+- Preferred audio language: choose which audio track to use when a source carries several (Playback tab); the default is unchanged.
+- Provider silent alerts: a notification when a provider's index page lists no events for hours, its circuit breaker opens, or it has not succeeded in five days (at most one per provider and reason every six hours).
+- Provider Status card on the Performance tab: last success, index events, circuit breaker state, a Test button that runs one dry-run search, and per-provider enable/disable and priority.
+
+### Changed
+
+- Provider searches now record what actually happened (ok, empty, timeout or error), an error class, and how many events the provider's index page listed, so a site that silently stopped working is visible. History is kept for 14 days instead of 7.
+
+### Fixed
+
+- The Performance tab now refreshes when you switch to it, not only when the page was loaded on it.
+- The Provider Health Leaderboard no longer shows 0% for every provider: failovers are charged to the provider that failed (the event also names the successor) and the rate is the 24-hour search success rate.
+- The per-channel Test button now probes the channel's streams (playlist and a segment) instead of reporting the in-memory health flag.
+
 ### Security
 
 - **Dependency refresh closes every published advisory.** `pip-audit` reported
@@ -16,20 +46,13 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
   Playwright moves to 1.63.0 and PyInstaller to 6.22.3, keeping the bundled
   Chromium build. No configuration or URL changes.
 
-### Added
-
-- **Automatic database backup before a schema migration.** When an upgrade
-  has to change the database layout, Jellyball first copies the database to
-  `sports_proxy.db.bak-<version>` next to it (the newest three copies are
-  kept; a brand-new install makes none). The README's troubleshooting section
-  explains how to roll back with a copy.
-
 ### Internal
 
 - A 2.0.0 compatibility test suite freezes channel ids, `tvg-id`s, the exact
   M3U playlist, XMLTV channel ids, the public routes and database upgrades, so
   refactors cannot silently break an existing Jellyfin setup. CI also gained
   non-required coverage, mypy, Python 3.13 and `pip-audit` jobs.
+- A tag push now runs the unit tests, linters and type check before building; publishes the installer, `SHA256SUMS` and the Docker image; takes the release notes from the matching CHANGELOG.md section; and marks tags containing a hyphen (for example `v2.1.0-beta.1`) as pre-releases.
 
 ## [2.0.1] - 2026-10-02
 
