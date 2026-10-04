@@ -1,1 +1,0 @@
-A tag push now runs the unit tests, linters and type check before building; publishes the installer, `SHA256SUMS` and the Docker image; takes the release notes from the matching CHANGELOG.md section; and marks tags containing a hyphen (for example `v2.1.0-beta.1`) as pre-releases.

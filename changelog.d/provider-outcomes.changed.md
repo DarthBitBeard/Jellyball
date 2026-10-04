@@ -1,1 +1,0 @@
-Provider searches now record what actually happened (ok, empty, timeout or error), an error class, and how many events the provider's index page listed, so a site that silently stopped working is visible. History is kept for 14 days instead of 7.

@@ -1,1 +1,0 @@
-Documentation: New `docs/` guides: ARCHITECTURE, PROVIDERS, JELLYFIN (including Jellyfin 12 notes and a client compatibility table, all clients still unverified), TROUBLESHOOTING, DOCKER (GPU, reverse proxy and TLS) and UPGRADING (backups and rollback).
