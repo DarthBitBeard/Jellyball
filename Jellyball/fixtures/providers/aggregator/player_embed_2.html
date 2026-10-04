@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Player</title>
+</head>
+<body>
+  <video id="v" controls></video>
+
+  <!-- The manifest URL is base64-encoded and decoded in the browser:
+       https://cdn.example.test/live/gators-b64/playlist.m3u8 -->
+  <script>
+    var encoded = atob("aHR0cHM6Ly9jZG4uZXhhbXBsZS50ZXN0L2xpdmUvZ2F0b3JzLWI2NC9wbGF5bGlzdC5tM3U4");
+    var hls = new Hls();
+    hls.loadSource(encoded);
+    hls.attachMedia(document.getElementById("v"));
+  </script>
+
+  <!-- A backup feed loaded with a protocol-relative URL. -->
+  <script>
+    var backup = new Hls();
+    backup.loadSource('//cdn.example.test/live/gators-proto/index.m3u8');
+  </script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+Provider silent alerts: a notification when a provider's index page lists no events for hours, its circuit breaker opens, or it has not succeeded in five days (at most one per provider and reason every six hours).

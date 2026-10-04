@@ -1,6 +1,9 @@
-# Pinned to a Debian release so a rebuild doesn't silently move to a new base OS.
+# Pinned by digest (2026-10-02) so a rebuild doesn't silently move to a new
+# base OS or Python patch. Dependabot proposes digest bumps; the tag beside
+# the digest is documentation (the digest is authoritative). Debian bookworm is
+# the OS pin; python:3.12.x is the interpreter pin.
 # Playwright's Chromium is only published for amd64 and arm64 Linux.
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm@sha256:9901e0a8d75037d8242ed43155cbcb2d1f61be1356383d8054afb59fd50e39c4
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

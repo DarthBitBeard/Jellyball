@@ -1,0 +1,228 @@
+{
+  "sports": [
+    {
+      "id": "20",
+      "leagues": [
+        {
+          "abbreviation": "NFL",
+          "id": "28",
+          "name": "National Football League",
+          "season": {
+            "displayName": "2026",
+            "year": 2026
+          },
+          "shortName": "NFL",
+          "slug": "nfl",
+          "teams": [
+            {
+              "team": {
+                "abbreviation": "ARI",
+                "alternateColor": "ffffff",
+                "color": "a40227",
+                "displayName": "Arizona Cardinals",
+                "id": "22",
+                "isActive": true,
+                "isAllStar": false,
+                "links": [
+                  {
+                    "href": "https://www.espn.com/nfl/team/_/name/ari/arizona-cardinals",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "shortText": "Clubhouse",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "href": "https://www.espn.com/nfl/team/roster/_/name/ari/arizona-cardinals",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "roster",
+                      "desktop"
+                    ],
+                    "shortText": "Roster",
+                    "text": "Roster"
+                  }
+                ],
+                "location": "Arizona",
+                "logos": [
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500/ari.png",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "width": 500
+                  },
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500-dark/ari.png",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "width": 500
+                  }
+                ],
+                "name": "Cardinals",
+                "nickname": "Cardinals",
+                "shortDisplayName": "Cardinals",
+                "slug": "arizona-cardinals",
+                "uid": "s:20~l:28~t:22"
+              }
+            },
+            {
+              "team": {
+                "abbreviation": "ATL",
+                "alternateColor": "000000",
+                "color": "a71930",
+                "displayName": "Atlanta Falcons",
+                "id": "1",
+                "isActive": true,
+                "isAllStar": false,
+                "links": [
+                  {
+                    "href": "https://www.espn.com/nfl/team/_/name/atl/atlanta-falcons",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "shortText": "Clubhouse",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "href": "https://www.espn.com/nfl/team/roster/_/name/atl/atlanta-falcons",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "roster",
+                      "desktop"
+                    ],
+                    "shortText": "Roster",
+                    "text": "Roster"
+                  }
+                ],
+                "location": "Atlanta",
+                "logos": [
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500/atl.png",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "width": 500
+                  },
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500-dark/atl.png",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "width": 500
+                  }
+                ],
+                "name": "Falcons",
+                "nickname": "Falcons",
+                "shortDisplayName": "Falcons",
+                "slug": "atlanta-falcons",
+                "uid": "s:20~l:28~t:1"
+              }
+            },
+            {
+              "team": {
+                "abbreviation": "BAL",
+                "alternateColor": "000000",
+                "color": "29126f",
+                "displayName": "Baltimore Ravens",
+                "id": "33",
+                "isActive": true,
+                "isAllStar": false,
+                "links": [
+                  {
+                    "href": "https://www.espn.com/nfl/team/_/name/bal/baltimore-ravens",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "shortText": "Clubhouse",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "href": "https://www.espn.com/nfl/team/roster/_/name/bal/baltimore-ravens",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "roster",
+                      "desktop"
+                    ],
+                    "shortText": "Roster",
+                    "text": "Roster"
+                  }
+                ],
+                "location": "Baltimore",
+                "logos": [
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500/bal.png",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "width": 500
+                  },
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500-dark/bal.png",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "width": 500
+                  }
+                ],
+                "name": "Ravens",
+                "nickname": "Ravens",
+                "shortDisplayName": "Ravens",
+                "slug": "baltimore-ravens",
+                "uid": "s:20~l:28~t:33"
+              }
+            }
+          ],
+          "uid": "s:20~l:28",
+          "year": 2026
+        }
+      ],
+      "name": "Football",
+      "slug": "football",
+      "uid": "s:20"
+    }
+  ]
+}

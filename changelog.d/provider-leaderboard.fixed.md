@@ -1,0 +1,1 @@
+The Provider Health Leaderboard no longer shows 0% for every provider: failovers are charged to the provider that failed (the event also names the successor) and the rate is the 24-hour search success rate.

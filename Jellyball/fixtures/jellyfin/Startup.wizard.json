@@ -1,0 +1,61 @@
+[
+  {
+    "step": "GET /System/Info/Public",
+    "status": 200,
+    "response": {
+      "LocalAddress": "http://<CONTAINER_IP>:8096",
+      "ServerName": "<CONTAINER_HOSTNAME>",
+      "Version": "12.1.0",
+      "ProductName": "Jellyfin Server",
+      "OperatingSystem": "",
+      "Id": "<SERVER_ID>",
+      "StartupWizardCompleted": false
+    }
+  },
+  {
+    "step": "GET /Startup/Configuration",
+    "status": 200,
+    "response": {
+      "ServerName": "",
+      "UICulture": "en-US",
+      "MetadataCountryCode": "US",
+      "PreferredMetadataLanguage": "en"
+    }
+  },
+  {
+    "step": "POST /Startup/Configuration",
+    "status": 204,
+    "request": {
+      "ServerName": "jellyball-it",
+      "UICulture": "en-US",
+      "MetadataCountryCode": "US",
+      "PreferredMetadataLanguage": "en"
+    }
+  },
+  {
+    "step": "GET /Startup/User",
+    "status": 200,
+    "response": {
+      "Name": "root"
+    }
+  },
+  {
+    "step": "POST /Startup/User",
+    "status": 204,
+    "request": {
+      "Name": "jellyball-admin",
+      "Password": "<PASSWORD>"
+    }
+  },
+  {
+    "step": "POST /Startup/RemoteAccess",
+    "status": 204,
+    "request": {
+      "EnableRemoteAccess": true
+    }
+  },
+  {
+    "step": "POST /Startup/Complete",
+    "status": 204
+  }
+]

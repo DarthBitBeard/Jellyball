@@ -105,6 +105,10 @@ cp .env.example .env   # edit as needed
 python main.py
 ```
 
+On Linux, install the browser with `python -m playwright install --with-deps
+chromium` instead (needs root): without the system libraries Chromium cannot
+launch and Jellyball silently falls back to HTTP-only stream extraction.
+
 Requires Python 3.12+. On first launch, Jellyball creates its data directory
 (`%LOCALAPPDATA%\Jellyball` on Windows, `~/.local/share/Jellyball` on Linux,
 or `$JELLYBALL_DATA_DIR` if set) with a starter `.env`, `sports_proxy.db`,
@@ -627,6 +631,23 @@ are set, Jellyball sends:
 - **Multi-View Unstable** — a Multi-View grid is restarting repeatedly.
 
 Alerts are rate-limited per channel (`FAILOVER_ALERT_COOLDOWN`).
+
+---
+
+## More documentation
+
+| Guide | What it covers |
+| :--- | :--- |
+| [`docs/DOCKER.md`](../docs/DOCKER.md) | Image and tags, GPUs, reverse proxy and TLS |
+| [`deploy/linux/README.md`](../deploy/linux/README.md) | systemd service without Docker |
+| [`docs/JELLYFIN.md`](../docs/JELLYFIN.md) | Jellyfin setup, Jellyfin 12 notes, client compatibility |
+| [`docs/PROVIDERS.md`](../docs/PROVIDERS.md) | How providers work and what to do when one breaks |
+| [`docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md) | Symptoms and fixes |
+| [`docs/UPGRADING.md`](../docs/UPGRADING.md) | Upgrading, backups and rollback |
+| [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) | How the code fits together |
+
+Unattended Windows installs accept `/PORT=`, `/USER=`, `/LAN=1|0` and
+`/DATADIR=` (see the header of `Jellyball/installer/jellyball.iss`).
 
 ---
 

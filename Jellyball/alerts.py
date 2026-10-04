@@ -12,7 +12,7 @@ from typing import Optional
 import httpx
 
 from config import _log_failure, _validate_upstream_url, LOGGER
-from state import _spawn_background_task, stream_state
+from state import _spawn_background_task, is_multiview, stream_state
 from db import get_setting_async
 import catalog
 from jellyfin_client import RefreshResult, refresh_guide
@@ -162,7 +162,7 @@ def _guide_signature() -> str:
             data.get("schedule_status", ""),
             data.get("tvg_id", ""),
             data.get("group_title", ""),
-            bool(data.get("candidates")),
+            bool(data.get("candidates")) or is_multiview(data),
         )))
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 

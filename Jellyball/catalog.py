@@ -1,5 +1,6 @@
 """Channel catalog: the ESPN team directory, special channels, logos,
-team schedules, season windows and per-channel listing/metadata helpers.
+season windows and per-channel listing/metadata helpers. Team schedules are
+fetched by espn_schedule.py.
 """
 
 import asyncio
@@ -13,7 +14,8 @@ import httpx
 
 from config import _log_failure, _safe_team_id, LOGGER
 import state
-from network_safety import bounded_float
+from leagues import CATALOG_CATEGORIES, COLLEGE_CATEGORIES, LEAGUES
+from network_safety import bounded_float, safe_get
 from sports_catalog import (
     ESPN_DIRECTORY_ENDPOINTS,
     parse_espn_team_directory,
@@ -23,6 +25,8 @@ from sports_catalog import (
     TeamSlug,
 )
 from sports_matcher import canonical_team_name
+# Defined in espn_schedule.py; re-exported here for `from catalog import ...`.
+from espn_schedule import fetch_espn_team_schedule
 
 
 CATALOG_REFRESH_SECONDS = bounded_float(os.getenv("CATALOG_REFRESH_SECONDS", "3600"), 3600.0, 60.0, 86400.0)
@@ -36,7 +40,7 @@ CATALOG_FAILURE_RETRY_SECONDS = bounded_float(os.getenv("CATALOG_FAILURE_RETRY_S
 def _static_catalog_records(category: str) -> List[TeamSlug]:
     records: List[TeamSlug] = []
     for record in STATIC_TEAM_RECORDS:
-        if category in {"ncaaf", "ncaam"}:
+        if category in COLLEGE_CATEGORIES:
             if record.is_college:
                 records.append(record.for_category(category))
         elif record.category == category:
@@ -55,9 +59,10 @@ async def _fetch_espn_directory(category: str, client: httpx.AsyncClient) -> Tup
     sport, league = endpoint
     url = f"https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams"
     try:
-        response = await client.get(url, params={"limit": "1000"})
-        if response.status_code != 200:
-            LOGGER.warning("ESPN catalog request category=%s status=%s", category, response.status_code)
+        response = await safe_get(client, url, params={"limit": "1000"})
+        if response is None or response.status_code != 200:
+            LOGGER.warning("ESPN catalog request category=%s status=%s", category,
+                           response.status_code if response is not None else "fetch-failed")
             return ()
         records = parse_espn_team_directory(response.json(), category)
         return tuple(record.for_category(category) for record in records)
@@ -79,7 +84,7 @@ async def get_team_catalog() -> Dict[str, Tuple[TeamSlug, ...]]:
         if _CATALOG_CACHE and now - _CATALOG_CACHE_LOADED_AT < CATALOG_REFRESH_SECONDS:
             return dict(_CATALOG_CACHE)
 
-        categories = ("ncaaf", "ncaam", "nfl", "mlb", "nhl", "nba")
+        categories = CATALOG_CATEGORIES
         grouped: Dict[str, Dict[Tuple[str, str, str], TeamSlug]] = {
             category: {
                 _catalog_record_key(record): record
@@ -93,16 +98,16 @@ async def get_team_catalog() -> Dict[str, Tuple[TeamSlug, ...]]:
         owns_client = state.SHARED_HTTP_CLIENT is None
         client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(
             timeout=10.0,
-            follow_redirects=True,
+            follow_redirects=False,
             http2=True,
         )
         try:
             remote_results = await asyncio.gather(
-                *(_fetch_espn_directory(category, client) for category in ("ncaaf", "ncaam")),
+                *(_fetch_espn_directory(category, client) for category in COLLEGE_CATEGORIES),
                 return_exceptions=True,
             )
             remote_success = False
-            for category, result in zip(("ncaaf", "ncaam"), remote_results):
+            for category, result in zip(COLLEGE_CATEGORIES, remote_results):
                 if isinstance(result, tuple) and result:
                     remote_success = True
                     grouped[category] = {
@@ -134,10 +139,7 @@ def _catalog_team_id(category: str, source_id: str, name: str) -> str:
     return _safe_team_id(f"{category}_{source_id or name}")
 
 
-_COLLEGE_CATEGORY_LABELS = {
-    "ncaaf": "Football",
-    "ncaam": "Men's Basketball",
-}
+_COLLEGE_CATEGORY_LABELS = {league.key: league.sport_label for league in LEAGUES if league.sport_label}
 
 
 def _sport_labeled_name(name: str, category: str) -> str:
@@ -168,14 +170,7 @@ _SPECIAL_CHANNELS_BY_LABEL = {
     for label in (channel.name, *channel.search_terms)
     if _normalize_channel_label(label)
 }
-_CATEGORY_GROUP_LABELS = {
-    "ncaaf": "College Football",
-    "ncaam": "College Basketball",
-    "nfl": "NFL",
-    "mlb": "MLB",
-    "nhl": "NHL",
-    "nba": "NBA",
-}
+_CATEGORY_GROUP_LABELS = {league.key: league.group_title for league in LEAGUES}
 
 
 def _special_channel_for(data: dict):
@@ -271,7 +266,7 @@ def _special_catalog_entry(channel) -> dict:
 async def get_catalog_entries() -> List[dict]:
     grouped = await get_team_catalog()
     entries: List[dict] = []
-    for category in ("ncaaf", "ncaam", "nfl", "mlb", "nhl", "nba"):
+    for category in CATALOG_CATEGORIES:
         entries.extend(_team_catalog_entry(category, record) for record in grouped.get(category, ()))
     entries.extend(_special_catalog_entry(channel) for channel in SPECIAL_CHANNELS)
     return entries
@@ -333,92 +328,17 @@ def _resolve_espn_team(team_name: str) -> tuple[Optional[str], Optional[str], st
     return None, None, identity
 
 
+_CATEGORY_LOGO_SPORTS = {league.key: league.logo_sport for league in LEAGUES}
+
+
 def resolve_espn_logo(team_name: str, category: str = "", source_id: str = "") -> str:
-    category_logo_sports = {
-        "nfl": "nfl",
-        "ncaaf": "ncaa",
-        "ncaam": "ncaa",
-        "nba": "nba",
-        "mlb": "mlb",
-        "nhl": "nhl",
-    }
-    if category in category_logo_sports and source_id:
-        return f"{_ESPN_LOGO_CDN}/{category_logo_sports[category]}/500/{source_id}.png?v=titan2"
+    if category in _CATEGORY_LOGO_SPORTS and source_id:
+        return f"{_ESPN_LOGO_CDN}/{_CATEGORY_LOGO_SPORTS[category]}/500/{source_id}.png?v=titan2"
     sport, slug, _ = _resolve_espn_team(team_name)
     if sport and slug:
         return f"{_ESPN_LOGO_CDN}/{sport}/500/{slug}.png?v=titan2"
     return ""
 
-
-async def fetch_espn_team_schedule(
-    team_name: str,
-    query: str = "",
-    category: str = "",
-    source_id: str = "",
-) -> tuple[Optional[datetime], Optional[datetime], bool]:
-    api_map = {
-        "nfl": ("football", "nfl"),
-        "ncaaf": ("football", "college-football"),
-        "ncaam": ("basketball", "mens-college-basketball"),
-        "ncaa": ("football", "college-football"),
-        "nba": ("basketball", "nba"),
-        "mlb": ("baseball", "mlb"),
-        "nhl": ("hockey", "nhl"),
-        "soccer": ("soccer", "usa.1")
-    }
-
-    matched_sport = category
-    matched_slug = source_id
-    if not matched_sport or not matched_slug:
-        matched_sport, matched_slug, _ = _resolve_espn_team(team_name or query)
-    if not matched_sport or not matched_slug:
-        return None, None, False
-    
-    if matched_sport not in api_map:
-        return None, None, False
-        
-    sport, league = api_map[matched_sport]
-    url = f"https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams/{matched_slug}/schedule"
-    
-    now_utc = datetime.now(timezone.utc)
-    duration_by_sport = {
-        "football": timedelta(hours=4),
-        "basketball": timedelta(hours=3),
-        "baseball": timedelta(hours=4),
-        "hockey": timedelta(hours=3),
-        "soccer": timedelta(hours=2.5),
-    }
-    upcoming = []
-    owns_client = state.SHARED_HTTP_CLIENT is None
-    client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=8.0, follow_redirects=True, http2=True)
-    try:
-        resp = await client.get(url)
-        if resp.status_code != 200:
-            LOGGER.warning("ESPN schedule request team=%s status=%s", team_name or query, resp.status_code)
-            return None, None, False
-        data = resp.json()
-        events = data.get("events", [])
-        for ev in events:
-            date_str = ev.get("date")
-            if date_str:
-                dt_start = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                if dt_start.tzinfo is None:
-                    dt_start = dt_start.replace(tzinfo=timezone.utc)
-                dt_start = dt_start.astimezone(timezone.utc)
-                dt_stop = dt_start + duration_by_sport.get(sport, timedelta(hours=3))
-                if dt_stop >= now_utc - timedelta(hours=1) and dt_start <= now_utc + timedelta(days=14):
-                    upcoming.append((dt_start, dt_stop))
-        if upcoming:
-            start, stop = min(upcoming, key=lambda event: event[0])
-            return start, stop, True
-        return None, None, True
-    except Exception as exc:
-        _log_failure(f"fetch ESPN schedule team={team_name or query}", exc)
-        return None, None, False
-    finally:
-        if owns_client:
-            await client.aclose()
-    return None, None, False
 
 def xmltv_ts(dt: datetime) -> str:
     return dt.strftime("%Y%m%d%H%M%S +0000")

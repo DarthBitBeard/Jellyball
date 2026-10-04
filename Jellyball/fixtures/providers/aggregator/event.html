@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Florida Gators vs Georgia Bulldogs Live Stream</title>
+  <link rel="canonical" href="https://agg.example.test/watch/florida-gators-vs-georgia-bulldogs-live">
+  <script async src="https://cdn.example.test/assets/analytics.js"></script>
+</head>
+<body class="event-page">
+  <header class="site-header">
+    <a class="logo" href="/">Live Sports Streams</a>
+  </header>
+
+  <main>
+    <h1 class="event-title">Florida Gators vs Georgia Bulldogs</h1>
+
+    <!-- Source 1: a plain HTML5 player whose manifest URL carries a query string. -->
+    <section id="player" class="player-wrap">
+      <video id="main-player" controls autoplay poster="https://img.example.test/posters/gators-georgia.jpg">
+        <source src="https://cdn.example.test/live/gators-georgia/index.m3u8?token=fixture-token&amp;expires=1999999999" type="application/x-mpegURL">
+      </video>
+    </section>
+
+    <!-- Sources 2 and 3: embedded players on other hosts (one lazy-loaded, protocol-relative). -->
+    <section id="sources" class="source-list">
+      <h2>More sources</h2>
+      <ul>
+        <li><a class="source" href="#player">Source 1 (HD)</a></li>
+        <li><a class="source" href="javascript:void(0)">Source 2</a></li>
+      </ul>
+      <iframe class="embed" src="https://player.example.test/embed/gators-1" width="640" height="360" allowfullscreen></iframe>
+      <iframe class="embed" data-src="//embed.example.test/frame/gators-2" width="640" height="360" allowfullscreen></iframe>
+      <iframe class="blank" src="about:blank"></iframe>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <a href="/about">About</a>
+    <a href="/privacy">Privacy</a>
+  </footer>
+
+  <!-- A replay of last season's game: a finished (VOD) playlist that must never be offered as a live source. -->
+  <script>
+    window.eventConfig = {
+      id: 4401,
+      replay: "https://cdn.example.test/replay/gators-2025/index.m3u8"
+    };
+  </script>
+</body>
+</html>

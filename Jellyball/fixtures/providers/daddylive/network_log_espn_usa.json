@@ -1,0 +1,52 @@
+{
+  "comment": "Hand-authored: the requests seen across the main frame and its nested player frame while the ESPN USA watch page plays.",
+  "page_url": "https://dlhd.example.test/watch.php?id=44",
+  "requests": [
+    {
+      "url": "https://dlhd.example.test/watch.php?id=44",
+      "frame_url": "https://dlhd.example.test/watch.php?id=44",
+      "headers": {}
+    },
+    {
+      "url": "https://player-host.example.test/stream/stream-44.php",
+      "frame_url": "https://dlhd.example.test/watch.php?id=44",
+      "headers": {"referer": "https://dlhd.example.test/"}
+    },
+    {
+      "url": "https://cdn.example.test/assets/jwplayer.js",
+      "frame_url": "https://player-host.example.test/stream/stream-44.php",
+      "headers": {"referer": "https://player-host.example.test/stream/stream-44.php"}
+    },
+    {
+      "url": "https://edge.example.test/hls/espn-usa/index.m3u8?hmac=fixture",
+      "frame_url": "https://player-host.example.test/stream/stream-44.php",
+      "headers": {
+        "referer": "https://player-host.example.test/",
+        "origin": "https://player-host.example.test"
+      }
+    },
+    {
+      "url": "https://edge.example.test/hls/espn-usa/seg-101.ts",
+      "frame_url": "https://player-host.example.test/stream/stream-44.php",
+      "headers": {"referer": "https://player-host.example.test/"}
+    },
+    {
+      "url": "https://edge.example.test/hls/espn-usa/index.m3u8?hmac=fixture",
+      "frame_url": "https://player-host.example.test/stream/stream-44.php",
+      "headers": {
+        "referer": "https://player-host.example.test/",
+        "origin": "https://player-host.example.test"
+      }
+    },
+    {
+      "url": "https://edge.example.test/manifest/espn-usa-backup",
+      "frame_url": "https://player-host.example.test/stream/stream-44.php",
+      "headers": {}
+    },
+    {
+      "url": "https://ads.example.test/banner.gif",
+      "frame_url": "https://dlhd.example.test/watch.php?id=44",
+      "headers": {}
+    }
+  ]
+}

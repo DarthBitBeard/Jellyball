@@ -16,9 +16,12 @@ import httpx
 from playwright.async_api import async_playwright, Browser, Playwright
 
 from config import _log_failure, _validate_upstream_url, LOGGER
+import provider_alerts
+import provider_settings
+import provider_telemetry as telemetry
 import state
 from db import _db_session, get_setting, get_setting_async
-from network_safety import bounded_float, bounded_int, validate_http_url
+from network_safety import bounded_float, bounded_int, safe_get, validate_http_url
 from sports_matcher import canonical_team_name, clean_sports_text, get_team_search_terms, match_team
 from stream_extractor import (
     DEFAULT_USER_AGENT,
@@ -223,6 +226,7 @@ async def _get_cached_index_html(url: str, fetcher) -> Optional[str]:
             html_text = await fetcher()
         except Exception as exc:
             _log_failure(f"fetch index page {url}", exc)
+            telemetry.report_page_error(exc)
             html_text = None
         ttl = SCRAPE_INDEX_CACHE_SECONDS if html_text is not None else _SCRAPE_INDEX_FAILURE_CACHE_SECONDS
         if ttl > 0:
@@ -300,6 +304,7 @@ def _load_provider_url_overrides() -> None:
             _PROVIDER_BASE_URL_OVERRIDES[provider.name] = stored
         else:
             _PROVIDER_BASE_URL_OVERRIDES.pop(provider.name, None)
+    provider_settings.load()
 
 
 class HtmlAggregatorScraper(BaseProvider):
@@ -414,11 +419,19 @@ class HtmlAggregatorScraper(BaseProvider):
         cross-page, cumulative MAX_PROVIDER_EVENTS cutoff.
         """
         soup = make_soup(page_html)
+        listed: Set[str] = set()
+        try:
+            self._parse_anchors(soup, page_url, search_terms, matches, seen_matches, listed)
+        finally:
+            telemetry.report_index_events(len(listed))
+
+    def _parse_anchors(self, soup, page_url, search_terms, matches, seen_matches, listed: Set[str]) -> None:
         for anchor in soup.find_all("a", href=True):
             href = str(anchor.get("href") or "")
             if not self._is_event_link(href, page_url):
                 continue
             match_url = urllib.parse.urljoin(page_url, href)
+            listed.add(match_url)
             if match_url in seen_matches:
                 continue
             title = str(anchor.get("title") or "")
@@ -469,6 +482,7 @@ class HtmlAggregatorScraper(BaseProvider):
         async def process(page_url: str) -> None:
             page_html = await _get_cached_index_html(page_url, lambda pu=page_url: fetch_page(client, pu, browser))
             if not page_html:
+                telemetry.report_page_error("no_content")
                 return
             await asyncio.to_thread(parse_matches, page_html, page_url, search_terms, matches, seen_matches)
 
@@ -478,10 +492,12 @@ class HtmlAggregatorScraper(BaseProvider):
                     await process(page_url)
                 except Exception as exc:
                     _log_failure(f"scan provider={self.name} page", exc)
+                    telemetry.report_page_error(exc)
             else:
                 await process(page_url)
             if len(matches) >= MAX_PROVIDER_EVENTS:
-                return matches
+                break
+        telemetry.report_matches(len(matches))
         return matches
 
     async def _find_matches(self, client: httpx.AsyncClient, search_terms: List[str], browser: Optional[Browser] = None) -> List[tuple[str, int, str]]:
@@ -708,10 +724,10 @@ class IptvOrgScraper(BaseProvider):
                 return _IPTV_ORG_CACHE
 
             owns_client = http_client is None
-            client = http_client or httpx.AsyncClient(timeout=15.0, follow_redirects=True)
+            client = http_client or httpx.AsyncClient(timeout=15.0, follow_redirects=False)
             try:
-                resp = await client.get(url, headers={"User-Agent": DEFAULT_USER_AGENT})
-                if resp.status_code == 200:
+                resp = await safe_get(client, url, headers={"User-Agent": DEFAULT_USER_AGENT})
+                if resp is not None and resp.status_code == 200:
                     _IPTV_ORG_CACHE = _parse_m3u_playlist(resp.text)
                     _IPTV_ORG_CACHE_LOADED_AT = now
             except Exception as exc:
@@ -725,7 +741,9 @@ class IptvOrgScraper(BaseProvider):
         search_terms = list(query_or_terms) if isinstance(query_or_terms, list) else [str(query_or_terms)]
         entries = await self._get_entries(http_client)
         if not entries:
+            telemetry.report_page_error("no_content")
             return []
+        telemetry.report_index_events(len(entries))
 
         candidates = []
         for entry in entries:
@@ -750,6 +768,7 @@ class IptvOrgScraper(BaseProvider):
                 "discovery_method": "http",
             })
 
+        telemetry.report_matches(len(candidates))
         if not candidates:
             return []
         return await _verify_provider_streams(candidates, http_client)
@@ -772,9 +791,12 @@ class TheTVAppScraper(HtmlAggregatorScraper):
         instead of blocking the shared event loop."""
         soup = make_soup(html_text)
         best_url, best_score, best_title = None, 0, ""
+        listed = 0
 
         for anchor in soup.find_all("a", href=True):
             href = str(anchor.get("href") or "")
+            if self._is_event_link(href, self.base_url + "/tv/"):
+                listed += 1
             text = self._anchor_context(anchor) or anchor.get_text(" ", strip=True)
             text_lower = text.lower()
 
@@ -807,6 +829,8 @@ class TheTVAppScraper(HtmlAggregatorScraper):
                 best_score = ranked_score
                 best_title = text
 
+        telemetry.report_index_events(listed)
+        telemetry.report_matches(1 if best_url else 0)
         return best_url, best_score, best_title
 
     async def search(self, query_or_terms, browser: Optional[Browser] = None, http_client: Optional[httpx.AsyncClient] = None) -> List[dict]:
@@ -826,11 +850,13 @@ class TheTVAppScraper(HtmlAggregatorScraper):
                         await page.wait_for_load_state("networkidle", timeout=8000)
                     except Exception:
                         pass
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log_failure("TheTVApp channel list load", exc)
+                    telemetry.report_page_error(exc)
 
                 html = await page.content()
                 if "just a moment" in html.lower() or "cf-browser-verification" in html.lower():
+                    telemetry.report_page_error("blocked")
                     return []
 
                 best_url, best_score, best_title = await asyncio.to_thread(
@@ -868,6 +894,7 @@ class TheTVAppScraper(HtmlAggregatorScraper):
                         pass
         except Exception as exc:
             _log_failure("TheTVApp custom extraction", exc)
+            telemetry.report_page_error(exc)
 
         seen = set()
         deduped = [s for s in streams if s["url"] not in seen and not seen.add(s["url"])]
@@ -972,11 +999,19 @@ class DaddyLiveScraper(HtmlAggregatorScraper):
         shared event loop. Mutates `matches`/`seen_matches` in place to preserve
         the original cross-page, cumulative MAX_PROVIDER_EVENTS cutoff."""
         soup = make_soup(page_html)
+        listed: Set[str] = set()
+        try:
+            self._parse_channel_anchors(soup, page_url, search_terms, matches, seen_matches, listed)
+        finally:
+            telemetry.report_index_events(len(listed))
+
+    def _parse_channel_anchors(self, soup, page_url, search_terms, matches, seen_matches, listed: Set[str]) -> None:
         for anchor in soup.find_all("a", href=True):
             href = str(anchor.get("href") or "")
             if not self._is_event_link(href, page_url):
                 continue
             match_url = urllib.parse.urljoin(page_url, href)
+            listed.add(match_url)
             if match_url in seen_matches:
                 continue
             title = str(anchor.get("title") or anchor.get("data-title") or "")
@@ -1188,7 +1223,7 @@ async def get_healthy_browser() -> Optional[Browser]:
 
 def _providers_for_search(always_live: bool = False):
     """Keep 24/7 channel discovery on dedicated linear-channel providers."""
-    return LINEAR_PROVIDERS if always_live else ACTIVE_PROVIDERS
+    return provider_settings.filter_enabled(LINEAR_PROVIDERS if always_live else ACTIVE_PROVIDERS)
 
 
 async def _get_active_provider_priority() -> Dict[str, int]:
@@ -1203,7 +1238,7 @@ async def _get_active_provider_priority() -> Dict[str, int]:
     also serves live video segments for every other channel.
     """
     if await get_setting_async("provider_rotation_mode", "0") != "1":
-        return _provider_priority
+        return provider_settings.apply_priority(_provider_priority)
     names = [provider.name for provider in ACTIVE_PROVIDERS]
     if not names:
         return _provider_priority
@@ -1261,31 +1296,53 @@ async def master_scrape(
             LOGGER.info("Skipping provider=%s while circuit breaker is open", provider.name)
             return []
         dynamic_timeout = 45.0
+        run = telemetry.begin_run(provider.name)
+        started = time.time()
+        res: List[dict] = []
+        exc_seen: Optional[BaseException] = None
+        timed_out = False
         try:
             async with team_semaphore, _provider_search_semaphore():
                 LOGGER.info("Querying provider=%s team=%s", provider.name, display_title)
                 browser = await get_healthy_browser()
                 dynamic_timeout = await _get_dynamic_provider_timeout(provider.name)
-                start_time = time.time()
+                started = time.time()
                 res = await asyncio.wait_for(
                     provider.search(search_terms, browser=browser, http_client=client),
                     timeout=dynamic_timeout,
                 )
-                elapsed_ms = int((time.time() - start_time) * 1000)
-                await _track_provider_response_time(provider.name, elapsed_ms, success=True)
+                elapsed_ms = int((time.time() - started) * 1000)
+                outcome, error_class = telemetry.derive_outcome(res, run)
+                await _track_provider_response_time(
+                    provider.name, elapsed_ms, success=True,
+                    outcome=outcome, error_class=error_class, run=run,
+                )
                 _provider_breaker_success(provider.name)
                 LOGGER.info("Provider returned provider=%s team=%s streams=%d", provider.name, display_title, len(res))
                 return res
         except asyncio.TimeoutError:
+            timed_out = True
             _provider_breaker_failure(provider.name)
-            await _track_provider_response_time(provider.name, int(dynamic_timeout * 1000), success=False)
+            await _track_provider_response_time(
+                provider.name, int(dynamic_timeout * 1000), success=False,
+                outcome="timeout", error_class="timeout", run=run,
+            )
             LOGGER.warning("Provider search timed out provider=%s team=%s", provider.name, display_title)
             return []
         except Exception as e:
+            exc_seen = e
             _provider_breaker_failure(provider.name)
-            await _track_provider_response_time(provider.name, 0, success=False)
+            await _track_provider_response_time(
+                provider.name, 0, success=False,
+                outcome="error", error_class=telemetry.classify_error(e), run=run,
+            )
             _log_failure(f"provider search {provider.name} for {display_title}", e)
             return []
+        finally:
+            elapsed = int((time.time() - started) * 1000)
+            outcome, error_class = telemetry.derive_outcome(res, run, exc=exc_seen, timed_out=timed_out)
+            telemetry.finish_run(provider.name, outcome, error_class, run, elapsed, len(res))
+            provider_alerts.check_soon(provider.name, _provider_breaker_open(provider.name))
 
     async def _search_and_report(provider):
         res = await _jittered_search(provider)
@@ -1362,18 +1419,36 @@ async def _get_dynamic_provider_timeout(provider: str) -> float:
         return PROVIDER_TIMEOUT_DEFAULT
 
 
-def _track_provider_response_time_sync(provider: str, response_time_ms: int, success: bool) -> None:
-    with _db_session() as conn:
-        conn.execute(
-            "INSERT INTO provider_performance (provider, response_time_ms, success) VALUES (?, ?, ?)",
-            (provider, response_time_ms, 1 if success else 0)
-        )
-        conn.commit()
+def _track_provider_response_time_sync(
+    provider: str,
+    response_time_ms: int,
+    success: bool,
+    outcome: Optional[str] = None,
+    error_class: Optional[str] = None,
+    index_events: Optional[int] = None,
+    matches: Optional[int] = None,
+) -> None:
+    if outcome is None:
+        outcome = "ok" if success else "error"
+    telemetry.record_outcome_sync(provider, response_time_ms, outcome, error_class, index_events, matches)
 
 
-async def _track_provider_response_time(provider: str, response_time_ms: int, success: bool = True) -> None:
-    """Track provider response time for timeout optimization."""
+async def _track_provider_response_time(
+    provider: str,
+    response_time_ms: int,
+    success: bool = True,
+    *,
+    outcome: Optional[str] = None,
+    error_class: Optional[str] = None,
+    run: Optional[telemetry.RunStats] = None,
+) -> None:
+    """Record one provider search (timing for timeout tuning plus its outcome)."""
+    index_events = run.index_events if run is not None and run.index_known else None
+    matches = run.matches if run is not None and run.index_known else None
     try:
-        await asyncio.to_thread(_track_provider_response_time_sync, provider, response_time_ms, success)
+        await asyncio.to_thread(
+            _track_provider_response_time_sync,
+            provider, response_time_ms, success, outcome, error_class, index_events, matches,
+        )
     except Exception as exc:
         _log_failure("track provider response time", exc)

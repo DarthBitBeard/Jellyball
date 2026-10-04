@@ -1,0 +1,36 @@
+{
+  "comment": "Hand-authored: the requests a browser would make while the ESPN channel page loads and its player is clicked.",
+  "page_url": "https://thetvapp.example.test/tv/espn-live-stream/",
+  "requests": [
+    {
+      "url": "https://thetvapp.example.test/tv/espn-live-stream/",
+      "headers": {}
+    },
+    {
+      "url": "https://cdn.example.test/assets/player.js",
+      "headers": {"referer": "https://thetvapp.example.test/tv/espn-live-stream/"}
+    },
+    {
+      "url": "https://ads.example.test/banner.gif",
+      "headers": {"referer": "https://thetvapp.example.test/tv/espn-live-stream/"}
+    },
+    {
+      "url": "https://edge.example.test/hls/espn/index.m3u8?md5=fixture&expires=1999999999",
+      "headers": {
+        "referer": "https://thetvapp.example.test/tv/espn-live-stream/",
+        "origin": "https://thetvapp.example.test"
+      }
+    },
+    {
+      "url": "https://edge.example.test/hls/espn/seg-0001.ts",
+      "headers": {"referer": "https://thetvapp.example.test/tv/espn-live-stream/"}
+    },
+    {
+      "url": "https://edge.example.test/hls/espn/index.m3u8?md5=fixture&expires=1999999999",
+      "headers": {
+        "referer": "https://thetvapp.example.test/tv/espn-live-stream/",
+        "origin": "https://thetvapp.example.test"
+      }
+    }
+  ]
+}

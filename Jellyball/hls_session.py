@@ -164,6 +164,13 @@ class SessionHooks:
     # start doesn't fall back to the legacy proxy while better sources exist.
     report_incompatible: Callable[[str, Tuple, str], Optional[bool]]
     on_media_info: Optional[Callable[[str, Tuple, bool, Tuple], None]] = None
+    # The audio language to prefer (ISO 639-2) or None for the first audio
+    # stream. Read at every source switch, so a change applies to the next one.
+    preferred_audio_language: Optional[Callable[[], Optional[str]]] = None
+    # (channel_id, kind, source_key) when a cold-starting session gives up and
+    # hands the channel to the legacy proxy. kind: fmp4 | sample_aes |
+    # demuxed_audio | not_ts. Counted by engine_stats.
+    on_legacy_fallback: Optional[Callable[[str, str, Tuple], None]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +386,7 @@ class ChannelSession:
         self.last_useq: Optional[int] = None
         self.pending_discontinuity = False
         self.normalizer = TsNormalizer()
+        self._sync_audio_preference()
         self.state = "idle"  # idle | starting | live | legacy
         self.legacy_reason = ""
         self.legacy_since = 0.0
@@ -489,6 +497,15 @@ class ChannelSession:
                 if segment.seq == seq:
                     return segment
         return self.grace.get(seq)
+
+    def _sync_audio_preference(self) -> None:
+        getter = self.hooks.preferred_audio_language
+        if getter is None:
+            return
+        try:
+            self.normalizer.preferred_audio_language = getter() or None
+        except Exception:
+            LOGGER.exception("preferred_audio_language hook failed channel=%s", self.channel_id)
 
     def metrics(self) -> dict:
         """Recent throughput/latency numbers for the dashboard and /api/sessions."""
@@ -621,7 +638,7 @@ class ChannelSession:
             self._check_stale()
             return
         if playlist.has_map or playlist.sample_aes:
-            self._incompatible("fMP4 or SAMPLE-AES source")
+            self._incompatible("fMP4 or SAMPLE-AES source", "sample_aes" if playlist.sample_aes else "fmp4")
             return
         self.consecutive_failures = 0
 
@@ -704,6 +721,7 @@ class ChannelSession:
         self.source = spec
         self.media_url = None
         self.last_useq = None
+        self._sync_audio_preference()
         self.normalizer.start_new_epoch()
         self.pending_discontinuity = bool(self.window)
         self.consecutive_failures = 0
@@ -739,7 +757,7 @@ class ChannelSession:
             if variant is None:
                 return None
             if demuxed:
-                self._incompatible("separate audio rendition")
+                self._incompatible("separate audio rendition", "demuxed_audio")
                 return None
             self.media_url = variant.uri
             result = await self.hooks.fetch(variant.uri, headers, self.cfg.max_playlist_bytes, self.cfg.playlist_timeout)
@@ -784,7 +802,7 @@ class ChannelSession:
                     # a run of them makes the source incompatible.
                     self.consecutive_non_ts += 1
                     if self.consecutive_non_ts >= self.cfg.non_ts_threshold:
-                        self._incompatible("segments are not MPEG-TS")
+                        self._incompatible("segments are not MPEG-TS", "not_ts")
                         return
                     data = None
                 elif data is not None:
@@ -979,7 +997,7 @@ class ChannelSession:
         except Exception:
             LOGGER.exception("report_failure hook failed channel=%s", self.channel_id)
 
-    def _incompatible(self, reason: str) -> None:
+    def _incompatible(self, reason: str, kind: str = "") -> None:
         if self.source is None:
             return
         key = self.source.key
@@ -994,6 +1012,7 @@ class ChannelSession:
             self.state = "legacy"
             self.legacy_reason = reason
             self.legacy_since = time.monotonic()
+            self._record_legacy_fallback(kind or "unknown", key)
             self._stopped = True
             self._ready.set()
             return
@@ -1001,6 +1020,14 @@ class ChannelSession:
             return
         LOGGER.warning("Channel session source incompatible channel=%s reason=%s", self.channel_id, reason)
         self._report_incompatible(key, reason)
+
+    def _record_legacy_fallback(self, kind: str, key: Tuple) -> None:
+        if self.hooks.on_legacy_fallback is None:
+            return
+        try:
+            self.hooks.on_legacy_fallback(self.channel_id, kind, key)
+        except Exception:
+            LOGGER.exception("on_legacy_fallback hook failed channel=%s", self.channel_id)
 
     def _report_incompatible(self, key: Tuple, reason: str) -> bool:
         try:

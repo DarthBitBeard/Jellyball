@@ -1,0 +1,1 @@
+Docker image on GHCR: Tagged releases publish `ghcr.io/darthbitbeard/jellyball` (linux/amd64, with build provenance and an SBOM; pre-releases get only their exact tag). `docker-compose.yml` now pulls that image by default, declares a healthcheck, and still builds locally with `docker compose build`. Set `JELLYBALL_IMAGE` to pin a version.

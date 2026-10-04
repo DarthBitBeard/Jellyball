@@ -1,0 +1,30 @@
+{
+  "Id": "176967b9a143459697cccda8b086d6c0",
+  "Type": "xmltv",
+  "Path": "http://host.docker.internal:<FEED_PORT>/epg.xml",
+  "EnabledTuners": [],
+  "EnableAllTuners": true,
+  "NewsCategories": [
+    "news",
+    "journalism",
+    "documentary",
+    "current affairs"
+  ],
+  "SportsCategories": [
+    "sports",
+    "basketball",
+    "baseball",
+    "football"
+  ],
+  "KidsCategories": [
+    "kids",
+    "family",
+    "children",
+    "childrens",
+    "disney"
+  ],
+  "MovieCategories": [
+    "movie"
+  ],
+  "ChannelMappings": []
+}

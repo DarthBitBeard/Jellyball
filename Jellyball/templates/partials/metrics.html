@@ -1,18 +1,18 @@
 <div class="card">
     <h3>Provider Health Leaderboard</h3>
-    <p class="hint-text">Success rates based on failover history. Higher is better.</p>
+    <p class="hint-text">Search success over the last 24 hours (timeouts and errors count against a provider). Failovers are charged to the provider that failed. Higher is better.</p>
     <div style="background: var(--surface-2); padding: 1rem; border-radius: 8px; border: 1px solid var(--border);">
         {% if provider_health %}
         {% for p in provider_health %}
         <div style="margin-bottom: 0.75rem;">
             <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
                 <span>{{ p.provider }}</span>
-                <span style="color: {{ p.rate_color }}; font-weight: 700;">{{ '%.1f'|format(p.rate) }}%</span>
+                <span style="color: {{ p.rate_color }}; font-weight: 700;">{% if p.rate is not none %}{{ '%.1f'|format(p.rate) }}%{% else %}no searches{% endif %}</span>
             </div>
             <div style="background: var(--surface-3); height: 6px; border-radius: 3px; overflow: hidden;">
-                <div style="background: {{ p.rate_color }}; height: 100%; width: {{ '%.1f'|format(p.rate) }}%; transition: width 0.4s var(--ease);"></div>
+                <div style="background: {{ p.rate_color }}; height: 100%; width: {{ '%.1f'|format(p.rate if p.rate is not none else 0) }}%; transition: width 0.4s var(--ease);"></div>
             </div>
-            <span class="hint-text">{{ p.total }} total checks</span>
+            <span class="hint-text">{{ p.total }} searches &middot; {{ p.failovers }} failover(s)</span>
         </div>
         {% endfor %}
         {% else %}

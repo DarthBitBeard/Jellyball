@@ -12,6 +12,8 @@
         })();
     </script>
     <link rel="stylesheet" href="/static/dashboard.css">
+    {% for href in card_styles %}<link rel="stylesheet" href="{{ href }}">
+    {% endfor %}
 </head>
 <body>
     <div class="container">
@@ -41,27 +43,43 @@
             <button type="button" class="tab-btn {{ 'active' if tab == 'playback' else '' }}" id="btn-playback" onclick="switchTab('playback')">⚙️ Settings</button>
             <button type="button" class="tab-btn {{ 'active' if tab == 'alerts' else '' }}" id="btn-alerts" onclick="switchTab('alerts')">🔔 Alerts &amp; Integrations</button>
             <button type="button" class="tab-btn {{ 'active' if tab == 'logs' else '' }}" id="btn-logs" onclick="switchTab('logs')">📜 Logs</button>
+            {% for extra in extra_tabs %}
+            <button type="button" class="tab-btn {{ 'active' if tab == extra.key else '' }}" id="btn-{{ extra.key }}" onclick="switchTab('{{ extra.key }}')">{{ extra.label }}</button>
+            {% endfor %}
         </div>
         <div id="tab-channels" class="tab-pane {{ 'active' if tab == 'channels' else '' }}">
             {% include "partials/channels.html" %}
+            {% with pane = 'channels' %}{% include "partials/_cards.html" %}{% endwith %}
         </div>
         <div id="tab-metrics" class="tab-pane {{ 'active' if tab == 'metrics' else '' }}">
             {% include "partials/metrics.html" %}
+            {% with pane = 'metrics' %}{% include "partials/_cards.html" %}{% endwith %}
         </div>
         <div id="tab-performance" class="tab-pane {{ 'active' if tab == 'performance' else '' }}">
             {% include "partials/performance.html" %}
+            {% with pane = 'performance' %}{% include "partials/_cards.html" %}{% endwith %}
         </div>
         <div id="tab-logs" class="tab-pane {{ 'active' if tab == 'logs' else '' }}">
             {% include "partials/logs.html" %}
+            {% with pane = 'logs' %}{% include "partials/_cards.html" %}{% endwith %}
         </div>
         <div id="tab-playback" class="tab-pane {{ 'active' if tab == 'playback' else '' }}">
             {% include "partials/playback.html" %}
+            {% with pane = 'playback' %}{% include "partials/_cards.html" %}{% endwith %}
         </div>
         <div id="tab-alerts" class="tab-pane {{ 'active' if tab == 'alerts' else '' }}">
             {% include "partials/alerts.html" %}
+            {% with pane = 'alerts' %}{% include "partials/_cards.html" %}{% endwith %}
         </div>
+        {% for extra in extra_tabs %}
+        <div id="tab-{{ extra.key }}" class="tab-pane {{ 'active' if tab == extra.key else '' }}">
+            {% with pane = extra.key %}{% include "partials/_cards.html" %}{% endwith %}
+        </div>
+        {% endfor %}
     </div>
     <script id="dashboard-data" type="application/json">{{ dashboard_data|tojson }}</script>
     <script src="/static/dashboard.js"></script>
+    {% for src in card_scripts %}<script src="{{ src }}"></script>
+    {% endfor %}
 </body>
 </html>

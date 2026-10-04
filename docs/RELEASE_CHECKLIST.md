@@ -138,9 +138,22 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-Pushing the tag triggers `.github/workflows/release.yml`, which builds the
-installer on `windows-latest`, uploads it as a workflow artifact, and
-attaches `JellyballSetup-X.Y.Z.exe` to the GitHub release created for the
-tag. Paste the matching `CHANGELOG.md` section into the GitHub release body.
-Confirm that release build succeeds and the asset is attached before
-announcing the release.
+Pushing the tag triggers `.github/workflows/release.yml`, which, in order:
+
+1. checks the tag matches `Jellyball/version.py` and that `CHANGELOG.md` has a
+   `## [X.Y.Z]` section for it (fold the `changelog.d/` fragments in first
+   with `python Jellyball/tools/changelog.py release X.Y.Z`), then runs the
+   unit tests, ruff and mypy;
+2. builds the installer on `windows-latest` (signed when the secrets are
+   set) and writes `SHA256SUMS`;
+3. builds and pushes `ghcr.io/darthbitbeard/jellyball:X.Y.Z` (linux/amd64,
+   provenance and SBOM; `latest` and `X.Y` only for stable tags);
+4. creates the GitHub release with `JellyballSetup-X.Y.Z.exe`, `SHA256SUMS`
+   and the notes taken from the CHANGELOG section. A tag containing `-`
+   (`vX.Y.Z-beta.1`, `-rc.1`) is published as a pre-release.
+
+Confirm all four jobs succeed, the installer and `SHA256SUMS` are attached,
+the checksum matches the downloaded installer, and
+`docker pull ghcr.io/darthbitbeard/jellyball:X.Y.Z` works (the first push
+creates a private package: make it public in the repository's package
+settings) before announcing the release.

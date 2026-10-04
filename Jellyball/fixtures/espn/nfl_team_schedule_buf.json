@@ -1,0 +1,1072 @@
+{
+  "timestamp": "2026-10-02T18:17:01Z",
+  "status": "success",
+  "season": {
+    "year": 2026,
+    "type": 2,
+    "name": "Regular Season",
+    "displayName": "2026",
+    "half": 1
+  },
+  "team": {
+    "id": "2",
+    "abbreviation": "BUF",
+    "location": "Buffalo",
+    "name": "Bills",
+    "displayName": "Buffalo Bills",
+    "clubhouse": "https://www.espn.com/nfl/team/_/name/buf/buffalo-bills",
+    "color": "00338d",
+    "logo": "https://a.espncdn.com/i/teamlogos/nfl/500/buf.png",
+    "recordSummary": "3-0",
+    "seasonSummary": "2026",
+    "standingSummary": "1st in AFC East",
+    "groups": {
+      "id": "4",
+      "parent": {
+        "id": "8"
+      },
+      "isConference": false
+    }
+  },
+  "events": [
+    {
+      "id": "401872660",
+      "date": "2026-09-13T17:00Z",
+      "name": "Buffalo Bills at Houston Texans",
+      "shortName": "BUF @ HOU",
+      "season": {
+        "year": 2026,
+        "displayName": "2026"
+      },
+      "seasonType": {
+        "id": "2",
+        "type": 2,
+        "name": "Regular Season",
+        "abbreviation": "reg"
+      },
+      "week": {
+        "number": 1,
+        "text": "Week 1"
+      },
+      "timeValid": true,
+      "competitions": [
+        {
+          "id": "401872660",
+          "date": "2026-09-13T17:00Z",
+          "attendance": 71008,
+          "type": {
+            "id": "1",
+            "text": "Standard",
+            "abbreviation": "STD",
+            "slug": "standard",
+            "type": "standard"
+          },
+          "timeValid": true,
+          "neutralSite": false,
+          "boxscoreAvailable": true,
+          "ticketsAvailable": false,
+          "venue": {
+            "fullName": "Reliant Stadium",
+            "address": {
+              "city": "Houston",
+              "state": "TX",
+              "zipCode": "77054",
+              "country": "USA"
+            }
+          },
+          "competitors": [
+            {
+              "id": "34",
+              "type": "team",
+              "order": 0,
+              "homeAway": "home",
+              "winner": false,
+              "team": {
+                "id": "34",
+                "location": "Houston",
+                "nickname": "Texans",
+                "abbreviation": "HOU",
+                "displayName": "Houston Texans",
+                "shortDisplayName": "Texans",
+                "logos": [
+                  {
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500/hou.png",
+                    "width": 500,
+                    "height": 500,
+                    "alt": "",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "lastUpdated": "2024-06-25T18:50Z"
+                  },
+                  {
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500-dark/hou.png",
+                    "width": 500,
+                    "height": 500,
+                    "alt": "",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "lastUpdated": "2024-06-25T18:49Z"
+                  }
+                ],
+                "links": [
+                  {
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "href": "https://www.espn.com/nfl/team/_/name/hou/houston-texans",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "rel": [
+                      "roster",
+                      "desktop"
+                    ],
+                    "href": "https://www.espn.com/nfl/team/roster/_/name/hou/houston-texans",
+                    "text": "Roster"
+                  }
+                ]
+              },
+              "score": {
+                "value": 31.0,
+                "displayValue": "31"
+              },
+              "record": [
+                {
+                  "id": "369",
+                  "abbreviation": "Game",
+                  "displayName": "Record Year To Date",
+                  "shortDisplayName": "YTD",
+                  "description": "Overall Record",
+                  "type": "total",
+                  "displayValue": "0-1"
+                },
+                {
+                  "id": "13",
+                  "displayName": "Home",
+                  "shortDisplayName": "HOME",
+                  "description": "Home Record",
+                  "type": "home",
+                  "displayValue": "0-1"
+                }
+              ],
+              "curatedRank": {
+                "current": 99
+              }
+            },
+            {
+              "id": "2",
+              "type": "team",
+              "order": 1,
+              "homeAway": "away",
+              "winner": true,
+              "team": {
+                "id": "2",
+                "location": "Buffalo",
+                "nickname": "Bills",
+                "abbreviation": "BUF",
+                "displayName": "Buffalo Bills",
+                "shortDisplayName": "Bills",
+                "logos": [
+                  {
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500/buf.png",
+                    "width": 500,
+                    "height": 500,
+                    "alt": "",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "lastUpdated": "2024-06-25T18:45Z"
+                  },
+                  {
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500-dark/buf.png",
+                    "width": 500,
+                    "height": 500,
+                    "alt": "",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "lastUpdated": "2024-06-25T18:45Z"
+                  }
+                ],
+                "links": [
+                  {
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "href": "https://www.espn.com/nfl/team/_/name/buf/buffalo-bills",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "rel": [
+                      "roster",
+                      "desktop"
+                    ],
+                    "href": "https://www.espn.com/nfl/team/roster/_/name/buf/buffalo-bills",
+                    "text": "Roster"
+                  }
+                ]
+              },
+              "score": {
+                "value": 36.0,
+                "displayValue": "36"
+              },
+              "leaders": [
+                {
+                  "name": "passingLeader",
+                  "displayName": "Passing Leader",
+                  "abbreviation": "PYDS",
+                  "leaders": [
+                    {
+                      "displayValue": "20/29, 334 YDS, 2 TD",
+                      "value": 334.0,
+                      "athlete": {
+                        "id": "3918298",
+                        "lastName": "Allen",
+                        "displayName": "Josh Allen",
+                        "shortName": "J. Allen",
+                        "links": [
+                          {
+                            "rel": [
+                              "playercard",
+                              "desktop"
+                            ],
+                            "href": "https://www.espn.com/nfl/player/_/id/3918298/josh-allen"
+                          },
+                          {
+                            "rel": [
+                              "stats",
+                              "desktop"
+                            ],
+                            "href": "https://www.espn.com/nfl/player/stats/_/id/3918298/josh-allen"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "name": "rushingLeader",
+                  "displayName": "Rushing Leader",
+                  "abbreviation": "RYDS",
+                  "leaders": [
+                    {
+                      "displayValue": "13 CAR, 57 YDS",
+                      "value": 57.0,
+                      "athlete": {
+                        "id": "4379399",
+                        "lastName": "Cook III",
+                        "displayName": "James Cook III",
+                        "shortName": "J. Cook III",
+                        "links": [
+                          {
+                            "rel": [
+                              "playercard",
+                              "desktop"
+                            ],
+                            "href": "https://www.espn.com/nfl/player/_/id/4379399/james-cook-iii"
+                          },
+                          {
+                            "rel": [
+                              "stats",
+                              "desktop"
+                            ],
+                            "href": "https://www.espn.com/nfl/player/stats/_/id/4379399/james-cook-iii"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ],
+              "record": [
+                {
+                  "id": "369",
+                  "abbreviation": "Game",
+                  "displayName": "Record Year To Date",
+                  "shortDisplayName": "YTD",
+                  "description": "Overall Record",
+                  "type": "total",
+                  "displayValue": "1-0"
+                },
+                {
+                  "id": "13",
+                  "displayName": "Home",
+                  "shortDisplayName": "HOME",
+                  "description": "Home Record",
+                  "type": "home",
+                  "displayValue": "0-0"
+                }
+              ],
+              "curatedRank": {
+                "current": 99
+              }
+            }
+          ],
+          "notes": [],
+          "broadcasts": [
+            {
+              "type": {
+                "id": "1",
+                "shortName": "TV"
+              },
+              "market": {
+                "id": "1",
+                "type": "National"
+              },
+              "media": {
+                "shortName": "CBS"
+              },
+              "lang": "en",
+              "region": "us",
+              "partnered": false
+            }
+          ],
+          "status": {
+            "clock": 0.0,
+            "displayClock": "0:00",
+            "period": 4,
+            "type": {
+              "id": "3",
+              "name": "STATUS_FINAL",
+              "state": "post",
+              "completed": true,
+              "description": "Final",
+              "detail": "Final",
+              "shortDetail": "Final"
+            },
+            "isTBDFlex": false
+          }
+        }
+      ],
+      "links": [
+        {
+          "language": "en-US",
+          "rel": [
+            "summary",
+            "desktop"
+          ],
+          "href": "https://www.espn.com/nfl/game/_/gameId/401872660/bills-texans",
+          "text": "Gamecast",
+          "shortText": "Summary",
+          "isExternal": false,
+          "isPremium": false
+        },
+        {
+          "language": "en-US",
+          "rel": [
+            "summary",
+            "sportscenter"
+          ],
+          "href": "sportscenter://x-callback-url/showGame?sportName=football&leagueAbbrev=nfl&gameId=401872660",
+          "text": "Gamecast",
+          "shortText": "Summary",
+          "isExternal": false,
+          "isPremium": false
+        }
+      ]
+    },
+    {
+      "id": "401872932",
+      "date": "2026-09-18T00:15Z",
+      "name": "Detroit Lions at Buffalo Bills",
+      "shortName": "DET @ BUF",
+      "season": {
+        "year": 2026,
+        "displayName": "2026"
+      },
+      "seasonType": {
+        "id": "2",
+        "type": 2,
+        "name": "Regular Season",
+        "abbreviation": "reg"
+      },
+      "week": {
+        "number": 2,
+        "text": "Week 2"
+      },
+      "timeValid": true,
+      "competitions": [
+        {
+          "id": "401872932",
+          "date": "2026-09-18T00:15Z",
+          "attendance": 60644,
+          "type": {
+            "id": "1",
+            "text": "Standard",
+            "abbreviation": "STD",
+            "slug": "standard",
+            "type": "standard"
+          },
+          "timeValid": true,
+          "neutralSite": false,
+          "boxscoreAvailable": true,
+          "ticketsAvailable": false,
+          "venue": {
+            "fullName": "Highmark Stadium",
+            "address": {
+              "city": "Orchard Park",
+              "state": "NY",
+              "zipCode": "14127",
+              "country": "USA"
+            }
+          },
+          "competitors": [
+            {
+              "id": "2",
+              "type": "team",
+              "order": 0,
+              "homeAway": "home",
+              "winner": true,
+              "team": {
+                "id": "2",
+                "location": "Buffalo",
+                "nickname": "Bills",
+                "abbreviation": "BUF",
+                "displayName": "Buffalo Bills",
+                "shortDisplayName": "Bills",
+                "logos": [
+                  {
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500/buf.png",
+                    "width": 500,
+                    "height": 500,
+                    "alt": "",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "lastUpdated": "2024-06-25T18:45Z"
+                  },
+                  {
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500-dark/buf.png",
+                    "width": 500,
+                    "height": 500,
+                    "alt": "",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "lastUpdated": "2024-06-25T18:45Z"
+                  }
+                ],
+                "links": [
+                  {
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "href": "https://www.espn.com/nfl/team/_/name/buf/buffalo-bills",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "rel": [
+                      "roster",
+                      "desktop"
+                    ],
+                    "href": "https://www.espn.com/nfl/team/roster/_/name/buf/buffalo-bills",
+                    "text": "Roster"
+                  }
+                ]
+              },
+              "score": {
+                "value": 41.0,
+                "displayValue": "41"
+              },
+              "leaders": [
+                {
+                  "name": "passingLeader",
+                  "displayName": "Passing Leader",
+                  "abbreviation": "PYDS",
+                  "leaders": [
+                    {
+                      "displayValue": "20/31, 248 YDS, 3 TD",
+                      "value": 248.0,
+                      "athlete": {
+                        "id": "3918298",
+                        "lastName": "Allen",
+                        "displayName": "Josh Allen",
+                        "shortName": "J. Allen",
+                        "links": [
+                          {
+                            "rel": [
+                              "playercard",
+                              "desktop"
+                            ],
+                            "href": "https://www.espn.com/nfl/player/_/id/3918298/josh-allen"
+                          },
+                          {
+                            "rel": [
+                              "stats",
+                              "desktop"
+                            ],
+                            "href": "https://www.espn.com/nfl/player/stats/_/id/3918298/josh-allen"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "name": "rushingLeader",
+                  "displayName": "Rushing Leader",
+                  "abbreviation": "RYDS",
+                  "leaders": [
+                    {
+                      "displayValue": "21 CAR, 135 YDS, 1 TD",
+                      "value": 135.0,
+                      "athlete": {
+                        "id": "4379399",
+                        "lastName": "Cook III",
+                        "displayName": "James Cook III",
+                        "shortName": "J. Cook III",
+                        "links": [
+                          {
+                            "rel": [
+                              "playercard",
+                              "desktop"
+                            ],
+                            "href": "https://www.espn.com/nfl/player/_/id/4379399/james-cook-iii"
+                          },
+                          {
+                            "rel": [
+                              "stats",
+                              "desktop"
+                            ],
+                            "href": "https://www.espn.com/nfl/player/stats/_/id/4379399/james-cook-iii"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ],
+              "record": [
+                {
+                  "id": "369",
+                  "abbreviation": "Game",
+                  "displayName": "Record Year To Date",
+                  "shortDisplayName": "YTD",
+                  "description": "Overall Record",
+                  "type": "total",
+                  "displayValue": "2-0"
+                },
+                {
+                  "id": "13",
+                  "displayName": "Home",
+                  "shortDisplayName": "HOME",
+                  "description": "Home Record",
+                  "type": "home",
+                  "displayValue": "1-0"
+                }
+              ],
+              "curatedRank": {
+                "current": 99
+              }
+            },
+            {
+              "id": "8",
+              "type": "team",
+              "order": 1,
+              "homeAway": "away",
+              "winner": false,
+              "team": {
+                "id": "8",
+                "location": "Detroit",
+                "nickname": "Lions",
+                "abbreviation": "DET",
+                "displayName": "Detroit Lions",
+                "shortDisplayName": "Lions",
+                "logos": [
+                  {
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500/det.png",
+                    "width": 500,
+                    "height": 500,
+                    "alt": "",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "lastUpdated": "2024-06-25T18:48Z"
+                  },
+                  {
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500-dark/det.png",
+                    "width": 500,
+                    "height": 500,
+                    "alt": "",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "lastUpdated": "2024-06-25T18:48Z"
+                  }
+                ],
+                "links": [
+                  {
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "href": "https://www.espn.com/nfl/team/_/name/det/detroit-lions",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "rel": [
+                      "roster",
+                      "desktop"
+                    ],
+                    "href": "https://www.espn.com/nfl/team/roster/_/name/det/detroit-lions",
+                    "text": "Roster"
+                  }
+                ]
+              },
+              "score": {
+                "value": 31.0,
+                "displayValue": "31"
+              },
+              "record": [
+                {
+                  "id": "369",
+                  "abbreviation": "Game",
+                  "displayName": "Record Year To Date",
+                  "shortDisplayName": "YTD",
+                  "description": "Overall Record",
+                  "type": "total",
+                  "displayValue": "1-1"
+                },
+                {
+                  "id": "13",
+                  "displayName": "Home",
+                  "shortDisplayName": "HOME",
+                  "description": "Home Record",
+                  "type": "home",
+                  "displayValue": "1-0"
+                }
+              ],
+              "curatedRank": {
+                "current": 99
+              }
+            }
+          ],
+          "notes": [],
+          "broadcasts": [
+            {
+              "type": {
+                "id": "4",
+                "shortName": "Streaming"
+              },
+              "market": {
+                "id": "1",
+                "type": "National"
+              },
+              "media": {
+                "shortName": "Prime Video"
+              },
+              "lang": "en",
+              "region": "us",
+              "partnered": false
+            }
+          ],
+          "status": {
+            "clock": 0.0,
+            "displayClock": "0:00",
+            "period": 4,
+            "type": {
+              "id": "3",
+              "name": "STATUS_FINAL",
+              "state": "post",
+              "completed": true,
+              "description": "Final",
+              "detail": "Final",
+              "shortDetail": "Final"
+            },
+            "isTBDFlex": false
+          }
+        }
+      ],
+      "links": [
+        {
+          "language": "en-US",
+          "rel": [
+            "summary",
+            "desktop"
+          ],
+          "href": "https://www.espn.com/nfl/game/_/gameId/401872932/lions-bills",
+          "text": "Gamecast",
+          "shortText": "Summary",
+          "isExternal": false,
+          "isPremium": false
+        },
+        {
+          "language": "en-US",
+          "rel": [
+            "summary",
+            "sportscenter"
+          ],
+          "href": "sportscenter://x-callback-url/showGame?sportName=football&leagueAbbrev=nfl&gameId=401872932",
+          "text": "Gamecast",
+          "shortText": "Summary",
+          "isExternal": false,
+          "isPremium": false
+        }
+      ]
+    },
+    {
+      "id": "401872953",
+      "date": "2026-09-27T17:00Z",
+      "name": "Los Angeles Chargers at Buffalo Bills",
+      "shortName": "LAC @ BUF",
+      "season": {
+        "year": 2026,
+        "displayName": "2026"
+      },
+      "seasonType": {
+        "id": "2",
+        "type": 2,
+        "name": "Regular Season",
+        "abbreviation": "reg"
+      },
+      "week": {
+        "number": 3,
+        "text": "Week 3"
+      },
+      "timeValid": true,
+      "competitions": [
+        {
+          "id": "401872953",
+          "date": "2026-09-27T17:00Z",
+          "attendance": 60361,
+          "type": {
+            "id": "1",
+            "text": "Standard",
+            "abbreviation": "STD",
+            "slug": "standard",
+            "type": "standard"
+          },
+          "timeValid": true,
+          "neutralSite": false,
+          "boxscoreAvailable": true,
+          "ticketsAvailable": false,
+          "venue": {
+            "fullName": "Highmark Stadium",
+            "address": {
+              "city": "Orchard Park",
+              "state": "NY",
+              "zipCode": "14127",
+              "country": "USA"
+            }
+          },
+          "competitors": [
+            {
+              "id": "2",
+              "type": "team",
+              "order": 0,
+              "homeAway": "home",
+              "winner": true,
+              "team": {
+                "id": "2",
+                "location": "Buffalo",
+                "nickname": "Bills",
+                "abbreviation": "BUF",
+                "displayName": "Buffalo Bills",
+                "shortDisplayName": "Bills",
+                "logos": [
+                  {
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500/buf.png",
+                    "width": 500,
+                    "height": 500,
+                    "alt": "",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "lastUpdated": "2024-06-25T18:45Z"
+                  },
+                  {
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500-dark/buf.png",
+                    "width": 500,
+                    "height": 500,
+                    "alt": "",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "lastUpdated": "2024-06-25T18:45Z"
+                  }
+                ],
+                "links": [
+                  {
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "href": "https://www.espn.com/nfl/team/_/name/buf/buffalo-bills",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "rel": [
+                      "roster",
+                      "desktop"
+                    ],
+                    "href": "https://www.espn.com/nfl/team/roster/_/name/buf/buffalo-bills",
+                    "text": "Roster"
+                  }
+                ]
+              },
+              "score": {
+                "value": 24.0,
+                "displayValue": "24"
+              },
+              "leaders": [
+                {
+                  "name": "passingLeader",
+                  "displayName": "Passing Leader",
+                  "abbreviation": "PYDS",
+                  "leaders": [
+                    {
+                      "displayValue": "16/26, 204 YDS, 2 INT",
+                      "value": 204.0,
+                      "athlete": {
+                        "id": "3918298",
+                        "lastName": "Allen",
+                        "displayName": "Josh Allen",
+                        "shortName": "J. Allen",
+                        "links": [
+                          {
+                            "rel": [
+                              "playercard",
+                              "desktop"
+                            ],
+                            "href": "https://www.espn.com/nfl/player/_/id/3918298/josh-allen"
+                          },
+                          {
+                            "rel": [
+                              "stats",
+                              "desktop"
+                            ],
+                            "href": "https://www.espn.com/nfl/player/stats/_/id/3918298/josh-allen"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "name": "rushingLeader",
+                  "displayName": "Rushing Leader",
+                  "abbreviation": "RYDS",
+                  "leaders": [
+                    {
+                      "displayValue": "24 CAR, 154 YDS, 1 TD",
+                      "value": 154.0,
+                      "athlete": {
+                        "id": "4379399",
+                        "lastName": "Cook III",
+                        "displayName": "James Cook III",
+                        "shortName": "J. Cook III",
+                        "links": [
+                          {
+                            "rel": [
+                              "playercard",
+                              "desktop"
+                            ],
+                            "href": "https://www.espn.com/nfl/player/_/id/4379399/james-cook-iii"
+                          },
+                          {
+                            "rel": [
+                              "stats",
+                              "desktop"
+                            ],
+                            "href": "https://www.espn.com/nfl/player/stats/_/id/4379399/james-cook-iii"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ],
+              "record": [
+                {
+                  "id": "369",
+                  "abbreviation": "Game",
+                  "displayName": "Record Year To Date",
+                  "shortDisplayName": "YTD",
+                  "description": "Overall Record",
+                  "type": "total",
+                  "displayValue": "3-0"
+                },
+                {
+                  "id": "13",
+                  "displayName": "Home",
+                  "shortDisplayName": "HOME",
+                  "description": "Home Record",
+                  "type": "home",
+                  "displayValue": "2-0"
+                }
+              ],
+              "curatedRank": {
+                "current": 99
+              }
+            },
+            {
+              "id": "24",
+              "type": "team",
+              "order": 1,
+              "homeAway": "away",
+              "winner": false,
+              "team": {
+                "id": "24",
+                "location": "Los Angeles",
+                "nickname": "Chargers",
+                "abbreviation": "LAC",
+                "displayName": "Los Angeles Chargers",
+                "shortDisplayName": "Chargers",
+                "logos": [
+                  {
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500/lac.png",
+                    "width": 500,
+                    "height": 500,
+                    "alt": "",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "lastUpdated": "2024-06-25T18:52Z"
+                  },
+                  {
+                    "href": "https://a.espncdn.com/i/teamlogos/nfl/500-dark/lac.png",
+                    "width": 500,
+                    "height": 500,
+                    "alt": "",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "lastUpdated": "2024-06-25T18:52Z"
+                  }
+                ],
+                "links": [
+                  {
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "href": "https://www.espn.com/nfl/team/_/name/lac/los-angeles-chargers",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "rel": [
+                      "roster",
+                      "desktop"
+                    ],
+                    "href": "https://www.espn.com/nfl/team/roster/_/name/lac/los-angeles-chargers",
+                    "text": "Roster"
+                  }
+                ]
+              },
+              "score": {
+                "value": 16.0,
+                "displayValue": "16"
+              },
+              "record": [
+                {
+                  "id": "369",
+                  "abbreviation": "Game",
+                  "displayName": "Record Year To Date",
+                  "shortDisplayName": "YTD",
+                  "description": "Overall Record",
+                  "type": "total",
+                  "displayValue": "0-3"
+                },
+                {
+                  "id": "13",
+                  "displayName": "Home",
+                  "shortDisplayName": "HOME",
+                  "description": "Home Record",
+                  "type": "home",
+                  "displayValue": "0-2"
+                }
+              ],
+              "curatedRank": {
+                "current": 99
+              }
+            }
+          ],
+          "notes": [],
+          "broadcasts": [
+            {
+              "type": {
+                "id": "1",
+                "shortName": "TV"
+              },
+              "market": {
+                "id": "1",
+                "type": "National"
+              },
+              "media": {
+                "shortName": "FOX"
+              },
+              "lang": "en",
+              "region": "us",
+              "partnered": false
+            }
+          ],
+          "status": {
+            "clock": 0.0,
+            "displayClock": "0:00",
+            "period": 4,
+            "type": {
+              "id": "3",
+              "name": "STATUS_FINAL",
+              "state": "post",
+              "completed": true,
+              "description": "Final",
+              "detail": "Final",
+              "shortDetail": "Final"
+            },
+            "isTBDFlex": false
+          }
+        }
+      ],
+      "links": [
+        {
+          "language": "en-US",
+          "rel": [
+            "summary",
+            "desktop"
+          ],
+          "href": "https://www.espn.com/nfl/game/_/gameId/401872953/chargers-bills",
+          "text": "Gamecast",
+          "shortText": "Summary",
+          "isExternal": false,
+          "isPremium": false
+        },
+        {
+          "language": "en-US",
+          "rel": [
+            "summary",
+            "sportscenter"
+          ],
+          "href": "sportscenter://x-callback-url/showGame?sportName=football&leagueAbbrev=nfl&gameId=401872953",
+          "text": "Gamecast",
+          "shortText": "Summary",
+          "isExternal": false,
+          "isPremium": false
+        }
+      ]
+    }
+  ],
+  "requestedSeason": {
+    "year": 2026,
+    "type": 2,
+    "name": "Regular Season",
+    "displayName": "2026"
+  },
+  "byeWeek": 5
+}

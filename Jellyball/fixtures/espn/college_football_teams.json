@@ -1,0 +1,226 @@
+{
+  "sports": [
+    {
+      "id": "20",
+      "leagues": [
+        {
+          "abbreviation": "NCAAF",
+          "id": "23",
+          "name": "NCAA - Football",
+          "season": {
+            "displayName": "2026",
+            "year": 2026
+          },
+          "shortName": "NCAA Football",
+          "slug": "college-football",
+          "teams": [
+            {
+              "team": {
+                "abbreviation": "ACU",
+                "alternateColor": "b1b3b3",
+                "color": "592d82",
+                "displayName": "Abilene Christian Wildcats",
+                "id": "2000",
+                "isActive": true,
+                "isAllStar": false,
+                "links": [
+                  {
+                    "href": "https://www.espn.com/college-football/team/_/id/2000/abilene-christian-wildcats",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "shortText": "Clubhouse",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "href": "https://www.espn.com/college-football/team/roster/_/id/2000",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "roster",
+                      "desktop"
+                    ],
+                    "shortText": "Roster",
+                    "text": "Roster"
+                  }
+                ],
+                "location": "Abilene Christian",
+                "logos": [
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/ncaa/500/2000.png",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "width": 500
+                  },
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/ncaa/500-dark/2000.png",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "width": 500
+                  }
+                ],
+                "name": "Wildcats",
+                "nickname": "Abilene Chrstn",
+                "shortDisplayName": "Abilene Chrstn",
+                "slug": "abilene-christian-wildcats",
+                "uid": "s:20~l:23~t:2000"
+              }
+            },
+            {
+              "team": {
+                "abbreviation": "ADSU",
+                "color": "000000",
+                "displayName": "Adams State Grizzlies",
+                "id": "2001",
+                "isActive": true,
+                "isAllStar": false,
+                "links": [
+                  {
+                    "href": "https://www.espn.com/college-football/team/_/id/2001/adams-state-grizzlies",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "shortText": "Clubhouse",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "href": "https://www.espn.com/college-football/team/roster/_/id/2001",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "roster",
+                      "desktop"
+                    ],
+                    "shortText": "Roster",
+                    "text": "Roster"
+                  }
+                ],
+                "location": "Adams State",
+                "logos": [
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/ncaa/500/2001.png",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "width": 500
+                  },
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/ncaa/500-dark/2001.png",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "width": 500
+                  }
+                ],
+                "name": "Grizzlies",
+                "nickname": "Adams St",
+                "shortDisplayName": "Adams St",
+                "slug": "adams-state-grizzlies",
+                "uid": "s:20~l:23~t:2001"
+              }
+            },
+            {
+              "team": {
+                "abbreviation": "ADR",
+                "color": "000000",
+                "displayName": "Adrian Bulldogs",
+                "id": "2003",
+                "isActive": true,
+                "isAllStar": false,
+                "links": [
+                  {
+                    "href": "https://www.espn.com/college-football/team/_/id/2003/adrian-bulldogs",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "shortText": "Clubhouse",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "href": "https://www.espn.com/college-football/team/roster/_/id/2003",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "roster",
+                      "desktop"
+                    ],
+                    "shortText": "Roster",
+                    "text": "Roster"
+                  }
+                ],
+                "location": "Adrian",
+                "logos": [
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/ncaa/500/2003.png",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "width": 500
+                  },
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/ncaa/500-dark/2003.png",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "width": 500
+                  }
+                ],
+                "name": "Bulldogs",
+                "nickname": "Adrian",
+                "shortDisplayName": "Adrian",
+                "slug": "adrian-bulldogs",
+                "uid": "s:20~l:23~t:2003"
+              }
+            }
+          ],
+          "uid": "s:20~l:23",
+          "year": 2026
+        }
+      ],
+      "name": "Football",
+      "slug": "football",
+      "uid": "s:20"
+    }
+  ]
+}

@@ -3,7 +3,10 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
-ASSETS.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_assets_dir() -> None:
+    ASSETS.mkdir(parents=True, exist_ok=True)
 
 
 def font(size: int, bold: bool = False):
@@ -92,5 +95,6 @@ def create_assets():
 
 
 if __name__ == "__main__":
+    _ensure_assets_dir()
     create_assets()
     print(f"Created JellyBall assets in {ASSETS}")

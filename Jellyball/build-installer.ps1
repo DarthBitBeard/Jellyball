@@ -15,7 +15,8 @@
     4. Runs PyInstaller against jellyball.spec (ONEDIR -> dist\Jellyball\).
     5. Verifies both Jellyball.exe and JellyballConsole.exe were produced.
     6. Locates ISCC.exe (Inno Setup 6) and compiles installer\jellyball.iss
-       into installer\Output\JellyballSetup-<version>.exe.
+       into installer\Output\JellyballSetup-<version>.exe, then writes
+       installer\Output\SHA256SUMS (sha256sum format) for it.
 
     Stops immediately on any failure. If PyInstaller succeeds but ISCC.exe
     cannot be found, the script still exits non-zero (after printing install
@@ -181,6 +182,16 @@ if (-not (Test-Path $OutputExe -PathType Leaf)) {
     throw "Expected installer was not produced: $OutputExe"
 }
 Invoke-CodeSign @($OutputExe)
+
+# Checksums are computed AFTER signing (signing changes the bytes). The file
+# uses the `sha256sum` format ("<hash>  <file name>"), so `sha256sum -c
+# SHA256SUMS` works on Linux/macOS and Get-FileHash on Windows can be compared
+# by eye. The release workflow publishes it next to the installer.
+$Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $OutputExe).Hash.ToLowerInvariant()
+$SumsPath = Join-Path (Split-Path -Parent $OutputExe) "SHA256SUMS"
+[System.IO.File]::WriteAllText($SumsPath, "$Hash  $(Split-Path -Leaf $OutputExe)`n", (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "SHA256: $Hash"
+Write-Host "Checksums written: $SumsPath"
 
 Write-Host ""
 Write-Host "Installer built: $OutputExe" -ForegroundColor Green

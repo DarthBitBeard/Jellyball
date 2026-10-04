@@ -1,0 +1,30 @@
+#EXTM3U
+#EXTINF:-1 tvg-id="ACCNetwork.us@SD" tvg-logo="https://logos.example.test/acc-network.png" group-title="Sports",ACC Network (720p)
+https://iptv.example.test/acc-network/index.m3u8
+#EXTINF:-1 tvg-id="ESPN.us@SD" tvg-logo="https://logos.example.test/espn.png" group-title="Sports",ESPN (720p)
+https://iptv.example.test/espn/index.m3u8
+#EXTINF:-1 tvg-id="ESPN.us@SD" tvg-logo="https://logos.example.test/espn.png" group-title="Sports",ESPN (480p) [Not 24/7]
+https://iptv.example.test/espn-480p/index.m3u8
+#EXTINF:-1 tvg-id="ESPN.us@SD" tvg-logo="https://logos.example.test/espn.png" group-title="Sports",ESPN (360p)
+https://iptv.example.test/dead/espn-360p.m3u8
+#EXTINF:-1 tvg-id="ESPN.us@SD" tvg-logo="https://logos.example.test/espn.png" group-title="Sports",ESPN (RTMP)
+rtmp://iptv.example.test/live/espn
+
+# Channels that share a prefix with ESPN but are different channels.
+#EXTINF:-1 tvg-id="ESPN2.us@SD" tvg-logo="https://logos.example.test/espn2.png" group-title="Sports",ESPN2 (720p)
+https://iptv.example.test/espn2/index.m3u8
+#EXTINF:-1 tvg-id="ESPNU.us@SD" tvg-logo="https://logos.example.test/espnu.png" group-title="Sports",ESPNU (720p)
+https://iptv.example.test/espnu/index.m3u8
+#EXTINF:-1 tvg-id="ESPNews.us@SD" tvg-logo="https://logos.example.test/espnews.png" group-title="Sports",ESPNews (480p)
+https://iptv.example.test/espnews/index.m3u8
+#EXTINF:-1 tvg-id="ESPNPlus.us@SD" tvg-logo="https://logos.example.test/espn-plus.png" group-title="Sports",ESPN+ (576p)
+https://iptv.example.test/espn-plus/index.m3u8
+
+#EXTINF:-1 tvg-id="FoxSports1.us@SD" tvg-name="FS1" tvg-logo="https://logos.example.test/fs1.png" group-title="Sports",Fox Sports 1 (1080p)
+https://iptv.example.test/fs1/index.m3u8
+#EXTINF:-1 tvg-id="NFLNetwork.us@SD" tvg-name="NFL Network" tvg-logo="https://logos.example.test/nfl-network.png" group-title="Sports",NFL Network (1080p) [Geo-blocked]
+#EXTVLCOPT:http-referrer=https://referrer.example.test/
+#EXTVLCOPT:http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)
+https://iptv.example.test/nfl-network/index.m3u8
+#EXTINF:-1 tvg-id="" tvg-logo="" group-title="",Local Sports 7 (480p)
+https://iptv.example.test/local-sports-7/index.m3u8

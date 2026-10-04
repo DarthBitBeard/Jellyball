@@ -31,7 +31,10 @@ from scrapers import (
     HtmlAggregatorScraper,
 )
 import catalog
+import dashboard_cards
+import provider_telemetry
 from catalog import _season_resume_label, get_catalog_entries
+from leagues import LEAGUES
 from alerts import (
     get_jellyfin_config,
     get_notification_config,
@@ -107,26 +110,10 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         if data.get("catalog_key")
     }
 
-    provider_health = []
-    if metrics["failovers_by_provider"]:
-        provider_stats = {}
-        for prov, count in metrics["failovers_by_provider"].items():
-            total = provider_totals.get(prov, 0) or 1
-            success_rate = max(0, 100 - (count * 100 / total)) if total > 0 else 100
-            provider_stats[prov] = (success_rate, count, total)
-
-        for prov in sorted(provider_stats.keys(), key=lambda p: provider_stats[p][0], reverse=True):
-            rate, fails, total = provider_stats[prov]
-            rate_color = "var(--success)" if rate > 90 else ("var(--warning)" if rate > 70 else "var(--danger)")
-            provider_health.append({"provider": prov, "rate": rate, "rate_color": rate_color, "total": total})
+    provider_health = await asyncio.to_thread(provider_telemetry.leaderboard_sync)
 
     catalog_group_defs = (
-        ("ncaaf", "College Football"),
-        ("ncaam", "College Basketball"),
-        ("nfl", "NFL"),
-        ("mlb", "MLB"),
-        ("nhl", "NHL"),
-        ("nba", "NBA"),
+        *((league.key, league.group_title) for league in LEAGUES),
         ("special", "Always-Live Sports Channels"),
     )
     catalog_groups = []
@@ -338,6 +325,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         "provider_rotation_enabled": provider_rotation_enabled,
         "dashboard_data": {},
     }
+    context.update(await dashboard_cards.template_context(request))
     return TEMPLATES.TemplateResponse(request, "dashboard.html", context)
 
 def _secret_input(name: str, saved_value: str) -> dict:
@@ -558,7 +546,6 @@ async def create_multiview(
         name=name,
         query="",
         type="multiview",
-        candidates=[{"synthetic": True}],
         category="multiview",
         content_type="multiview",
         always_live=True,

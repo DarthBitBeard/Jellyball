@@ -1,0 +1,9 @@
+{
+  "LocalAddress": "http://<CONTAINER_IP>:8096",
+  "ServerName": "jellyball-it",
+  "Version": "12.1.0",
+  "ProductName": "Jellyfin Server",
+  "OperatingSystem": "",
+  "Id": "<SERVER_ID>",
+  "StartupWizardCompleted": true
+}

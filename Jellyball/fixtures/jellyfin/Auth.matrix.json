@@ -1,0 +1,145 @@
+{
+  "endpoint": "GET /ScheduledTasks",
+  "results": [
+    {
+      "credential": "valid API key",
+      "style": "Authorization: MediaBrowser Token=\"<t>\"",
+      "status": 200
+    },
+    {
+      "credential": "valid API key",
+      "style": "Authorization: MediaBrowser Client=\"Jellyball\", Device=\"Jellyball\", DeviceId=\"jellyball\", Version=\"2.1.0\", Token=\"<t>\"  (Jellyball modern)",
+      "status": 200
+    },
+    {
+      "credential": "valid API key",
+      "style": "Authorization: MediaBrowser Token=<t>  (unquoted)",
+      "status": 200
+    },
+    {
+      "credential": "valid API key",
+      "style": "Authorization: Bearer <t>",
+      "status": 401
+    },
+    {
+      "credential": "valid API key",
+      "style": "X-Emby-Token: <t>  (Jellyball legacy)",
+      "status": 401
+    },
+    {
+      "credential": "valid API key",
+      "style": "X-MediaBrowser-Token: <t>",
+      "status": 401
+    },
+    {
+      "credential": "valid API key",
+      "style": "X-Emby-Authorization: MediaBrowser Client=\"Jellyball\", Device=\"Jellyball\", DeviceId=\"jellyball\", Version=\"2.1.0\", Token=\"<t>\"",
+      "status": 401
+    },
+    {
+      "credential": "valid API key",
+      "style": "?ApiKey=<t>",
+      "status": 200
+    },
+    {
+      "credential": "valid API key",
+      "style": "?api_key=<t>",
+      "status": 401
+    },
+    {
+      "credential": "valid user token",
+      "style": "Authorization: MediaBrowser Token=\"<t>\"",
+      "status": 200
+    },
+    {
+      "credential": "valid user token",
+      "style": "Authorization: MediaBrowser Client=\"Jellyball\", Device=\"Jellyball\", DeviceId=\"jellyball\", Version=\"2.1.0\", Token=\"<t>\"  (Jellyball modern)",
+      "status": 200
+    },
+    {
+      "credential": "valid user token",
+      "style": "Authorization: MediaBrowser Token=<t>  (unquoted)",
+      "status": 200
+    },
+    {
+      "credential": "valid user token",
+      "style": "Authorization: Bearer <t>",
+      "status": 401
+    },
+    {
+      "credential": "valid user token",
+      "style": "X-Emby-Token: <t>  (Jellyball legacy)",
+      "status": 401
+    },
+    {
+      "credential": "valid user token",
+      "style": "X-MediaBrowser-Token: <t>",
+      "status": 401
+    },
+    {
+      "credential": "valid user token",
+      "style": "X-Emby-Authorization: MediaBrowser Client=\"Jellyball\", Device=\"Jellyball\", DeviceId=\"jellyball\", Version=\"2.1.0\", Token=\"<t>\"",
+      "status": 401
+    },
+    {
+      "credential": "valid user token",
+      "style": "?ApiKey=<t>",
+      "status": 200
+    },
+    {
+      "credential": "valid user token",
+      "style": "?api_key=<t>",
+      "status": 401
+    },
+    {
+      "credential": "wrong key",
+      "style": "Authorization: MediaBrowser Token=\"<t>\"",
+      "status": 401
+    },
+    {
+      "credential": "wrong key",
+      "style": "Authorization: MediaBrowser Client=\"Jellyball\", Device=\"Jellyball\", DeviceId=\"jellyball\", Version=\"2.1.0\", Token=\"<t>\"  (Jellyball modern)",
+      "status": 401
+    },
+    {
+      "credential": "wrong key",
+      "style": "Authorization: MediaBrowser Token=<t>  (unquoted)",
+      "status": 401
+    },
+    {
+      "credential": "wrong key",
+      "style": "Authorization: Bearer <t>",
+      "status": 401
+    },
+    {
+      "credential": "wrong key",
+      "style": "X-Emby-Token: <t>  (Jellyball legacy)",
+      "status": 401
+    },
+    {
+      "credential": "wrong key",
+      "style": "X-MediaBrowser-Token: <t>",
+      "status": 401
+    },
+    {
+      "credential": "wrong key",
+      "style": "X-Emby-Authorization: MediaBrowser Client=\"Jellyball\", Device=\"Jellyball\", DeviceId=\"jellyball\", Version=\"2.1.0\", Token=\"<t>\"",
+      "status": 401
+    },
+    {
+      "credential": "wrong key",
+      "style": "?ApiKey=<t>",
+      "status": 401
+    },
+    {
+      "credential": "wrong key",
+      "style": "?api_key=<t>",
+      "status": 401
+    },
+    {
+      "credential": "none",
+      "style": "(no credentials)",
+      "status": 401
+    }
+  ]
+}

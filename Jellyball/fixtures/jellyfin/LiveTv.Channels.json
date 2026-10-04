@@ -1,0 +1,108 @@
+{
+  "Items": [
+    {
+      "Name": "Harness Bills",
+      "ServerId": "<SERVER_ID>",
+      "Id": "f793ab36f8ced3482f60d5f4b83a5d06",
+      "ChannelId": null,
+      "IsFolder": false,
+      "Type": "TvChannel",
+      "ImageTags": {
+        "Primary": "265ed1829c6413f40be8767d52ba495c"
+      },
+      "BackdropImageTags": [],
+      "ImageBlurHashes": {
+        "Primary": {
+          "265ed1829c6413f40be8767d52ba495c": "e~0036fZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZ"
+        }
+      },
+      "LocationType": "Remote",
+      "MediaType": "Video",
+      "ChannelType": "TV",
+      "CurrentProgram": {
+        "Name": "Harness Bills Game 2",
+        "ServerId": "<SERVER_ID>",
+        "Id": "6411a42cdbeb83b08b87f3d8d3f0beca",
+        "ChannelId": "f793ab36f8ced3482f60d5f4b83a5d06",
+        "RunTimeTicks": 36000000000,
+        "Type": "Program",
+        "ImageTags": {},
+        "BackdropImageTags": [],
+        "ImageBlurHashes": {},
+        "MediaType": "Unknown",
+        "EndDate": "2026-10-03T04:00:00.0000000Z",
+        "StartDate": "2026-10-03T03:00:00.0000000Z"
+      }
+    },
+    {
+      "Name": "Harness ESPN",
+      "ServerId": "<SERVER_ID>",
+      "Id": "da1f132abf42409515ef64f9cbe3b1f7",
+      "ChannelId": null,
+      "IsFolder": false,
+      "Type": "TvChannel",
+      "ImageTags": {
+        "Primary": "0b403aba97b5b61ce557bf3aa62c1759"
+      },
+      "BackdropImageTags": [],
+      "ImageBlurHashes": {
+        "Primary": {
+          "0b403aba97b5b61ce557bf3aa62c1759": "e~0036fZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZ"
+        }
+      },
+      "LocationType": "Remote",
+      "MediaType": "Video",
+      "ChannelType": "TV",
+      "CurrentProgram": {
+        "Name": "Harness ESPN Game 2",
+        "ServerId": "<SERVER_ID>",
+        "Id": "fc9c3989160e11cf8dea664e5645b382",
+        "ChannelId": "da1f132abf42409515ef64f9cbe3b1f7",
+        "RunTimeTicks": 36000000000,
+        "Type": "Program",
+        "ImageTags": {},
+        "BackdropImageTags": [],
+        "ImageBlurHashes": {},
+        "MediaType": "Unknown",
+        "EndDate": "2026-10-03T04:00:00.0000000Z",
+        "StartDate": "2026-10-03T03:00:00.0000000Z"
+      }
+    },
+    {
+      "Name": "Harness Wolverines",
+      "ServerId": "<SERVER_ID>",
+      "Id": "e8f6740002d8a17523d8b1e0d2d5c774",
+      "ChannelId": null,
+      "IsFolder": false,
+      "Type": "TvChannel",
+      "ImageTags": {
+        "Primary": "802cf0df5491d90eb69de4b1ff482887"
+      },
+      "BackdropImageTags": [],
+      "ImageBlurHashes": {
+        "Primary": {
+          "802cf0df5491d90eb69de4b1ff482887": "e~0036fZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZfZ"
+        }
+      },
+      "LocationType": "Remote",
+      "MediaType": "Video",
+      "ChannelType": "TV",
+      "CurrentProgram": {
+        "Name": "Harness Wolverines Game 2",
+        "ServerId": "<SERVER_ID>",
+        "Id": "884cfe63ed30a8583ade559097bc49ec",
+        "ChannelId": "e8f6740002d8a17523d8b1e0d2d5c774",
+        "RunTimeTicks": 36000000000,
+        "Type": "Program",
+        "ImageTags": {},
+        "BackdropImageTags": [],
+        "ImageBlurHashes": {},
+        "MediaType": "Unknown",
+        "EndDate": "2026-10-03T04:00:00.0000000Z",
+        "StartDate": "2026-10-03T03:00:00.0000000Z"
+      }
+    }
+  ],
+  "TotalRecordCount": 3,
+  "StartIndex": 0
+}

@@ -15,7 +15,7 @@ import httpx
 
 from config import _log_failure, _positive_env_number, LOGGER
 import state
-from state import _spawn_background_task, stream_state
+from state import _spawn_background_task, is_multiview, stream_state
 from db import log_metric_event_async, update_team_meta_async
 import scrapers
 from scrapers import master_scrape
@@ -225,7 +225,7 @@ async def trigger_scrape(team_id: str, force: bool = False):
         _mark_scrape_finished(data, "failed", type(exc).__name__)
         raise
     else:
-        _mark_scrape_finished(data, "healthy" if data.get("candidates") else "empty")
+        _mark_scrape_finished(data, "healthy" if data.get("candidates") or is_multiview(data) else "empty")
     finally:
         _SCRAPE_IN_FLIGHT.discard(team_id)
 
@@ -307,7 +307,7 @@ async def _trigger_scrape_unlocked(team_id: str, force: bool = False):
 
     if (
         not force
-        and current.get("candidates")
+        and (current.get("candidates") or is_multiview(current))
         and current.get("is_healthy")
         and not current.get("exhausted")
         and time.time() - current.get("last_candidate_refresh", 0.0) < HEALTHY_RESCRAPE_SECONDS
@@ -343,7 +343,7 @@ async def _trigger_scrape_unlocked(team_id: str, force: bool = False):
         is_healthy = True
         current["is_healthy"] = True
         SESSIONS.poke(team_id)
-    elif previous_candidates:
+    elif previous_candidates or is_multiview(current):
         LOGGER.warning(
             "Keeping existing stream candidates after empty refresh team=%s count=%d",
             team_id,
@@ -594,14 +594,18 @@ async def _request_failover_unlocked(
     # from an earlier stint made its first failed probe fail over at once).
     candidates[next_index]["consecutive_failures"] = 0
     new_provider = candidates[next_index].get("provider", "Unknown")
+    old_provider = active.get("provider", "Unknown")
     SESSIONS.poke(team_id)
     LOGGER.info(
         "Failover team=%s from=%s to=%s reason=%s",
-        team_id, active.get("provider", "Unknown"), new_provider, reason,
+        team_id, old_provider, new_provider, reason,
     )
-    await log_metric_event_async(team_id, new_provider, "failover", reason)
+    # The event belongs to the provider that failed (the leaderboard counts
+    # failovers against the provider that was serving); the successor is kept in
+    # the details so neither side of the switch is lost.
+    await log_metric_event_async(team_id, old_provider, "failover", f"{reason} (to {new_provider})")
     data["failover_count"] = int(data.get("failover_count", 0)) + 1
-    data["last_failover"] = {"at": time.time(), "reason": reason, "to": new_provider}
+    data["last_failover"] = {"at": time.time(), "reason": reason, "from": old_provider, "to": new_provider}
     _note_failover_reason(reason)
     _send_failover_alert(team_id, data, team_name, new_provider)
     return True

@@ -1,0 +1,23 @@
+<div class="card" id="engine-live-sessions">
+    <h3>Live Sessions</h3>
+    <p class="hint-text">Every running channel session: bitrate, 95th-percentile segment download time, how old the newest segment is (edge age), buffer memory and failovers. The graphs show the last few minutes; updates every 3 seconds while this page is open.</p>
+    <div id="engine-breakers" class="hint-text"></div>
+    <div style="overflow-x: auto;">
+        <table style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr style="text-align: left; color: var(--text-muted); font-size: 0.85rem;">
+                    <th style="padding: 0.4rem;">Channel</th>
+                    <th style="padding: 0.4rem;">State</th>
+                    <th style="padding: 0.4rem;">Bitrate</th>
+                    <th style="padding: 0.4rem;">p95 latency</th>
+                    <th style="padding: 0.4rem;">Edge age</th>
+                    <th style="padding: 0.4rem;">Memory</th>
+                    <th style="padding: 0.4rem;">Failovers</th>
+                </tr>
+            </thead>
+            <tbody id="engine-sessions-body">
+                <tr><td colspan="7" style="padding: 0.5rem; color: var(--text-muted);">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>

@@ -49,6 +49,7 @@ function switchTab(tabName) {
     if (pane) pane.classList.add('active');
     if (btn) btn.classList.add('active');
     if (tabName === 'logs') loadLogs();
+    if (tabName === 'performance' && window.refreshPerformanceTab) window.refreshPerformanceTab(true);
     const url = new URL(window.location);
     url.searchParams.set('tab', tabName);
     window.history.replaceState({}, '', url);
@@ -322,6 +323,7 @@ async function testTeamStream(teamId) {
     }
     try {
         const resp = await fetch(`/api/test-stream/${teamId}`, { method: 'POST' });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const result = await resp.json();
         if (resultEl) {
             const count = result.candidate_count || 0;
@@ -452,8 +454,15 @@ window.addEventListener('DOMContentLoaded', () => {
         logFilterInput.addEventListener('input', renderLogLines);
     }
 
-    if (activeTab === 'performance') {
+    // The Performance tab refreshes whenever it is the visible tab, including after the
+    // operator switches to it (the page may have loaded on another tab).
+    {
+        const performancePaneActive = () => {
+            const pane = document.getElementById('tab-performance');
+            return !!pane && pane.classList.contains('active');
+        };
         async function refreshPerformanceTab(withTopTeams) {
+            if (!document.getElementById('performance-metrics')) return;
             try {
                 const cache = await fetch('/api/cache-metrics').then(r => r.json());
                 const perf = await fetch('/api/performance-stats').then(r => r.json());
@@ -497,7 +506,8 @@ window.addEventListener('DOMContentLoaded', () => {
                 console.error('Performance load failed', e);
             }
         }
-        refreshPerformanceTab(true);
-        setInterval(() => refreshPerformanceTab(false), 5000);
+        window.refreshPerformanceTab = refreshPerformanceTab;
+        if (performancePaneActive()) refreshPerformanceTab(true);
+        setInterval(() => { if (performancePaneActive() && !document.hidden) refreshPerformanceTab(false); }, 5000);
     }
 });

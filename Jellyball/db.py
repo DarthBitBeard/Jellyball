@@ -14,9 +14,14 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from config import _log_failure, DATA_DIR, LOGGER
+import migrations_engine
+import migrations_jellyfin
+import migrations_providers
+import migrations_setup
+import migrations_sports
 from version import __version__
 
 
@@ -149,15 +154,45 @@ def _migrate_add_team_indexes(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_teams_is_favorite ON teams (is_favorite)")
 
 
-# Ordered list of (version, migration_function). Append future migrations
-# here rather than editing an earlier one — each function receives the open
-# connection and must be idempotent, since a fresh DB's CREATE TABLE
-# statements above may already include what an earlier migration would
-# otherwise add.
-SCHEMA_MIGRATIONS = [
+# (version, migration_function) pairs. Append future migrations rather than
+# editing an earlier one — each function receives the open connection and
+# must be idempotent, since a fresh DB's CREATE TABLE statements above may
+# already include what an earlier migration would otherwise add.
+CORE_MIGRATIONS = [
     (1, _migrate_add_team_columns),
     (2, _migrate_add_team_indexes),
 ]
+
+# Feature lanes keep their migrations in their own migrations_<lane>.py and
+# own a reserved range of version numbers (inclusive), so work in parallel
+# never picks the same number or edits the same list. test_migrations_registry
+# checks that every lane stays inside its range and that no version repeats.
+MIGRATION_RANGES = {
+    "core": (1, 99),
+    "jellyfin": (100, 199),
+    "sports": (200, 299),
+    "providers": (300, 399),
+    "setup": (400, 499),
+    "engine": (500, 599),
+}
+_LANE_MIGRATION_MODULES = {
+    "jellyfin": migrations_jellyfin,
+    "sports": migrations_sports,
+    "providers": migrations_providers,
+    "setup": migrations_setup,
+    "engine": migrations_engine,
+}
+
+
+def _collect_migrations() -> list:
+    """Every lane's migrations merged into one list ordered by version."""
+    merged = list(CORE_MIGRATIONS)
+    for module in _LANE_MIGRATION_MODULES.values():
+        merged.extend(module.MIGRATIONS)
+    return sorted(merged, key=lambda item: item[0])
+
+
+SCHEMA_MIGRATIONS = _collect_migrations()
 
 
 def _database_has_user_data(conn: sqlite3.Connection) -> bool:
@@ -309,7 +344,7 @@ def prune_database_logs_once() -> None:
     """Delete old rows from every table that grows without bound, not just stream_events."""
     with _db_session() as conn:
         conn.execute("DELETE FROM stream_events WHERE timestamp < datetime('now', '-7 days')")
-        conn.execute("DELETE FROM provider_performance WHERE timestamp < datetime('now', '-7 days')")
+        conn.execute("DELETE FROM provider_performance WHERE timestamp < datetime('now', '-14 days')")
         conn.execute("DELETE FROM stream_test_results WHERE timestamp < datetime('now', '-7 days')")
         conn.execute("DELETE FROM playback_events WHERE timestamp < datetime('now', '-30 days')")
         conn.execute("DELETE FROM cache_metrics WHERE timestamp < datetime('now', '-7 days')")
@@ -425,7 +460,27 @@ def delete_team(team_id: str):
 async def delete_team_async(team_id: str) -> None:
     await asyncio.to_thread(delete_team, team_id)
 
-def load_teams() -> list:
+class TeamRow(NamedTuple):
+    """One `teams` row as load_teams() returns it. Values are as stored: a NULL
+    left by an old database arrives as None, so callers keep their fallbacks.
+    Still a tuple (same field order), so it unpacks and compares like one."""
+
+    team_id: str
+    name: str
+    query: str
+    logo_url: str
+    start_time: str
+    stop_time: str
+    category: str
+    source_id: str
+    content_type: str
+    search_terms: str  # JSON list
+    always_live: int
+    catalog_key: str
+    auto_disable_after: str
+
+
+def load_teams() -> List[TeamRow]:
     with _db_session() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -434,7 +489,7 @@ def load_teams() -> list:
                       auto_disable_after
                FROM teams"""
         )
-        return cursor.fetchall()
+        return [TeamRow._make(row) for row in cursor.fetchall()]
 
 
 def save_multiview_channel(
@@ -480,7 +535,21 @@ async def delete_multiview_channel_async(channel_id: str) -> None:
     await asyncio.to_thread(delete_multiview_channel, channel_id)
 
 
-def load_multiview_channels() -> list:
+class MultiviewRow(NamedTuple):
+    """One `multiview_channels` row as load_multiview_channels() returns it
+    (a tuple in column order, like TeamRow)."""
+
+    channel_id: str
+    name: str
+    layout: str
+    member_team_ids: str  # JSON list
+    active_audio_team_id: str
+    tvg_id: str
+    group_title: str
+    logo_url: str
+
+
+def load_multiview_channels() -> List[MultiviewRow]:
     with _db_session() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -488,7 +557,7 @@ def load_multiview_channels() -> list:
                       tvg_id, group_title, logo_url
                FROM multiview_channels"""
         )
-        return cursor.fetchall()
+        return [MultiviewRow._make(row) for row in cursor.fetchall()]
 
 
 def log_metric_event(team_id: str, provider: str, event_type: str, details: str):
@@ -677,7 +746,7 @@ def _performance_stats_sync() -> dict:
         # dark overnight (domain seizure, redesign, ownership change) and, unlike an
         # outright exception, a dead site often just returns zero results forever —
         # nothing else would ever flag that. A 5-day window (provider_performance is
-        # pruned at 7 days) with zero successes across enough attempts is a much
+        # pruned at 14 days) with zero successes across enough attempts is a much
         # stronger "this is actually gone" signal than the noisy 1-hour rate above.
         cursor.execute(
             """SELECT provider, SUM(success), COUNT(*) FROM provider_performance

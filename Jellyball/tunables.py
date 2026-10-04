@@ -40,7 +40,7 @@ class Tunable:
         return self.db_key or f"tunable:{self.name}"
 
 
-TUNABLES: Tuple[Tunable, ...] = (
+TUNABLES: List[Tunable] = [
     Tunable("IDLE_HEALTH_INTERVAL", "Unwatched channel probe interval (s)", "Health & failover", float, 5, 600,
             "IDLE_HEALTH_INTERVAL", "How often the active source of a channel nobody is watching is checked."),
     Tunable("HEALTH_FAILURE_THRESHOLD", "Failed probes before failover", "Health & failover", int, 1, 10,
@@ -96,12 +96,12 @@ TUNABLES: Tuple[Tunable, ...] = (
             "PREFETCH_CHUNK_COUNT", db_key="prefetch_chunk_count"),
     Tunable("STREAM_CHUNK_CACHE_TTL", "Chunk cache TTL (s)", "Legacy proxy (fMP4 / separate-audio sources)", float,
             1, 600, "STREAM_CHUNK_CACHE_TTL", db_key="stream_chunk_cache_ttl"),
-)
+]
 _TUNABLES_BY_NAME = {t.name: t for t in TUNABLES}
 # A non-session Tunable.target is a global of the module whose code reads it.
 # It must be rebound on that module - a `from x import NAME` copy elsewhere
 # would not see the change - so these are the modules that own the targets.
-_TUNABLE_TARGET_MODULES = (scrapers, legacy_proxy, sessions, multiview, failover)
+_TUNABLE_TARGET_MODULES = [scrapers, legacy_proxy, sessions, multiview, failover]
 
 
 def _tunable_module(tunable: Tunable):
@@ -119,6 +119,28 @@ def _tunable_value(tunable: Tunable):
 
 
 _TUNABLE_DEFAULTS = {t.name: _tunable_value(t) for t in TUNABLES}
+
+
+def register_tunables(module, *tunables: Tunable) -> None:
+    """Add settings owned by a feature module, so a lane never edits TUNABLES.
+
+    `module` owns the global each Tunable.target names (or the target starts
+    with "session."). Call it at import time from the lane's routes_<lane>.py,
+    before the startup lifespan runs _load_tunable_overrides: the default is
+    read now, so it has to be the value before any saved override is applied.
+    A name that is already registered, or a target the module does not have,
+    is a programming error and raises."""
+    for tunable in tunables:
+        if tunable.name in _TUNABLES_BY_NAME:
+            raise ValueError(f"tunable {tunable.name} is already registered")
+        if not tunable.target.startswith("session.") and not hasattr(module, tunable.target):
+            raise ValueError(f"{module.__name__} has no global {tunable.target} for tunable {tunable.name}")
+    if module not in _TUNABLE_TARGET_MODULES:
+        _TUNABLE_TARGET_MODULES.append(module)
+    for tunable in tunables:
+        TUNABLES.append(tunable)
+        _TUNABLES_BY_NAME[tunable.name] = tunable
+        _TUNABLE_DEFAULTS[tunable.name] = _tunable_value(tunable)
 
 
 def _coerce_tunable(tunable: Tunable, raw: object):

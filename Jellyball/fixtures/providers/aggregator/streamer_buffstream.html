@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>BuffStream - Florida Gators vs Georgia Bulldogs</title>
+</head>
+<body>
+  <video id="v" controls></video>
+  <script>
+    var hls = new Hls();
+    hls.loadSource("https://cdn.example.test/live/buffstream-gators/playlist.m3u8");
+    hls.attachMedia(document.getElementById("v"));
+  </script>
+</body>
+</html>

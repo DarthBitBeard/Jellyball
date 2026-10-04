@@ -12,7 +12,7 @@ You do **not** need write access to this repository.
 2. **Clone your fork** and create a branch off `master`
 3. **Push** commits to your fork
 4. Open a **pull request** into `DarthBitBeard/Jellyball` → `master`
-5. Wait for CI (unit tests, ruff, e2e, Docker smoke) and maintainer review
+5. Wait for CI (unit tests + ruff on Windows and Linux are required; e2e and Docker smoke also run as informational checks) and maintainer review
 
 ```bash
 git clone https://github.com/<your-username>/Jellyball.git
@@ -41,6 +41,14 @@ Optional (needs ffmpeg):
 ```bash
 export JELLYBALL_E2E=1
 python -m unittest test_e2e_tools -v
+```
+
+Optional (needs Docker; runs a real Jellyfin, pulling about 745 MB the first time):
+
+```bash
+export JELLYBALL_JELLYFIN_IT=1
+python -m unittest test_jellyfin_integration -v
+python tools/jellyfin_harness.py probe     # print what the real server answers
 ```
 
 Optional: run `pip install pre-commit && pre-commit install` to have ruff and a

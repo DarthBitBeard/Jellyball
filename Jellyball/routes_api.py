@@ -12,7 +12,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 import config
 from config import _log_failure, _safe_team_id, LOG_FILE
-from state import stream_state
+from state import is_multiview, stream_state
+import provider_tools
 from db import (
     _bulk_set_favorite_sync,
     _export_teams_sync,
@@ -26,6 +27,7 @@ from alerts import request_jellyfin_guide_refresh_if_changed
 from jellyfin_client import load_status as load_jellyfin_status
 from updates import _update_available, _UPDATE_STATE
 from legacy_proxy import CHUNK_CACHE
+import engine_stats
 import ffmpeg_proc
 from sessions import SESSIONS
 from multiview import _multiview_cooldown_remaining, _MULTIVIEW_FAILURES, _MULTIVIEW_PROCESSES
@@ -214,6 +216,15 @@ async def prometheus_metrics(auth: bool = Depends(verify_dashboard_auth)):
             f'{1 if info.get("open") else 0}'
         )
     lines += [
+        "# HELP jellyball_legacy_fallbacks_total Sessions handed to the legacy proxy, by reason and provider.",
+        "# TYPE jellyball_legacy_fallbacks_total counter",
+    ]
+    for row in engine_stats.legacy_fallback_counts():
+        lines.append(
+            f'jellyball_legacy_fallbacks_total{{reason="{_prometheus_label(row["reason"])}",'
+            f'provider="{_prometheus_label(row["provider"])}"}} {row["count"]}'
+        )
+    lines += [
         "# HELP jellyball_playwright_pages_in_use Open Playwright pages/contexts.",
         "# TYPE jellyball_playwright_pages_in_use gauge",
         f"jellyball_playwright_pages_in_use {playwright_pages_in_use()}",
@@ -388,15 +399,27 @@ async def get_playback_stats(auth: bool = Depends(verify_dashboard_auth)):
 
 @router.post("/api/test-stream/{team_id}")
 async def test_stream(team_id: str, auth: bool = Depends(verify_dashboard_auth)):
+    """Probe the channel's candidates for real (playlist plus one segment) instead of
+    echoing the in-memory health flag; the flag is still returned for comparison."""
     try:
         data = stream_state.get(team_id)
         candidates = data.get("candidates", []) if data else []
-        is_live = len(candidates) > 0 and data.get("is_healthy", False)
+        probe = await provider_tools.probe_candidates(candidates)
+        # A Multi-View has no candidates of its own; it is live while its grid is healthy.
+        is_live = probe["live"] > 0 or bool(is_multiview(data) and data.get("is_healthy", False))
         await asyncio.to_thread(_record_stream_test_sync, team_id, is_live, len(candidates))
-        return {"team_id": team_id, "is_live": is_live, "candidate_count": len(candidates), "status": "✅ Live" if is_live else "❌ Offline"}
+        return {
+            "team_id": team_id,
+            "is_live": is_live,
+            "candidate_count": len(candidates),
+            "probed": probe["probed"],
+            "live_candidates": probe["live"],
+            "reported_healthy": bool(data and data.get("is_healthy", False)),
+            "status": "✅ Live" if is_live else "❌ Offline",
+        }
     except Exception as exc:
         _log_failure(f"test stream {team_id}", exc)
-        return {"status": "error"}
+        raise HTTPException(status_code=500, detail="Stream test failed")
 
 
 @router.get("/api/version")

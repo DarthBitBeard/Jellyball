@@ -1,0 +1,5 @@
+{
+  "Type": "m3u",
+  "Url": "http://host.docker.internal:<FEED_PORT>/playlist.m3u",
+  "FriendlyName": "Jellyball Harness"
+}

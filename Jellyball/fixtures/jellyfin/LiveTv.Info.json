@@ -1,0 +1,15 @@
+{
+  "Services": [
+    {
+      "Name": "Emby",
+      "Status": "Ok",
+      "HasUpdateAvailable": false,
+      "IsVisible": false,
+      "Tuners": []
+    }
+  ],
+  "IsEnabled": true,
+  "EnabledUsers": [
+    "<USER_ID>"
+  ]
+}

@@ -123,9 +123,17 @@ AUTH_FAILURE_WINDOW = 300.0
 AUTH_LOCKOUT_SECONDS = 300.0
 
 
-def _auth_client_key(request: Optional[Request]) -> str:
+def _auth_client_key(request: Optional[Request], username: str = "") -> str:
+    """Bucket key for the login lockout: (TCP peer IP, attempted username).
+
+    Keyed per username so that, behind a reverse proxy where every client
+    shares one peer IP, one attacker's failed logins cannot lock all
+    legitimate users out. The peer IP (never X-Forwarded-For) is still the
+    address component, so the header cannot be spoofed to dodge the lockout.
+    """
     client = getattr(request, "client", None) if request is not None else None
-    return getattr(client, "host", "") or "unknown"
+    peer = getattr(client, "host", "") or "unknown"
+    return f"{peer}\x00{username or ''}"
 
 
 def _auth_locked_out(client_key: str, now: float) -> bool:
@@ -158,7 +166,8 @@ def verify_dashboard_auth(request: Request = None, credentials: Optional[HTTPBas
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Dashboard is local-only")
         return True
     now = time.monotonic()
-    client_key = _auth_client_key(request)
+    attempted_username = credentials.username if credentials else ""
+    client_key = _auth_client_key(request, attempted_username)
     if _auth_locked_out(client_key, now):
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many failed logins")
     if not credentials:

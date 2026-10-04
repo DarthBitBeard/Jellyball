@@ -19,7 +19,10 @@ from fastapi.responses import Response
 from config import _upstream_media_headers, _validate_upstream_url, LOGGER
 from state import _media_client, _spawn_background_task, PLACEHOLDER_SESSION_ID, stream_state
 from db import _METRIC_WRITER
-from legacy_proxy import _fetch_upstream_body, _hls_response, _legacy_proxy_stream, HLS_MEDIA_TYPE
+import engine_settings
+import engine_stats
+from upstream import _fetch_upstream_body, _hls_response, HLS_MEDIA_TYPE
+from legacy_proxy import _legacy_proxy_stream
 import ffmpeg_proc
 import placeholder
 from placeholder import _ensure_placeholder_running, _placeholder_cooldown_remaining
@@ -231,6 +234,16 @@ def _on_session_media_info(channel_id: str, source_key: tuple, has_audio: bool, 
             break
 
 
+def _on_session_legacy_fallback(channel_id: str, kind: str, source_key: tuple) -> None:
+    data = stream_state.get(channel_id) or {}
+    provider = ""
+    for candidate in data.get("candidates") or []:
+        if candidate_source_key(candidate) == tuple(source_key):
+            provider = str(candidate.get("provider") or "")
+            break
+    engine_stats.record_legacy_fallback(kind, provider)
+
+
 SESSIONS = SessionRegistry(
     SessionHooks(
         fetch=lambda url, headers, max_bytes, timeout: _session_fetch(url, headers, max_bytes, timeout),
@@ -239,6 +252,8 @@ SESSIONS = SessionRegistry(
         report_failure=lambda channel_id, key, reason: _on_session_failure(channel_id, key, reason),
         report_incompatible=lambda channel_id, key, reason: _on_session_incompatible(channel_id, key, reason),
         on_media_info=lambda channel_id, key, has_audio, sig: _on_session_media_info(channel_id, key, has_audio, sig),
+        preferred_audio_language=engine_settings.preferred_audio_language,
+        on_legacy_fallback=lambda channel_id, kind, key: _on_session_legacy_fallback(channel_id, kind, key),
     ),
     SessionConfig(
         idle_timeout=SESSION_IDLE_SECONDS,

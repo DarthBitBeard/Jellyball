@@ -61,6 +61,17 @@ _DRAWTEXT_FAILURE_MARKERS = (
 )
 
 
+def _placeholder_live_run_dirs() -> Set[Path]:
+    live = set(_PLACEHOLDER_PENDING_DIRS)
+    if _PLACEHOLDER_STATE:
+        live.add(_PLACEHOLDER_STATE["output_dir"])
+    return live
+
+
+# Read at call time, so a patched PLACEHOLDER_OUTPUT_DIR is what gets swept.
+ffmpeg_proc.register_run_root(lambda: PLACEHOLDER_OUTPUT_DIR, live_dirs=_placeholder_live_run_dirs)
+
+
 def _placeholder_font_option() -> str:
     """drawtext font selection. Bundled Windows ffmpeg builds usually have no
     fontconfig configuration, so font='Sans' fails or falls back unpredictably

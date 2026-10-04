@@ -7,6 +7,20 @@
 ; Installs the PyInstaller ONEDIR payload, registers "Jellyball" as a Windows
 ; service running as the virtual account NT SERVICE\Jellyball, and writes a
 ; one-time configuration file at %ProgramData%\Jellyball\.env.
+;
+; Unattended installs take optional switches. /PORT, /USER and /LAN only seed a
+; NEW .env (an existing one is never rewritten); /DATADIR selects the data
+; folder and does not move existing data, so omit it when upgrading:
+;   /PORT=8000          server port (1-65535)
+;   /USER=admin         dashboard username
+;   /LAN=1|0            1 = listen on the network (default), 0 = this computer only
+;   /DATADIR="D:\Data"  data folder instead of %ProgramData%\Jellyball (an empty
+;                       or new folder; the service gets it through its own
+;                       JELLYBALL_DATA_DIR environment value)
+; There is deliberately no password switch (command lines leak into logs and
+; process lists). A silent install without a password lets Jellyball generate
+; one on first start in <data folder>\dashboard-password.txt; the installer
+; logs that path (visible with /LOG=...) and never the password itself.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -58,17 +72,159 @@ var
   ConfigPage: TInputQueryWizardPage;
   NetworkPage: TInputOptionWizardPage;
   IsUpgrade: Boolean;
+  UninstallDataDir: String;
 
 const
   ServiceName = 'Jellyball';
+  ServiceKey = 'SYSTEM\CurrentControlSet\Services\Jellyball';
+  DataDirEnvName = 'JELLYBALL_DATA_DIR';
 
 { ---------------------------------------------------------------------- }
 { Helpers                                                                 }
 { ---------------------------------------------------------------------- }
 
+function DefaultDataDir(): String;
+begin
+  Result := ExpandConstant('{commonappdata}\Jellyball');
+end;
+
+// The data folder recorded in the service's own Environment value (set by an
+// earlier install that used /DATADIR), or '' when the default is in use.
+function ReadServiceDataDir(): String;
+var
+  Raw, Item: String;
+  P: Integer;
+begin
+  Result := '';
+  if not RegQueryMultiStringValue(HKLM, ServiceKey, 'Environment', Raw) then
+    Exit;
+  while Raw <> '' do
+  begin
+    P := Pos(#0, Raw);
+    if P = 0 then
+    begin
+      Item := Raw;
+      Raw := '';
+    end
+    else
+    begin
+      Item := Copy(Raw, 1, P - 1);
+      Raw := Copy(Raw, P + 1, MaxInt);
+    end;
+    if CompareText(Copy(Item, 1, Length(DataDirEnvName) + 1), DataDirEnvName + '=') = 0 then
+    begin
+      Result := Copy(Item, Length(DataDirEnvName) + 2, MaxInt);
+      Exit;
+    end;
+  end;
+end;
+
+// Where Jellyball keeps .env, the database and the generated password file:
+// /DATADIR if given, else the folder an earlier install recorded, else the
+// default.
+function GetDataDir(): String;
+begin
+  Result := RemoveBackslashUnlessRoot(Trim(ExpandConstant('{param:DATADIR|}')));
+  if Result = '' then
+    Result := ReadServiceDataDir();
+  if Result = '' then
+    Result := DefaultDataDir();
+end;
+
 function GetEnvFilePath(): String;
 begin
-  Result := ExpandConstant('{commonappdata}\Jellyball\.env');
+  Result := AddBackslash(GetDataDir()) + '.env';
+end;
+
+// /DATADIR is the target of takeown/icacls (and, on uninstall, an optional
+// recursive delete), so refuse anything that could be somebody else's folder:
+// it must be absolute, not a drive root, and either new, empty, or already a
+// Jellyball data folder.
+function DataDirParamProblem(): String;
+var
+  Dir: String;
+  FindRec: TFindRec;
+begin
+  Result := '';
+  Dir := GetDataDir();
+  if Dir = DefaultDataDir() then
+    Exit;
+  if (Length(Dir) < 4) or (Copy(Dir, 2, 2) <> ':\') then
+  begin
+    Result := '/DATADIR must be an absolute folder path such as D:\JellyballData (not a drive root): ' + Dir;
+    Exit;
+  end;
+  if (not DirExists(Dir)) or FileExists(AddBackslash(Dir) + '.env') or FileExists(AddBackslash(Dir) + 'sports_proxy.db') then
+    Exit;
+  if FindFirst(AddBackslash(Dir) + '*', FindRec) then
+  begin
+    try
+      repeat
+        if (FindRec.Name <> '.') and (FindRec.Name <> '..') then
+        begin
+          Result := '/DATADIR points at a folder that is not empty and is not a Jellyball data folder: ' + Dir;
+          Exit;
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
+function SwitchIsTrue(const Value: String): Boolean;
+begin
+  Result := (CompareText(Value, '1') = 0) or (CompareText(Value, 'true') = 0) or (CompareText(Value, 'yes') = 0);
+end;
+
+function SwitchIsFalse(const Value: String): Boolean;
+begin
+  Result := (CompareText(Value, '0') = 0) or (CompareText(Value, 'false') = 0) or (CompareText(Value, 'no') = 0);
+end;
+
+function SwitchProblem(): String;
+var
+  PortText, LanText, UserText: String;
+  PortNum: Longint;
+begin
+  Result := '';
+  PortText := Trim(ExpandConstant('{param:PORT|}'));
+  if PortText <> '' then
+  begin
+    PortNum := StrToIntDef(PortText, -1);
+    if (PortNum < 1) or (PortNum > 65535) then
+    begin
+      Result := '/PORT must be a number between 1 and 65535.';
+      Exit;
+    end;
+  end;
+  LanText := Trim(ExpandConstant('{param:LAN|}'));
+  if (LanText <> '') and (not SwitchIsTrue(LanText)) and (not SwitchIsFalse(LanText)) then
+  begin
+    Result := '/LAN must be 1 or 0.';
+    Exit;
+  end;
+  UserText := ExpandConstant('{param:USER|}');
+  if (Pos('"', UserText) > 0) or (Pos(#13, UserText) > 0) or (Pos(#10, UserText) > 0) then
+  begin
+    Result := '/USER cannot contain quotes or line breaks.';
+    Exit;
+  end;
+  Result := DataDirParamProblem();
+end;
+
+function InitializeSetup(): Boolean;
+var
+  Problem: String;
+begin
+  Result := True;
+  Problem := SwitchProblem();
+  if Problem <> '' then
+  begin
+    Log('Invalid installer switch: ' + Problem);
+    SuppressibleMsgBox(Problem, mbError, MB_OK, IDOK);
+    Result := False;
+  end;
 end;
 
 // Quote a value for a KEY="VALUE" line the way python-dotenv expects a
@@ -209,6 +365,10 @@ begin
   ConfigPage.Add('Confirm password:', True);
   ConfigPage.Values[0] := '8000';
   ConfigPage.Values[1] := 'admin';
+  if Trim(ExpandConstant('{param:PORT|}')) <> '' then
+    ConfigPage.Values[0] := Trim(ExpandConstant('{param:PORT|}'));
+  if Trim(ExpandConstant('{param:USER|}')) <> '' then
+    ConfigPage.Values[1] := Trim(ExpandConstant('{param:USER|}'));
 
   NetworkPage := CreateInputOptionPage(ConfigPage.ID,
     'Network Access',
@@ -217,7 +377,7 @@ begin
     'If disabled, only applications on this computer can connect.',
     False, False);
   NetworkPage.Add('Allow access from other computers on my network');
-  NetworkPage.Values[0] := True;
+  NetworkPage.Values[0] := not SwitchIsFalse(Trim(ExpandConstant('{param:LAN|}')));
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -289,9 +449,9 @@ end;
 
 procedure WriteEnvFileIfAbsent;
 var
-  EnvPath, DataDir, Host, Contents: String;
+  EnvPath, DataDir, Host, Contents, PasswordLine: String;
 begin
-  DataDir := ExpandConstant('{commonappdata}\Jellyball');
+  DataDir := GetDataDir();
   ForceDirectories(DataDir);
   EnvPath := GetEnvFilePath();
   if FileExists(EnvPath) then
@@ -302,6 +462,24 @@ begin
   else
     Host := '127.0.0.1';
 
+  { An unattended install has no password page. Leave DASHBOARD_PASSWORD out
+    rather than writing an empty value: on a network bind Jellyball then
+    generates a random password on first start and saves it to
+    dashboard-password.txt in the data folder (on loopback there is none, and
+    the dashboard is only reachable from this computer). Never print the
+    password; only say where the file will be. }
+  if ConfigPage.Values[2] <> '' then
+    PasswordLine := 'DASHBOARD_PASSWORD="' + EscapeEnvValue(ConfigPage.Values[2]) + '"' + #13#10
+  else
+  begin
+    PasswordLine := '# DASHBOARD_PASSWORD is not set: Jellyball generates one on first start.' + #13#10;
+    if NetworkPage.Values[0] then
+      Log('No dashboard password was supplied; Jellyball will generate one on first start in ' +
+        AddBackslash(DataDir) + 'dashboard-password.txt (user ' + Trim(ConfigPage.Values[1]) + ').')
+    else
+      Log('No dashboard password was supplied; the dashboard is reachable only from this computer.');
+  end;
+
   Contents :=
     '# Jellyball configuration - written once by the installer.' + #13#10 +
     '# This file is never overwritten by an upgrade; edit it directly and' + #13#10 +
@@ -310,7 +488,7 @@ begin
     'PORT="' + EscapeEnvValue(Trim(ConfigPage.Values[0])) + '"' + #13#10 +
     'JELLYBALL_HOST="' + EscapeEnvValue(Host) + '"' + #13#10 +
     'DASHBOARD_USERNAME="' + EscapeEnvValue(Trim(ConfigPage.Values[1])) + '"' + #13#10 +
-    'DASHBOARD_PASSWORD="' + EscapeEnvValue(ConfigPage.Values[2]) + '"' + #13#10 +
+    PasswordLine +
     'MULTIVIEW_HWACCEL=nvenc' + #13#10 + #13#10 +
     '# Optional settings (uncomment and edit as needed):' + #13#10 +
     '#JELLYFIN_URL=http://127.0.0.1:8096' + #13#10 +
@@ -331,7 +509,7 @@ begin
     dashboard password - readable by every local user). The data folder
     (settings, database, logs) is limited to Administrators, SYSTEM and the
     service; the .env is read-only for the service. }
-  DataDir := ExpandConstant('{commonappdata}\Jellyball');
+  DataDir := GetDataDir();
   ForceDirectories(DataDir);
   { Protect the folder itself with inheritable grants, then reset everything
     inside it to inherit from the folder. (Applying /inheritance:r with the
@@ -349,6 +527,39 @@ begin
   EnvPath := GetEnvFilePath();
   if FileExists(EnvPath) then
     RunHidden('icacls.exe', '"' + EnvPath + '" /inheritance:r /grant:r "NT SERVICE\Jellyball:R" "*S-1-5-32-544:F" "*S-1-5-18:F" /C /Q');
+end;
+
+// Record /DATADIR in the service's own Environment value so the service (and
+// every later upgrade) uses that folder. Other entries are preserved.
+procedure RegisterServiceDataDir;
+var
+  Raw, Item, NewRaw: String;
+  P: Integer;
+begin
+  if Trim(ExpandConstant('{param:DATADIR|}')) = '' then
+    Exit;
+  Raw := '';
+  RegQueryMultiStringValue(HKLM, ServiceKey, 'Environment', Raw);
+  NewRaw := '';
+  while Raw <> '' do
+  begin
+    P := Pos(#0, Raw);
+    if P = 0 then
+    begin
+      Item := Raw;
+      Raw := '';
+    end
+    else
+    begin
+      Item := Copy(Raw, 1, P - 1);
+      Raw := Copy(Raw, P + 1, MaxInt);
+    end;
+    if (Item <> '') and (CompareText(Copy(Item, 1, Length(DataDirEnvName) + 1), DataDirEnvName + '=') <> 0) then
+      NewRaw := NewRaw + Item + #0;
+  end;
+  NewRaw := NewRaw + DataDirEnvName + '=' + GetDataDir();
+  if not RegWriteMultiStringValue(HKLM, ServiceKey, 'Environment', NewRaw) then
+    Log('Could not record the data folder in the service environment.');
 end;
 
 procedure RegisterService;
@@ -394,6 +605,7 @@ begin
   begin
     WriteEnvFileIfAbsent;
     RegisterService;
+    RegisterServiceDataDir;
     ConfigureDataDirAcls;
     ConfigureFirewall;
     RunHidden('sc.exe', 'start ' + ServiceName);
@@ -405,13 +617,22 @@ end;
 { Uninstall: optionally remove settings/database                         }
 { ---------------------------------------------------------------------- }
 
+function InitializeUninstall(): Boolean;
+begin
+  { Read before the service (and its Environment value) is deleted. }
+  UninstallDataDir := ReadServiceDataDir();
+  if UninstallDataDir = '' then
+    UninstallDataDir := DefaultDataDir();
+  Result := True;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DataDir: String;
 begin
   if CurUninstallStep <> usPostUninstall then
     Exit;
-  DataDir := ExpandConstant('{commonappdata}\Jellyball');
+  DataDir := UninstallDataDir;
   if not DirExists(DataDir) then
     Exit;
   if MsgBox('Also delete Jellyball''s settings and database in ' + DataDir + '?' + #13#10 +

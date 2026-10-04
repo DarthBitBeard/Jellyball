@@ -58,7 +58,7 @@ from catalog import _special_channel_for, _sport_labeled_name, resolve_espn_logo
 from updates import update_check_loop
 import legacy_proxy
 from legacy_proxy import _STARTUP_BUFFER_TASKS, PREFETCH_CONCURRENCY
-from ffmpeg_proc import _check_ffmpeg_available, _child_process_creationflags
+from ffmpeg_proc import _check_ffmpeg_available, _child_process_creationflags, run_roots
 import placeholder
 from placeholder import _stop_placeholder_process
 from sessions import SESSIONS
@@ -87,6 +87,13 @@ from tunables import _load_tunable_overrides
 import routes_stream
 import routes_api
 import routes_dashboard
+# Feature-lane routers (empty until each lane adds its endpoints and dashboard
+# cards). Imported statically: PyInstaller cannot see dynamic discovery.
+import routes_engine
+import routes_jellyfin
+import routes_providers
+import routes_setup
+import routes_sports
 from network_safety import bounded_float
 from sports_matcher import get_team_search_terms
 from version import __version__
@@ -121,9 +128,9 @@ async def lifespan(app: FastAPI):
     # Before wiping the run dirs: their pid files identify ffmpeg left running
     # by a crashed previous instance (and those would keep the files locked).
     _kill_orphaned_ffmpeg()
-    shutil.rmtree(multiview.MULTIVIEW_OUTPUT_ROOT, ignore_errors=True)
+    for run_root in run_roots():
+        shutil.rmtree(run_root.path, ignore_errors=True)
     multiview.MULTIVIEW_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-    shutil.rmtree(placeholder.PLACEHOLDER_OUTPUT_DIR, ignore_errors=True)
     # Advanced settings saved from the dashboard override the env defaults.
     _load_tunable_overrides()
     catalog.SHOW_OFFSEASON_CHANNELS = get_setting("show_offseason_channels", "0") == "1"
@@ -164,23 +171,10 @@ async def lifespan(app: FastAPI):
     )
     SESSIONS.sessions.clear()
     await _check_ffmpeg_available()
-    for (
-        team_id,
-        name,
-        query,
-        logo_url,
-        start_time,
-        stop_time,
-        category,
-        source_id,
-        content_type,
-        encoded_search_terms,
-        always_live,
-        catalog_key,
-        auto_disable_after,
-    ) in load_teams():
+    for team in load_teams():
+        team_id, name, query, category, source_id = team.team_id, team.name, team.query, team.category, team.source_id
         try:
-            stored_search_terms = json.loads(encoded_search_terms or "[]")
+            stored_search_terms = json.loads(team.search_terms or "[]")
         except (TypeError, ValueError, json.JSONDecodeError):
             stored_search_terms = []
         if not isinstance(stored_search_terms, list):
@@ -189,38 +183,30 @@ async def lifespan(app: FastAPI):
         if not search_terms:
             search_terms = get_team_search_terms(name, query, team_id)
         display_name = _sport_labeled_name(name, category or "")
-        special_channel = _special_channel_for({"catalog_key": catalog_key})
+        special_channel = _special_channel_for({"catalog_key": team.catalog_key})
         stream_state[team_id] = new_channel_state(
             name=display_name,
             query=query,
-            logo_url=logo_url or resolve_espn_logo(name, category, source_id),
-            start_time=start_time or "",
-            stop_time=stop_time or "",
+            logo_url=team.logo_url or resolve_espn_logo(name, category, source_id),
+            start_time=team.start_time or "",
+            stop_time=team.stop_time or "",
             category=category or "custom",
             source_id=source_id or "",
-            content_type=content_type or "team",
+            content_type=team.content_type or "team",
             search_terms=search_terms,
-            always_live=bool(always_live) or bool(special_channel),
-            catalog_key=catalog_key or "",
+            always_live=bool(team.always_live) or bool(special_channel),
+            catalog_key=team.catalog_key or "",
             tvg_id=special_channel.tvg_id if special_channel else "",
             group_title=special_channel.group_title if special_channel else "",
-            auto_disable_after=auto_disable_after or "",
+            auto_disable_after=team.auto_disable_after or "",
             **_scrape_lifecycle_defaults(),
         )
         _start_team_scrape_loop(team_id, initial_delay=random.uniform(0.0, STARTUP_SCRAPE_SPREAD_SECONDS))
 
-    for (
-        channel_id,
-        mv_name,
-        layout,
-        encoded_member_ids,
-        active_audio_team_id,
-        tvg_id,
-        group_title,
-        logo_url,
-    ) in load_multiview_channels():
+    for mv in load_multiview_channels():
+        channel_id = mv.channel_id
         try:
-            member_team_ids = json.loads(encoded_member_ids or "[]")
+            member_team_ids = json.loads(mv.member_team_ids or "[]")
         except (TypeError, ValueError, json.JSONDecodeError):
             member_team_ids = []
         member_team_ids = [str(t) for t in member_team_ids if str(t).strip()]
@@ -232,21 +218,19 @@ async def lifespan(app: FastAPI):
             # Keep the Multi-View: removed members render as a "No Signal" pane.
             LOGGER.warning("Multi-View %s references removed channels %s; showing No Signal for them", channel_id, missing)
         stream_state[channel_id] = new_channel_state(
-            name=mv_name,
+            name=mv.name,
             query="",
             type="multiview",
-            # non-empty sentinel only to satisfy generic health-dot/404 checks; not a real stream candidate
-            candidates=[{"synthetic": True}],
-            logo_url=logo_url,
+            logo_url=mv.logo_url,
             category="multiview",
             content_type="multiview",
             always_live=True,
-            tvg_id=tvg_id,
-            group_title=group_title or "Multi-View",
-            layout=layout,
+            tvg_id=mv.tvg_id,
+            group_title=mv.group_title or "Multi-View",
+            layout=mv.layout,
             member_team_ids=member_team_ids,
             active_audio_team_id=(
-                active_audio_team_id if active_audio_team_id in member_team_ids else member_team_ids[0]
+                mv.active_audio_team_id if mv.active_audio_team_id in member_team_ids else member_team_ids[0]
             ),
             **_scrape_lifecycle_defaults(),
         )
@@ -285,8 +269,8 @@ async def lifespan(app: FastAPI):
     await _METRIC_WRITER.stop()
     close_all_db_connections()
     _STARTUP_BUFFER_TASKS.clear()
-    shutil.rmtree(multiview.MULTIVIEW_OUTPUT_ROOT, ignore_errors=True)
-    shutil.rmtree(placeholder.PLACEHOLDER_OUTPUT_DIR, ignore_errors=True)
+    for run_root in run_roots():
+        shutil.rmtree(run_root.path, ignore_errors=True)
         
     if scrapers.SHARED_BROWSER:
         try:
@@ -383,6 +367,15 @@ app.include_router(routes_stream.router)
 app.include_router(legacy_proxy.router)
 app.include_router(epg.router)
 app.include_router(routes_dashboard.router)
+# Included last, so a lane can never shadow an established route.
+for _lane_router in (
+    routes_jellyfin.router,
+    routes_sports.router,
+    routes_providers.router,
+    routes_setup.router,
+    routes_engine.router,
+):
+    app.include_router(_lane_router)
 
 
 # pystray/PIL are imported lazily in tray mode only: on a headless Linux host
@@ -463,6 +456,10 @@ def build_server(host: str, port: int):
         timeout_keep_alive=30,
         # Streaming responses would otherwise hold shutdown open indefinitely.
         timeout_graceful_shutdown=10,
+        # Honour X-Forwarded-For/X-Forwarded-Proto only from these addresses
+        # (comma-separated; default loopback). Lets the login lockout and
+        # request logs see the real client IP behind a reverse proxy.
+        forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
     )
     return uvicorn.Server(config)
 
@@ -589,7 +586,7 @@ class TrayApplication:
                 webbrowser.open(f"http://127.0.0.1:{config.PORT}/")
                 return
             if not _wait_for_port(host, config.PORT, 10.0):
-                selected_port = _find_available_port(config.PORT)
+                selected_port = _find_available_port(config.PORT, host)
                 LOGGER.warning(
                     "Configured port %s is in use by another program; using %s for this desktop session "
                     "(Jellyfin tuner URLs pointing at %s will not work until it is free)",
