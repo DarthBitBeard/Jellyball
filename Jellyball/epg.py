@@ -13,7 +13,7 @@ from fastapi.responses import PlainTextResponse
 
 from network_safety import safe_get
 
-from config import _m3u_attribute, _m3u_title, _public_base_url, _xml_attr, _xml_text, LOGGER
+from config import _m3u_attribute, _m3u_title, _public_base_url, _base_url_is_loopback, _xml_attr, _xml_text, LOGGER
 import state
 from state import stream_state
 from catalog import (
@@ -32,10 +32,29 @@ from stream_extractor import DEFAULT_USER_AGENT
 
 router = APIRouter()
 
+# When /playlist.m3u was last served with a loopback-only base URL (Jellyfin's
+# tuner then points at an address it can never reach). The dashboard surfaces
+# this as a warning with the PUBLIC_BASE_URL fix.
+_M3U_LOOPBACK_SERVED_AT: float = 0.0
+
+
+def _m3u_loopback_warning_active() -> bool:
+    """True when the M3U was served from a loopback address within the last hour."""
+    return time.monotonic() - _M3U_LOOPBACK_SERVED_AT < 3600.0
+
 
 @router.api_route("/playlist.m3u", methods=["GET", "HEAD"], response_class=PlainTextResponse)
 async def generate_m3u(request: Request):
+    global _M3U_LOOPBACK_SERVED_AT
     base_url = _public_base_url(request)
+    if _base_url_is_loopback(base_url):
+        _M3U_LOOPBACK_SERVED_AT = time.monotonic()
+        LOGGER.warning(
+            "Served /playlist.m3u with a loopback base URL (%s); "
+            "Jellyfin on another host cannot tune these URLs. "
+            "Set PUBLIC_BASE_URL or fetch the M3U via the LAN address.",
+            base_url,
+        )
     lines = ["#EXTM3U"]
     for team_id, data in stream_state.items():
         if not _channel_listed(data):

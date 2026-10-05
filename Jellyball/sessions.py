@@ -78,7 +78,11 @@ def candidate_source_key(candidate: dict) -> Tuple[str, str, str]:
 # --- CHANNEL SESSIONS (proxy-built continuous playlists; see hls_session.py) ---
 
 SESSION_IDLE_SECONDS = bounded_float(os.getenv("SESSION_IDLE_SECONDS", "60"), 60.0, 10.0, 3600.0)
-STREAM_STARTUP_TIMEOUT = bounded_float(os.getenv("STREAM_STARTUP_TIMEOUT", "20"), 20.0, 3.0, 120.0)
+# Jellyfin's ffmpeg does not retry a failed first open, so the startup budget
+# must cover a slow candidate race plus a cold failover chain. The No-Signal
+# placeholder (started immediately on cold start when ffmpeg exists) means
+# Jellyfin normally gets a playable playlist long before this expires.
+STREAM_STARTUP_TIMEOUT = bounded_float(os.getenv("STREAM_STARTUP_TIMEOUT", "45"), 45.0, 3.0, 180.0)
 # A channel whose source hasn't produced anything by STREAM_STARTUP_TIMEOUT plays
 # No Signal for this long (then retries the real source) instead of answering
 # 503: Jellyfin's ffmpeg does not retry a failed first open.
@@ -158,6 +162,7 @@ def _candidate_source(candidate: dict) -> Optional[SourceSpec]:
         referer=referer,
         origin=str(candidate.get("origin") or ""),
         label=str(candidate.get("provider") or ""),
+        cookies=str(candidate.get("cookies") or ""),
     )
 
 
@@ -193,7 +198,15 @@ def _on_session_failure(channel_id: str, source_key: tuple, reason: str) -> None
     if _multiview_view_for_session(channel_id) is not None:
         _on_multiview_view_failure(channel_id, source_key, reason)
         return
-    _spawn_background_task(request_failover(channel_id, source_key, reason), f"session failover {channel_id}")
+    # Cold start + expired token: fail over to the next candidate's token
+    # immediately instead of only waiting for the background rescrape.
+    # Jellyfin is already waiting on this tune.
+    session = SESSIONS.peek(channel_id)
+    force = reason == "playlist forbidden" and session is not None and session.is_cold
+    _spawn_background_task(
+        request_failover(channel_id, source_key, reason, force_failover=force),
+        f"session failover {channel_id}",
+    )
 
 
 def _on_session_incompatible(channel_id: str, source_key: tuple, reason: str) -> bool:
@@ -247,7 +260,7 @@ def _on_session_legacy_fallback(channel_id: str, kind: str, source_key: tuple) -
 SESSIONS = SessionRegistry(
     SessionHooks(
         fetch=lambda url, headers, max_bytes, timeout: _session_fetch(url, headers, max_bytes, timeout),
-        headers_for=lambda referer, origin: _upstream_media_headers(referer, origin),
+        headers_for=lambda source: _upstream_media_headers(source.referer, source.origin, source.cookies),
         resolve_source=lambda channel_id: _resolve_session_source(channel_id),
         report_failure=lambda channel_id, key, reason: _on_session_failure(channel_id, key, reason),
         report_incompatible=lambda channel_id, key, reason: _on_session_incompatible(channel_id, key, reason),
@@ -279,8 +292,104 @@ def _start_on_placeholder(channel_id: str) -> bool:
     return True
 
 
+def _is_raceable_channel(session_id: str) -> bool:
+    """True for a regular channel with candidates to race (not the placeholder
+    session, not Multi-View)."""
+    if session_id == PLACEHOLDER_SESSION_ID:
+        return False
+    data = stream_state.get(session_id)
+    if not data or data.get("type") == "multiview":
+        return False
+    return bool(data.get("candidates"))
+
+
+async def _race_cold_candidates(channel_id: str, limit: int = 3, timeout: float = 10.0) -> bool:
+    """Cold-start: fetch the top candidates' playlists in parallel and make the
+    first healthy one (HTTP 200 with HLS content) the active candidate, instead
+    of failing over serially through dead ones. Returns True when a healthy
+    candidate was selected. Best-effort: failures leave active_index alone."""
+    from failover import _team_state_lock
+
+    async with _team_state_lock(channel_id):
+        data = stream_state.get(channel_id)
+        if not data or data.get("type") == "multiview":
+            return False
+        candidates = list(data.get("candidates") or [])[:limit]
+        if len(candidates) < 2:
+            return False
+        specs = []
+        for candidate in candidates:
+            spec = _candidate_source(candidate)
+            if spec is not None:
+                specs.append((candidate_source_key(candidate), spec))
+    if len(specs) < 2:
+        return False
+
+    async def _probe(key: tuple, spec: SourceSpec) -> Optional[tuple]:
+        headers = _upstream_media_headers(spec.referer, spec.origin, spec.cookies)
+        try:
+            result = await _session_fetch(spec.url, headers, 2 * 1024 * 1024, 8.0)
+        except Exception:
+            return None
+        if result is None or result.status != 200:
+            return None
+        if b"#EXTM3U" not in result.body:
+            return None
+        return key
+
+    tasks = [asyncio.create_task(_probe(key, spec)) for key, spec in specs]
+    winner: Optional[tuple] = None
+    try:
+        for coro in asyncio.as_completed(tasks, timeout=timeout):
+            try:
+                key = await coro
+            except Exception:
+                continue
+            if key is not None:
+                winner = key
+                break
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+    if winner is None:
+        return False
+
+    async with _team_state_lock(channel_id):
+        data = stream_state.get(channel_id)
+        if not data:
+            return False
+        current = data.get("candidates") or []
+        for index, candidate in enumerate(current):
+            if candidate_source_key(candidate) == winner:
+                if index != data.get("active_index", 0):
+                    data["active_index"] = index
+                    data["exhausted"] = False
+                    LOGGER.info(
+                        "Cold-start race picked candidate channel=%s provider=%s",
+                        channel_id, candidate.get("provider", "Unknown"),
+                    )
+                SESSIONS.poke(channel_id)
+                return True
+        return False
+
+
 async def _serve_session_playlist(session_id: str, segment_prefix: str, legacy=None) -> Response:
     session = SESSIONS.get(session_id)
+    cold = not session.is_running and not session.window and session.state != "legacy"
+    if cold and _is_raceable_channel(session_id):
+        # Fix 1: race the top candidates for a healthy one before the
+        # session's serial poll begins, so one dead first candidate can't eat
+        # the whole startup budget.
+        if not await _race_cold_candidates(session_id):
+            # Fix 2: no healthy candidate found quickly: start No-Signal NOW
+            # so Jellyfin's ffmpeg always gets a playable playlist on first
+            # open (it does not retry a failed first open). The real source
+            # takes over through the normal discontinuity machinery when it
+            # becomes ready.
+            _start_on_placeholder(session_id)
     session.touch()
     if session.state == "legacy" and legacy is not None:
         return await legacy()
@@ -290,6 +399,9 @@ async def _serve_session_playlist(session_id: str, segment_prefix: str, legacy=N
     if not session.window and _start_on_placeholder(session_id):
         await session.wait_ready(10.0)
     if not session.window:
+        # Genuinely exhausted/dead: no segments and no placeholder (ffmpeg
+        # missing or failed to start). Jellyfin won't retry a 503, but there
+        # is nothing playable to hand it.
         return Response(
             status_code=503,
             content="Stream is starting",

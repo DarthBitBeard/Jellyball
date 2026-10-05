@@ -32,6 +32,7 @@ from scrapers import (
 )
 import catalog
 import dashboard_cards
+import epg
 import provider_telemetry
 from catalog import _season_resume_label, get_catalog_entries
 from leagues import LEAGUES
@@ -294,6 +295,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         "version": __version__,
         "base_url": base_url,
         "update_banner": update_banner,
+        "m3u_loopback_warning": epg._m3u_loopback_warning_active(),
         "auth_badge": auth_badge,
         "jellyfin_badge": jellyfin_badge,
         "webhook_discord_badge": webhook_discord_badge,
