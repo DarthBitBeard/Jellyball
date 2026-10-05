@@ -15,7 +15,7 @@ import os
 import time
 import urllib.parse
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, List, Dict, Tuple, Set, Optional, Iterable
+from typing import AsyncIterator, List, Dict, Tuple, Set, Optional, Iterable, Any
 import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import Browser, Page
@@ -28,6 +28,29 @@ MAX_REDIRECTS = 3
 MAX_STREAMER_LINKS = 8
 MAX_EXTRACTED_STREAMS = 32
 _STREAM_HINTS = (".m3u8", "playlist", "manifest", "load-playlist", "stream", "hls", "live")
+
+
+def _cookie_header_for_hosts(cookies: List[Any], hosts: Set[str]) -> str:
+    """Build a Cookie header from Playwright cookies, keeping only cookies
+    whose domain covers one of the target hosts (the provider page host or a
+    stream URL host). Sending the browser's session cookies lets upstream media
+    fetches pass the same CDN/WAF checks the real browser passed."""
+    hosts = {h.lower() for h in hosts if h}
+    parts = []
+    seen = set()
+    for cookie in cookies:
+        name = str(cookie.get("name") or "")
+        value = str(cookie.get("value") or "")
+        if not name or (name, value) in seen:
+            continue
+        domain = str(cookie.get("domain") or "").lstrip(".").lower()
+        if not domain or not hosts:
+            continue
+        if not any(h == domain or h.endswith("." + domain) for h in hosts):
+            continue
+        seen.add((name, value))
+        parts.append(f"{name}={value}")
+    return "; ".join(parts)
 
 # Playwright 1.62 (the version pinned in requirements.txt) bundles Chromium
 # 151.0.7922.34 -- checked directly via
@@ -804,6 +827,29 @@ async def playwright_intercept_streams(
                         await page.wait_for_timeout(2000)
                 except Exception as exc:
                     LOGGER.debug("Playwright play-button interaction failed provider=%s error=%s", provider_name, type(exc).__name__)
+
+            # Capture the browser's cookies for the provider/stream hosts so
+            # server-side media fetches pass the same CDN/WAF checks the real
+            # browser passed (a missing session cookie is a common 403 cause).
+            if streams:
+                try:
+                    page_host = (urllib.parse.urlsplit(page_url).hostname or "").lower()
+                    stream_hosts = {
+                        (urllib.parse.urlsplit(str(s.get("url") or "")).hostname or "").lower()
+                        for s in streams
+                    }
+                    cookie_header = _cookie_header_for_hosts(
+                        await page.context.cookies(), {page_host} | stream_hosts
+                    )
+                    if cookie_header:
+                        for stream in streams:
+                            stream["cookies"] = cookie_header
+                        LOGGER.debug(
+                            "Captured %d provider cookies provider=%s",
+                            cookie_header.count("="), provider_name,
+                        )
+                except Exception as exc:
+                    LOGGER.debug("Cookie capture failed provider=%s error=%s", provider_name, type(exc).__name__)
 
         if streams:
             verify_client = http_client
