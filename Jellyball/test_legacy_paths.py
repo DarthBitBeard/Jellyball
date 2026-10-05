@@ -248,7 +248,7 @@ def _session_hooks(resolved: list) -> SessionHooks:
 
     return SessionHooks(
         fetch=fetch,
-        headers_for=lambda referer, origin: {},
+        headers_for=lambda source: {},
         resolve_source=resolve_source,
         report_failure=lambda channel_id, key, reason: None,
         # No compatible standby: a cold start falls back to the legacy relay.
