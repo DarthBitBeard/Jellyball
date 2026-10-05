@@ -333,7 +333,7 @@ class Harness:
         base = url.split("?", 1)[0]
         return self.responses.get(base)
 
-    def headers_for(self, referer, origin):
+    def headers_for(self, source):
         return {}
 
     def resolve_source(self, channel_id):
@@ -573,11 +573,51 @@ class ChannelSessionTests(unittest.IsolatedAsyncioTestCase):
         await session._poll_once()
 
         self.assertEqual(len(session.window), 0)
+        # Segment downloads keep the configured threshold even on cold start:
+        # one bad segment doesn't prove the source is dead.
         self.assertEqual(session.stats["segment_failures"], 3)
         self.assertEqual(len(self.harness.failures), 1)
         self.assertEqual(self.harness.failures[0][2], "segments failing")
         # Failures must not advance the upstream cursor, or a later poll
         # (after failover recovery) would permanently skip those seqs.
+        self.assertIsNone(session.last_useq)
+
+    async def test_warm_session_keeps_configured_fail_threshold(self):
+        base = "http://upstream"
+        self.harness.source = SourceSpec(key=("primary",), url=f"{base}/media.m3u8", label="primary")
+        useqs = list(range(6))
+        self.harness.set_playlist(f"{base}/media.m3u8", playlist_text(base, useqs))
+        for u in useqs:
+            self.harness.set_response(f"{base}/seg{u}.ts", make_ts_segment())
+
+        cfg = fast_config(fail_threshold=3)
+        session = self.make_session(cfg)
+        await session._poll_once()
+        self.assertTrue(session._ready.is_set())  # now warm: playing
+
+        # The upstream playlist goes away. A warm session keeps the configured
+        # tolerance: one failure must not report, three must.
+        self.harness.responses.pop(f"{base}/media.m3u8")
+        await session._poll_once()
+        self.assertEqual(len(self.harness.failures), 0)
+        await session._poll_once()
+        self.assertEqual(len(self.harness.failures), 0)
+        await session._poll_once()
+        self.assertEqual(len(self.harness.failures), 1)
+        self.assertEqual(self.harness.failures[0][2], "playlist unavailable")
+
+    async def test_cold_session_playlist_failure_reports_immediately(self):
+        base = "http://upstream"
+        self.harness.source = SourceSpec(key=("primary",), url=f"{base}/media.m3u8", label="primary")
+        # No playlist response at all: every fetch fails.
+
+        cfg = fast_config(fail_threshold=3)
+        session = self.make_session(cfg)
+        await session._poll_once()
+
+        self.assertFalse(session._ready.is_set())
+        self.assertEqual(len(self.harness.failures), 1)
+        self.assertEqual(self.harness.failures[0][2], "playlist unavailable")
         self.assertIsNone(session.last_useq)
 
     async def test_failed_download_does_not_advance_last_useq(self):
