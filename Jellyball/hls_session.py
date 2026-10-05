@@ -63,6 +63,9 @@ class SourceSpec:
     origin: str = ""
     local: bool = False  # read playlist + segments from disk (placeholder, Multi-View)
     label: str = ""
+    # Cookie header captured from the provider's browser session at scrape
+    # time; lets upstream media fetches pass the CDN checks the browser did.
+    cookies: str = ""
 
 
 @dataclass
@@ -157,7 +160,7 @@ class SessionConfig:
 @dataclass
 class SessionHooks:
     fetch: Callable[[str, Dict[str, str], int, float], Awaitable[Optional[FetchResult]]]
-    headers_for: Callable[[str, str], Dict[str, str]]
+    headers_for: Callable[[SourceSpec], Dict[str, str]]
     resolve_source: Callable[[str], Optional[SourceSpec]]
     report_failure: Callable[[str, Tuple, str], None]
     # Returns True when another (compatible) source will be tried, so a cold
@@ -422,6 +425,7 @@ class ChannelSession:
         self.started_at: Optional[float] = None
         self._resolved_once = False
         self._last_poll_error_log: Dict[str, float] = {}
+        self._last_playlist_status_log: Tuple[Optional[int], float] = (None, -1e9)
 
     # -- public API ---------------------------------------------------------
 
@@ -461,6 +465,23 @@ class ChannelSession:
     def is_flowing(self) -> bool:
         """True while new segments keep arriving from the current source."""
         return self.state == "live" and time.monotonic() - self.last_new_segment_at < self._stale_after()
+
+    @property
+    def is_cold(self) -> bool:
+        """True before the session has ever served segments. A cold session has
+        nothing to lose by abandoning a dead candidate fast."""
+        return not self._ready.is_set()
+
+    def _fail_threshold(self) -> int:
+        """Consecutive playlist failures before reporting. Cold sessions fail
+        over on the first failure (a dead candidate must not eat the startup
+        budget); live sessions keep the configured tolerance so a transient
+        hiccup doesn't interrupt playback. Segment downloads keep the
+        configured threshold in both cases: one bad segment doesn't prove the
+        source is dead."""
+        if self.is_cold:
+            return 1
+        return self.cfg.fail_threshold
 
     async def wait_ready(self, timeout: float) -> bool:
         if self._ready.is_set():
@@ -589,6 +610,23 @@ class ChannelSession:
             self.channel_id, name, str(exc)[:160], exc_info=LOGGER.isEnabledFor(logging.DEBUG),
         )
 
+    def _log_playlist_failure(self) -> None:
+        """Throttled: the upstream HTTP status on playlist fetch failure, so an
+        all-403 (WAF/token) situation is diagnosable from the log instead of
+        just counted."""
+        status = self.last_playlist_status
+        now = time.monotonic()
+        last = self._last_playlist_status_log
+        if last[0] == status and now - last[1] < 60.0:
+            return
+        self._last_playlist_status_log = (status, now)
+        LOGGER.warning(
+            "Upstream playlist fetch failed channel=%s source=%s status=%s",
+            self.channel_id,
+            self.source.label if self.source else "?",
+            status if status is not None else "no-response",
+        )
+
     def _poll_interval(self) -> float:
         if not self._ready.is_set():
             if not self._resolved_once:
@@ -634,6 +672,7 @@ class ChannelSession:
         playlist = await self._load_media_playlist()
         if playlist is None:
             self.stats["playlist_failures"] += 1
+            self._log_playlist_failure()
             self._note_failure("playlist unavailable")
             self._check_stale()
             return
@@ -743,7 +782,7 @@ class ChannelSession:
                 return None
             return parse_media_playlist(text, source.url, local=True)
 
-        headers = self.hooks.headers_for(source.referer, source.origin)
+        headers = self.hooks.headers_for(source)
         url = self.media_url or source.url
         result = await self.hooks.fetch(url, headers, self.cfg.max_playlist_bytes, self.cfg.playlist_timeout)
         self.last_playlist_status = result.status if result is not None else None
@@ -911,7 +950,7 @@ class ChannelSession:
             data = await asyncio.to_thread(_read_bytes_file, segment.uri, self.cfg.max_segment_bytes)
             return data or None
 
-        headers = self.hooks.headers_for(source.referer, source.origin)
+        headers = self.hooks.headers_for(source)
         if segment.byterange:
             length, offset = segment.byterange
             headers["Range"] = f"bytes={offset}-{offset + length - 1}"
@@ -959,7 +998,7 @@ class ChannelSession:
 
     def _note_failure(self, reason: str) -> None:
         self.consecutive_failures += 1
-        if self.consecutive_failures >= self.cfg.fail_threshold:
+        if self.consecutive_failures >= self._fail_threshold():
             self._report_failure(reason)
 
     def _is_stale(self) -> bool:

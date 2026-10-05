@@ -535,18 +535,21 @@ def _candidates_likely_share_tokens(candidates: List[dict]) -> bool:
     return len(hosts) <= 1 or len(providers) <= 1
 
 
-async def request_failover(team_id: str, source_key: tuple, reason: str, incompatible: bool = False) -> bool:
+async def request_failover(team_id: str, source_key: tuple, reason: str, incompatible: bool = False,
+                           force_failover: bool = False) -> bool:
     """Single failover entry point for channel sessions (real playback) and
     health probes (unwatched channels). A no-op if the active candidate already
     changed, so concurrent reporters can't double-advance.
 
     Serialized with scrape-driven candidate merges via `_team_state_lock`."""
     async with _team_state_lock(team_id):
-        return await _request_failover_unlocked(team_id, source_key, reason, incompatible=incompatible)
+        return await _request_failover_unlocked(team_id, source_key, reason, incompatible=incompatible,
+                                                force_failover=force_failover)
 
 
 async def _request_failover_unlocked(
     team_id: str, source_key: tuple, reason: str, incompatible: bool = False,
+    force_failover: bool = False,
 ) -> bool:
     data = stream_state.get(team_id)
     if not data or data.get("type") == "multiview" or _is_placeholder_key(source_key):
@@ -567,11 +570,14 @@ async def _request_failover_unlocked(
     team_name = data.get("name", team_id)
     if reason == "playlist forbidden":
         refreshed = _request_token_refresh(team_id, data)
-        if refreshed and _candidates_likely_share_tokens(candidates):
+        if refreshed and _candidates_likely_share_tokens(candidates) and not force_failover:
             # Don't burn same-generation standbys while a rescrape is in flight.
             LOGGER.info("Deferring failover for token refresh team=%s reason=%s", team_id, reason)
             _note_failover_reason(reason, deferred=True)
             return False
+        # Cold start (force_failover): try the next candidate's token NOW
+        # instead of waiting for the rescrape; the refresh is still in flight
+        # as a backstop.
     next_index = _pick_next_candidate(candidates, active_index, active.get("codec_signature"))
     if next_index is None:
         if not incompatible and _allow_self_retry(data):
