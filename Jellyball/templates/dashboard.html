@@ -36,6 +36,11 @@
             {% if update_banner.url %} <a href="{{ update_banner.url }}" target="_blank" rel="noopener noreferrer">Release notes</a>{% endif %}
         </div>
         {% endif %}
+        {% if m3u_loopback_warning %}
+        <div class="card" role="alert" style="border-color: var(--warning);">
+            ⚠️ The M3U playlist was recently served with a <strong>localhost</strong> address, which Jellyfin on another machine cannot reach. Open the M3U URL via this server's LAN address instead, or set <code>PUBLIC_BASE_URL</code> (e.g. <code>PUBLIC_BASE_URL=http://192.168.1.10:8000</code>) so handed-out stream URLs always work.
+        </div>
+        {% endif %}
         <div class="tabs-nav">
             <button type="button" class="tab-btn {{ 'active' if tab == 'channels' else '' }}" id="btn-channels" onclick="switchTab('channels')">📺 Channels &amp; Streams</button>
             <button type="button" class="tab-btn {{ 'active' if tab == 'metrics' else '' }}" id="btn-metrics" onclick="switchTab('metrics')">📊 Stability Metrics</button>

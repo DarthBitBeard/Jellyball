@@ -207,7 +207,7 @@ def _validate_upstream_url(value: str, *, allow_private: Optional[bool] = None) 
     return validate_http_url(value, allow_private=allow_private)
 
 
-def _upstream_media_headers(referer: str = "", origin: str = "") -> Dict[str, str]:
+def _upstream_media_headers(referer: str = "", origin: str = "", cookies: str = "") -> Dict[str, str]:
     headers = {
         "User-Agent": DEFAULT_USER_AGENT,
         "Accept": "*/*",
@@ -219,6 +219,11 @@ def _upstream_media_headers(referer: str = "", origin: str = "") -> Dict[str, st
         if safe_origin:
             parsed_origin = urllib.parse.urlsplit(safe_origin)
             headers["Origin"] = f"{parsed_origin.scheme}://{parsed_origin.netloc}"
+    if cookies:
+        # Session cookies captured from the provider's own browser session at
+        # scrape time (see stream_extractor._cookie_header_for_hosts): the CDN
+        # sees the same session state the working browser had.
+        headers["Cookie"] = cookies
     return headers
 
 
@@ -276,13 +281,30 @@ _SAFE_HOST_HEADER_RE = re.compile(r"^[A-Za-z0-9.\-]+(:\d{1,5})?$|^\[[0-9A-Fa-f:.
 
 def _public_base_url(request: Optional[Request]) -> str:
     """Base URL for links we hand out (M3U entries, dashboard copy boxes).
-    Falls back to loopback when the Host header is missing or malformed."""
+
+    An explicit PUBLIC_BASE_URL env override wins: the M3U is often fetched
+    from localhost while Jellyfin lives on another host, and then every stream
+    URL is unreachable from Jellyfin's side. Falls back to the request's Host
+    header, then loopback when that is missing or malformed."""
+    override = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if override:
+        return override
     host = (request.headers.get("host") or "").strip() if request is not None else ""
     if not _SAFE_HOST_HEADER_RE.match(host):
         host = f"127.0.0.1:{PORT}"
     scheme = getattr(getattr(request, "url", None), "scheme", "http")
     scheme = scheme if scheme in ("http", "https") else "http"
     return f"{scheme}://{host}"
+
+
+def _base_url_is_loopback(base_url: str) -> bool:
+    """True when a served base URL points at this machine only (Jellyfin on
+    another host could never tune it)."""
+    try:
+        host = urllib.parse.urlsplit(base_url).hostname or ""
+    except ValueError:
+        return False
+    return host.lower() in ("localhost", "127.0.0.1", "::1")
 
 
 def _positive_env_number(name: str, default: float) -> float:

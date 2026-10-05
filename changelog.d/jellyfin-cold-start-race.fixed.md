@@ -1,0 +1,1 @@
+Cold-start tune-in no longer waits out a dead first candidate: unstarted sessions now fail over after a single failure (instead of three), and the top three candidates' playlists are fetched in parallel with the first healthy one winning, instead of purely serial failover. Steady-state (already playing) failover behavior is unchanged.
