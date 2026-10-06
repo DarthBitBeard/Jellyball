@@ -197,8 +197,8 @@ async def setup_apply_teams(request: Request, auth: bool = Depends(verify_dashbo
     }
     try:
         entries_by_key, keys_to_enable, keys_to_disable = _catalog_selection_changes(entries, selected_keys, active_keys)
-    except ValueError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid catalog selection"}, status_code=400)
     enabled = 0
     disabled = 0
     for key in sorted(keys_to_enable):
