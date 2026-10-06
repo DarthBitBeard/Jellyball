@@ -246,6 +246,49 @@ def _channel_programmes(
     return programmes
 
 
+def now_next_for_channel(team_id: str, data: dict) -> Dict[str, str]:
+    """Current/next programme titles for a dashboard channel card.
+
+    Mirrors the title logic of _channel_programmes() but reads only the
+    already-cached guide data: it never fetches on this path because the
+    dashboard polls /api/status every 5 seconds. Returns
+    {"now": <title>, "next": <title>}; "next" is "" when nothing follows.
+    """
+    name = str(data.get("name") or team_id)
+    now = datetime.now(timezone.utc)
+
+    if _channel_is_off_season(data):
+        resumes = _season_resume_label(data.get("category", ""))
+        return {
+            "now": f"Off-season{f' (resumes {resumes})' if resumes else ''}",
+            "next": "",
+        }
+
+    dt_start, dt_stop = parse_team_schedule(data)
+    if dt_start and dt_stop:
+        if dt_start <= now < dt_stop:
+            return {"now": f"{name} Scheduled Event", "next": f"{name} Standby"}
+        if now < dt_start:
+            return {"now": f"{name} Standby", "next": f"{name} Scheduled Event"}
+        return {"now": f"{name} Standby", "next": ""}
+
+    if _channel_is_always_live(data):
+        current: Optional[str] = None
+        upcoming: Optional[str] = None
+        for prog in _TVGUIDE_EPG_CACHE.get(_channel_tvg_id(team_id, data), []):
+            p_start = datetime.fromtimestamp(prog.get("startTime", 0), tz=timezone.utc)
+            p_stop = datetime.fromtimestamp(prog.get("endTime", 0), tz=timezone.utc)
+            if p_start <= now < p_stop:
+                current = prog.get("title") or f"{name} Live"
+            elif p_start >= now and upcoming is None:
+                upcoming = prog.get("title") or f"{name} Live"
+            if current is not None and upcoming is not None:
+                break
+        return {"now": current or f"{name} Live", "next": upcoming or ""}
+
+    return {"now": f"{name} Standby", "next": ""}
+
+
 def _programme_xml_lines(channel_id: str, programmes: List[dict]) -> List[str]:
     """Render _channel_programmes()-shaped dicts as <programme> XML lines."""
     lines: List[str] = []
