@@ -25,6 +25,25 @@ services:
         required: false
     security_opt:
       - no-new-privileges:true
+    # Runtime hardening: bound memory/CPU (a runaway Multi-View software encode
+    # must not OOM the host), drop all Linux capabilities, and run the root
+    # filesystem read-only with tmpfs for the scratch dirs the app and Chromium
+    # need at runtime. /app/data stays a writable volume. Note: Chromium's
+    # setuid sandbox is already disabled by no-new-privileges above, so
+    # cap_drop loses nothing; if Chromium ever fails to launch, the escape
+    # hatch is `cap_add: [SYS_ADMIN]`.
+    mem_limit: 2g
+    cpus: 2.0
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+      # Chromium writes per-launch profile/config state under $HOME; without
+      # this tmpfs the Cloudflare-fallback browser cannot start on a read-only
+      # filesystem.
+      - /home/jellyball
     healthcheck:
       # /healthz is unauthenticated and in-memory; the image has the same
       # check built in, this makes it visible and tunable from compose.

@@ -93,6 +93,86 @@ class CheckForUpdateTests(unittest.TestCase):
                 self.assertFalse(updates._update_available())
 
 
+class CrossCheckTests(unittest.TestCase):
+    """When UPDATE_CHECK_URL is overridden, the tag must match the canonical
+    GitHub Releases API response or the result is ignored (fail closed)."""
+
+    FAKE_URL = "https://updates.example.test/latest"
+    CANONICAL = updates.CANONICAL_UPDATE_CHECK_URL
+
+    def setUp(self):
+        self._saved = dict(updates._UPDATE_STATE)
+        updates._UPDATE_STATE.update(latest="", url="", checked_at=0.0)
+        self.requests = []
+
+    def tearDown(self):
+        updates._UPDATE_STATE.clear()
+        updates._UPDATE_STATE.update(self._saved)
+
+    def _check_with_override(self, respond):
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.requests.append(request)
+            return respond(request)
+
+        real_client = httpx.AsyncClient
+
+        def client_with_fake_api(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return real_client(*args, **kwargs)
+
+        with patch.object(updates.httpx, "AsyncClient", client_with_fake_api), \
+                patch.object(updates, "UPDATE_CHECK_URL", self.FAKE_URL):
+            asyncio.run(updates.check_for_update())
+
+    def _release(self, tag="v99.0.0"):
+        return {"tag_name": tag, "prerelease": False, "draft": False,
+                "html_url": f"https://github.com/DarthBitBeard/Jellyball/releases/tag/{tag}"}
+
+    def test_matching_tags_on_both_urls_are_accepted(self):
+        self._check_with_override(lambda request: httpx.Response(200, json=self._release()))
+        self.assertEqual(updates._UPDATE_STATE["latest"], "99.0.0")
+        self.assertEqual(len(self.requests), 2)
+        urls = {str(r.url) for r in self.requests}
+        self.assertEqual(urls, {self.FAKE_URL, self.CANONICAL})
+
+    def test_mismatched_tag_is_ignored(self):
+        def respond(request):
+            if "updates.example.test" in str(request.url):
+                return httpx.Response(200, json=self._release("v99.0.0"))
+            return httpx.Response(200, json=self._release("v98.0.0"))
+
+        self._check_with_override(respond)
+        self.assertEqual(updates._UPDATE_STATE["latest"], "")
+        self.assertEqual(updates._UPDATE_STATE["checked_at"], 0.0)
+
+    def test_canonical_failure_is_ignored(self):
+        def respond(request):
+            if "updates.example.test" in str(request.url):
+                return httpx.Response(200, json=self._release())
+            return httpx.Response(500)
+
+        self._check_with_override(respond)
+        self.assertEqual(updates._UPDATE_STATE["latest"], "")
+
+    def test_canonical_draft_is_ignored(self):
+        def respond(request):
+            if "updates.example.test" in str(request.url):
+                return httpx.Response(200, json=self._release())
+            body = self._release()
+            body["draft"] = True
+            return httpx.Response(200, json=body)
+
+        self._check_with_override(respond)
+        self.assertEqual(updates._UPDATE_STATE["latest"], "")
+
+    def test_release_link_must_be_this_repos_tag_page(self):
+        body = self._release()
+        body["html_url"] = "https://github.com/someone-else/Jellyball/releases/tag/v99.0.0"
+        self._check_with_override(lambda request: httpx.Response(200, json=body))
+        self.assertEqual(updates._UPDATE_STATE["latest"], "99.0.0")
+        self.assertEqual(updates._UPDATE_STATE["url"], "")
+
+
 class VersionComparisonTests(unittest.TestCase):
     def test_versions_compare_numerically_not_as_text(self):
         self.assertGreater(updates._version_tuple("2.10.0"), updates._version_tuple("2.9.9"))

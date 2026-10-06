@@ -1,0 +1,1 @@
+Guided first-run setup wizard: a 3-step flow at `/setup` (connect Jellyfin with an inline connection test, pick teams from the catalog, copy the M3U/EPG endpoint URLs with a Jellyfin refresh check). The dashboard now shows a setup banner until channels exist and Jellyfin is connected.
