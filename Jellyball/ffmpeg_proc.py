@@ -595,6 +595,9 @@ async def _wait_for_first_segment(
             out_dir.relative_to(resolved_safe_root)
         except ValueError:
             return False
+            out_dir.relative_to(resolved_safe_root)
+        except ValueError:
+            return False
     playlist = out_dir / "index.m3u8"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -610,12 +613,19 @@ async def _wait_for_first_segment(
                 if first_segment:
                     segment_rel = Path(first_segment)
                     if segment_rel.is_absolute() or ".." in segment_rel.parts:
+                    try:
+                        segment_path.relative_to(out_dir)
+                    except ValueError:
                         await asyncio.sleep(poll_interval)
                         continue
+                    if resolved_safe_root is not None:
+                        try:
+                            segment_path.relative_to(resolved_safe_root)
+                        except ValueError:
                     segment_path = (out_dir / segment_rel).resolve(strict=False)
                     if out_dir == segment_path or out_dir in segment_path.parents:
-                        if resolved_safe_root is not None:
-                            try:
+                    if segment_path.exists():
+                        return True
                                 segment_path.relative_to(resolved_safe_root)
                             except ValueError:
                                 await asyncio.sleep(poll_interval)
