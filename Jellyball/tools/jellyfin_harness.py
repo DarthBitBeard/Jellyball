@@ -924,8 +924,8 @@ def _cmd_probe(args: argparse.Namespace) -> int:
 
 def _cmd_up(args: argparse.Namespace) -> int:
     with JellyfinHarness(args.tag) as jf:
-        print(f"Jellyfin {jf.version} is up\n  url:     {jf.base_url}\n  api key: {jf.api_key}\n"
-              f"  admin:   {jf.admin_name} / {jf.admin_password}\nCtrl-C removes the container.", flush=True)
+        print(f"Jellyfin {jf.version} is up\n  url:     {jf.base_url}\n"
+              f"  admin:   {jf.admin_name}\nCtrl-C removes the container.", flush=True)
         try:
             while True:
                 time.sleep(3600)
