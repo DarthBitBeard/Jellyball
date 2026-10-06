@@ -86,7 +86,7 @@ def _configure_dashboard_auth(bind_host: str) -> None:
     except OSError:
         pass
     if not generated:
-        generated = secrets.token_urlsafe(12)
+        generated = secrets.token_urlsafe(24)
         try:
             DASHBOARD_PASSWORD_FILE.write_text(generated + "\n", encoding="utf-8")
             try:
@@ -266,10 +266,43 @@ class CsrfOriginMiddleware:
         await self.app(scope, receive, send)
 
 
+def regenerate_dashboard_password() -> str:
+    """Generate a fresh dashboard password, persist it to the password file,
+    and rebind the module globals. Previously verified credentials are
+    forgotten, so open sessions must log in again.
+
+    Only meaningful when the password came from the generated file: a
+    DASHBOARD_PASSWORD env value still wins for verification, so the dashboard
+    only offers rotation in "generated" auth mode."""
+    global DASHBOARD_PASSWORD, DASHBOARD_AUTH_MODE
+    new_password = secrets.token_urlsafe(24)
+    try:
+        DASHBOARD_PASSWORD_FILE.write_text(new_password + "\n", encoding="utf-8")
+        try:
+            DASHBOARD_PASSWORD_FILE.chmod(0o600)
+        except OSError as exc:
+            _log_failure("restrict dashboard password file permissions", exc)
+    except OSError as exc:
+        _log_failure("save regenerated dashboard password", exc)
+        raise
+    DASHBOARD_PASSWORD = new_password
+    if not os.getenv("DASHBOARD_PASSWORD"):
+        DASHBOARD_AUTH_MODE = "generated"
+    _VERIFIED_CREDENTIALS.clear()
+    # Point at the file only — never log the plaintext password.
+    LOGGER.warning("Dashboard password regenerated for user=%s (saved to %s)",
+                   DASHBOARD_USERNAME, DASHBOARD_PASSWORD_FILE)
+    return new_password
+
+
+def _relay_signing_key_file():
+    return DATA_DIR / "relay-signing.key"
+
+
 def _load_relay_signing_key() -> bytes:
     """Key for signing legacy relay URLs, kept in the data dir so URLs handed to
     a player before a restart stay valid after it."""
-    key_file = DATA_DIR / "relay-signing.key"
+    key_file = _relay_signing_key_file()
     try:
         key = key_file.read_bytes()
         if len(key) >= 32:
@@ -286,6 +319,25 @@ def _load_relay_signing_key() -> bytes:
     except OSError as exc:
         _log_failure("save relay signing key", exc)
     return key
+
+
+def rotate_relay_signing_key() -> None:
+    """Generate a fresh relay signing key, persist it, and rebind the module
+    global. Relay URLs signed with the old key stop validating, so in-flight
+    streams retune on their next playlist refresh."""
+    global _RELAY_SIGNING_KEY
+    key_file = _relay_signing_key_file()
+    _RELAY_SIGNING_KEY = secrets.token_bytes(32)
+    try:
+        key_file.write_bytes(_RELAY_SIGNING_KEY)
+        try:
+            key_file.chmod(0o600)
+        except OSError as exc:
+            _log_failure("restrict relay signing key permissions", exc)
+    except OSError as exc:
+        _log_failure("save rotated relay signing key", exc)
+        raise
+    LOGGER.warning("Relay signing key rotated; previously issued relay URLs are now invalid")
 
 
 _RELAY_SIGNING_KEY = _load_relay_signing_key()

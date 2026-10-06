@@ -4,6 +4,7 @@ browser, and master_scrape() which searches every provider for one channel.
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -20,7 +21,7 @@ import provider_alerts
 import provider_settings
 import provider_telemetry as telemetry
 import state
-from db import _db_session, get_setting, get_setting_async
+from db import _db_session, get_setting, get_setting_async, set_setting_async
 from network_safety import bounded_float, bounded_int, safe_get, validate_http_url
 from sports_matcher import canonical_team_name, clean_sports_text, get_team_search_terms, match_team
 from stream_extractor import (
@@ -142,6 +143,13 @@ def _provider_breaker_open(provider: str) -> bool:
 
 def _provider_breaker_success(provider: str) -> None:
     _PROVIDER_BREAKERS.pop(provider, None)
+    # A working provider needs no suggested replacement domain.
+    _PROVIDER_SUGGESTED_DOMAINS.pop(provider, None)
+
+
+def reset_provider_breaker(provider_name: str) -> None:
+    """Clear a provider's circuit-breaker state (dashboard 'Retry now')."""
+    _PROVIDER_BREAKERS.pop(provider_name, None)
 
 
 def _provider_breaker_failure(provider: str) -> None:
@@ -305,6 +313,130 @@ def _load_provider_url_overrides() -> None:
         else:
             _PROVIDER_BASE_URL_OVERRIDES.pop(provider.name, None)
     provider_settings.load()
+
+
+# --- Automatic provider domain failover (2.2.0) ---------------------------
+# Aggregator domains die regularly; when one does, the circuit breaker just
+# skips the provider until a human edits the Provider Domains card. Operators
+# can list known mirror domains per provider in PROVIDER_MIRROR_DOMAINS, a JSON
+# object like {"iSportSurge": ["https://mirror1.example", "..."]}. When the
+# breaker opens after repeated failures, the mirrors are probed automatically
+# in the background (bounded HTTP fetch of each mirror's base URL). The first
+# mirror that serves a usable page is recorded as the provider's suggested
+# domain: the dashboard's provider card shows it with one-click Apply, or --
+# when PROVIDER_DOMAIN_AUTOSWITCH=1 -- it is applied immediately (persisted to
+# the provider_url:<name> setting and live-applied like a manual domain edit).
+def _load_provider_mirror_domains() -> Dict[str, List[str]]:
+    raw = os.getenv("PROVIDER_MIRROR_DOMAINS", "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception as exc:
+        LOGGER.warning("Ignoring invalid PROVIDER_MIRROR_DOMAINS: %s", exc)
+        return {}
+    mirrors: Dict[str, List[str]] = {}
+    if isinstance(data, dict):
+        for name, urls in data.items():
+            if not isinstance(name, str) or not isinstance(urls, list):
+                continue
+            cleaned = []
+            for url in urls:
+                parsed = urllib.parse.urlsplit(str(url or "").strip())
+                if parsed.scheme in ("http", "https") and parsed.netloc:
+                    cleaned.append(f"{parsed.scheme}://{parsed.netloc}".rstrip("/"))
+            if cleaned:
+                mirrors[name.strip()] = cleaned
+    return mirrors
+
+
+PROVIDER_MIRROR_DOMAINS: Dict[str, List[str]] = _load_provider_mirror_domains()
+PROVIDER_DOMAIN_AUTOSWITCH = os.getenv("PROVIDER_DOMAIN_AUTOSWITCH", "0") == "1"
+# Mirror that probed healthy while the provider's breaker was open, awaiting
+# the operator's one-click Apply (cleared on apply, dismiss, or a successful
+# search through _provider_breaker_success).
+_PROVIDER_SUGGESTED_DOMAINS: Dict[str, str] = {}
+_MIRROR_PROBE_INFLIGHT: Set[str] = set()
+_MIRROR_PROBE_MIN_HTML_BYTES = 500
+
+
+def get_suggested_domain(provider_name: str) -> Optional[str]:
+    """The auto-probed replacement domain awaiting operator approval, if any."""
+    return _PROVIDER_SUGGESTED_DOMAINS.get(provider_name)
+
+
+def dismiss_suggested_domain(provider_name: str) -> None:
+    _PROVIDER_SUGGESTED_DOMAINS.pop(provider_name, None)
+
+
+def _maybe_probe_provider_mirrors(provider_name: str) -> None:
+    """After the breaker opens, probe the provider's configured mirrors once
+    in the background. Guarded against duplicate probes and against providers
+    with no mirrors configured or a suggestion already pending."""
+    if not PROVIDER_MIRROR_DOMAINS.get(provider_name):
+        return
+    if provider_name in _MIRROR_PROBE_INFLIGHT:
+        return
+    if _PROVIDER_SUGGESTED_DOMAINS.get(provider_name):
+        return
+    _MIRROR_PROBE_INFLIGHT.add(provider_name)
+    state._spawn_background_task(_probe_provider_mirrors(provider_name), f"mirror probe {provider_name}")
+
+
+async def _probe_provider_mirrors(provider_name: str) -> None:
+    try:
+        provider = next((p for p in ACTIVE_PROVIDERS if p.name == provider_name), None)
+        if provider is None or not isinstance(provider, HtmlAggregatorScraper):
+            return
+        current = (provider.base_url or "").rstrip("/")
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            for mirror in PROVIDER_MIRROR_DOMAINS.get(provider_name, []):
+                if mirror == current:
+                    continue
+                if not _validate_upstream_url(mirror):
+                    continue
+                try:
+                    html = await fetch_bounded_text(
+                        client,
+                        mirror,
+                        headers={"User-Agent": DEFAULT_USER_AGENT, "Referer": mirror},
+                        timeout=8.0,
+                    )
+                except Exception as exc:
+                    _log_failure(f"probe mirror {mirror} for {provider_name}", exc)
+                    continue
+                if html and len(html) >= _MIRROR_PROBE_MIN_HTML_BYTES and "<" in html:
+                    await _on_working_mirror(provider, mirror)
+                    return
+        LOGGER.info("Mirror probe found no working domain provider=%s", provider_name)
+    finally:
+        _MIRROR_PROBE_INFLIGHT.discard(provider_name)
+
+
+async def _on_working_mirror(provider: "HtmlAggregatorScraper", mirror: str) -> None:
+    if PROVIDER_DOMAIN_AUTOSWITCH:
+        await set_setting_async(_provider_url_setting_key(provider.name), mirror)
+        _set_provider_url_override(provider, mirror)
+        _PROVIDER_SUGGESTED_DOMAINS.pop(provider.name, None)
+        reset_provider_breaker(provider.name)
+        LOGGER.warning("Auto-switched provider domain provider=%s url=%s", provider.name, mirror)
+        try:
+            from alerts import send_alert  # late: alerts pulls in the catalog
+
+            await send_alert(
+                "Provider domain auto-switched",
+                f"**{provider.name}** moved to {mirror} after its old domain failed.",
+                "warning",
+            )
+        except Exception as exc:
+            _log_failure("send domain auto-switch alert", exc)
+    else:
+        _PROVIDER_SUGGESTED_DOMAINS[provider.name] = mirror
+        LOGGER.warning(
+            "Suggested new domain for provider=%s url=%s (apply from the dashboard)",
+            provider.name,
+            mirror,
+        )
 
 
 class HtmlAggregatorScraper(BaseProvider):
@@ -1343,6 +1475,8 @@ async def master_scrape(
             outcome, error_class = telemetry.derive_outcome(res, run, exc=exc_seen, timed_out=timed_out)
             telemetry.finish_run(provider.name, outcome, error_class, run, elapsed, len(res))
             provider_alerts.check_soon(provider.name, _provider_breaker_open(provider.name))
+            if (exc_seen is not None or timed_out) and _provider_breaker_open(provider.name):
+                _maybe_probe_provider_mirrors(provider.name)
 
     async def _search_and_report(provider):
         res = await _jittered_search(provider)
