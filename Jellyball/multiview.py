@@ -559,6 +559,11 @@ def _running_multiview_count(exclude: str = "") -> int:
 
 
 MULTIVIEW_MEMBER_WARM_TIMEOUT = bounded_float(os.getenv("MULTIVIEW_MEMBER_WARM_TIMEOUT", "20"), 20.0, 3.0, 120.0)
+# After the first half of the warm-up, don't wait the full timeout for every
+# member: once a quorum is ready (or this grace past the first ready member
+# expires), spawn and let placeholder stand-ins + the watchdog's
+# _swap_in_ready_members cover the stragglers.
+MULTIVIEW_WARM_QUORUM_GRACE_SECONDS = bounded_float(os.getenv("MULTIVIEW_WARM_QUORUM_GRACE_SECONDS", "5"), 5.0, 1.0, 30.0)
 MULTIVIEW_WATCHDOG_INTERVAL = bounded_float(os.getenv("MULTIVIEW_WATCHDOG_INTERVAL", "3"), 3.0, 1.0, 60.0)
 MULTIVIEW_AUDIO_CHANNELS = os.getenv("MULTIVIEW_AUDIO_CHANNELS", "1").strip().lower() not in ("0", "false", "no")
 # Extra wait for the placeholder session when a member has to be replaced by it.
@@ -702,19 +707,29 @@ async def _warm_multiview_members(member_team_ids: List[str]) -> List[_Multiview
             session = SESSIONS.get(session_id)
             session.touch()
             waits[session_id] = asyncio.ensure_future(session.wait_ready(MULTIVIEW_MEMBER_WARM_TIMEOUT))
+    def is_ready(session_id: str) -> bool:
+        wait = waits.get(session_id)
+        return bool(wait and wait.done() and not wait.cancelled() and wait.exception() is None and wait.result())
+
+    def ready_count() -> int:
+        return sum(1 for session_id in waits if is_ready(session_id))
+
     try:
         _, pending = await asyncio.wait(list(waits.values()), timeout=MULTIVIEW_MEMBER_WARM_TIMEOUT / 2)
-        if pending and PLACEHOLDER_SESSION_ID not in waits:
-            SESSIONS.get(PLACEHOLDER_SESSION_ID).touch()
-        await asyncio.gather(*waits.values(), return_exceptions=True)
+        if pending:
+            if PLACEHOLDER_SESSION_ID not in waits:
+                SESSIONS.get(PLACEHOLDER_SESSION_ID).touch()
+            # One slow member must not hold the whole grid for the full
+            # timeout: proceed once a quorum is ready, or a short grace after
+            # the first member became ready, whichever comes first.
+            quorum = max(1, (len(waits) + 1) // 2)
+            grace_until = time.monotonic() + MULTIVIEW_WARM_QUORUM_GRACE_SECONDS
+            while pending and ready_count() < quorum and time.monotonic() < grace_until:
+                _, pending = await asyncio.wait(pending, timeout=1.0)
     finally:
         for wait in waits.values():
             if not wait.done():
                 wait.cancel()
-
-    def is_ready(session_id: str) -> bool:
-        wait = waits.get(session_id)
-        return bool(wait and wait.done() and not wait.cancelled() and wait.exception() is None and wait.result())
 
     standins = {
         index for index, session_id in enumerate(session_ids)

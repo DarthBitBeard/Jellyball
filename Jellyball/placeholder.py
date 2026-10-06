@@ -138,6 +138,31 @@ def _placeholder_cooldown_remaining() -> float:
     return max(0.0, _multiview_backoff_seconds(record["count"]) - elapsed)
 
 
+def placeholder_health() -> dict:
+    """Health of the shared No-Signal ffmpeg for dashboard badging and alerts.
+
+    The placeholder is load-bearing: every dead channel depends on it, and
+    when it is down they 503 (Jellyfin shows a fatal player error). Failures
+    used to be log-only; this makes them queryable.
+    """
+    failure = _PLACEHOLDER_FAILURE or {}
+    state = _PLACEHOLDER_STATE or {}
+    process = state.get("process")
+    running = bool(
+        process is not None
+        and process.returncode is None
+        and not state.get("exited")
+    )
+    return {
+        "running": running,
+        "ready": bool(running and state.get("ready")),
+        "run_id": int(state.get("run_id") or 0),
+        "consecutive_failures": int(failure.get("count") or 0),
+        "last_error": str(failure.get("last_error") or ""),
+        "cooldown_remaining_seconds": round(_placeholder_cooldown_remaining(), 1),
+    }
+
+
 def _record_placeholder_failure(error: str) -> float:
     global _PLACEHOLDER_FAILURE
     record = _PLACEHOLDER_FAILURE or {"count": 0, "last_failure": 0.0, "last_error": ""}
