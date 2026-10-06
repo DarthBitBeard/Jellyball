@@ -836,7 +836,22 @@ async def _launch_multiview_run(
     hw_decode: bool,
 ) -> Tuple[str, List[str]]:
     """One ffmpeg attempt: ("ready" | "failed" | "aborted", log lines of a failed run)."""
+    cid_path = Path(channel_id)
+    if (
+        not channel_id
+        or channel_id in {".", ".."}
+        or cid_path.is_absolute()
+        or len(cid_path.parts) != 1
+        or cid_path.name != channel_id
+    ):
+        LOGGER.error("Rejected unsafe multiview channel id for run path: %r", channel_id)
+        return "failed", ["unsafe channel id"]
     run_dir = MULTIVIEW_OUTPUT_ROOT / channel_id / f"run{run_id}"
+    try:
+        run_dir.resolve().relative_to(MULTIVIEW_OUTPUT_ROOT.resolve())
+    except Exception:
+        LOGGER.error("Rejected multiview run dir outside root for channel id: %r", channel_id)
+        return "failed", ["unsafe run directory"]
     _MULTIVIEW_PENDING_RUN_DIRS.add(run_dir)
     try:
         await asyncio.to_thread(_prepare_run_dir, run_dir, len(inputs))
