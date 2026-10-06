@@ -1,1 +1,0 @@
-New PUBLIC_BASE_URL setting overrides the base URL handed out in the M3U playlist and dashboard links (for when Jellyfin runs on another host but the M3U is fetched via localhost), and the dashboard now warns when the M3U was recently served with a loopback-only address.

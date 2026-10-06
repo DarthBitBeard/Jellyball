@@ -89,7 +89,7 @@ def _placeholder_font_option() -> str:
 def _build_placeholder_ffmpeg_args(out_dir: Path, drawtext: bool = True) -> List[str]:
     """Pure command-builder for the shared "No Signal" loop (no I/O besides
     locating a font, unit-testable)."""
-    logo_path = _resource_path("assets/jellyball-logo.png")
+    logo_path = _resource_path("assets/jellyball-logo.jpg")
     video_filter = (
         "scale=1920:1080:force_original_aspect_ratio=decrease,"
         "pad=1920:1080:(ow-iw)/2:(oh-ih)/2"

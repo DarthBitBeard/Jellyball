@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="Jellyball/assets/jellyball-logo.png" alt="Jellyball" width="200">
+<img src="Jellyball/assets/jellyball-logo.jpg" alt="Jellyball" width="200">
 
 # Jellyball
 

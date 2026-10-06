@@ -1,1 +1,0 @@
-Upstream media fetches now send the provider session cookies captured by the Playwright scraper, so CDN/WAF checks that the real browser passed no longer 403 the server-side playlist and segment requests.
