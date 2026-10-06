@@ -8,6 +8,33 @@
 {% endif %}
 {% endmacro %}
 
+<div class="card">
+    <h3>🔔 Recent Alerts</h3>
+    <p class="hint-text">Every alert Jellyball has fired (failovers, stream exhaustion, manual overrides), newest first. These are also sent to Discord/Telegram when webhooks are configured.</p>
+    <div style="overflow-x: auto;">
+        <table>
+            <thead>
+                <tr style="border-bottom: 1px solid var(--border-strong); text-align: left; font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase;">
+                    <th style="padding: 0.5rem;">Time (UTC)</th><th style="padding: 0.5rem;">Channel</th><th style="padding: 0.5rem;">Event</th><th style="padding: 0.5rem;">Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if events %}
+                {% for e in events %}
+                <tr style="border-bottom: 1px solid var(--border); font-size: 0.85rem;">
+                    <td style="padding: 0.5rem; color: var(--text-muted);">{{ e.ts }}</td>
+                    <td style="padding: 0.5rem; font-weight: 600;">{{ e.team_id }}</td>
+                    <td style="padding: 0.5rem;"><span style="background: {{ e.badge_color }}; color: white; padding: 0.15rem 0.4rem; border-radius: 4px;">{{ e.ev_type }}</span></td>
+                    <td style="padding: 0.5rem; color: var(--text-muted);">{{ e.details }}</td>
+                </tr>
+                {% endfor %}
+                {% else %}
+                <tr><td colspan="4" style="padding: 1rem; text-align: center; color: var(--text-muted); font-size: 0.85rem;">No alerts fired yet.</td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
 <div class="card" style="border-color: var(--purple); background: linear-gradient(180deg, var(--card-bg) 0%, var(--purple-card-to) 100%);">
     <h3 style="color: var(--purple-text);">🍇 Jellyfin Automatic Guide Refresh API</h3>
     <form action="/settings/jellyfin" method="post" style="display: flex; flex-direction: column; gap: 1.25rem;">
@@ -63,4 +90,17 @@
         </div>
         <button type="submit" style="margin-top: 0.5rem;">💾 Save Notification Settings</button>
     </form>
+</div>
+<div class="card">
+    <h3>🔐 Credential Rotation</h3>
+    <p class="hint-text">Rotate secrets without editing files in the data directory. Rotating the relay key invalidates previously issued relay URLs; in-progress streams retune on their next refresh.</p>
+    <div style="display: flex; gap: 0.75rem; flex-wrap: wrap;">
+        <form action="/settings/rotate-dashboard-password" method="post" onsubmit="return confirm('Generate a new dashboard password? You will need to log in again with the new one.');">
+            <button type="submit">🔑 New dashboard password</button>
+        </form>
+        <form action="/settings/rotate-relay-key" method="post" onsubmit="return confirm('Rotate the relay signing key? In-progress streams will retune.');">
+            <button type="submit">♻️ Rotate relay signing key</button>
+        </form>
+    </div>
+    <p class="hint-text">Password rotation is available when Jellyball generated the password itself; it cannot replace a DASHBOARD_PASSWORD set in the environment.</p>
 </div>

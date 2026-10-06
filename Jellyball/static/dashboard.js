@@ -72,13 +72,79 @@ function toggleTheme() {
         btn.classList.add('spin');
     }
 }
+/* ---- Keyboard shortcuts ----
+   / focuses the channel filter, 1-6 switch tabs, t cycles the theme,
+   ? toggles this cheatsheet, Escape closes it. Ignored while typing in a
+   form field so shortcuts never steal keystrokes. */
+const SHORTCUT_TABS = ['channels', 'metrics', 'performance', 'playback', 'alerts', 'logs'];
+function _shortcutTargetOk() {
+    const a = document.activeElement;
+    if (!a) return true;
+    const tag = (a.tagName || '').toUpperCase();
+    return tag !== 'INPUT' && tag !== 'SELECT' && tag !== 'TEXTAREA' && !a.isContentEditable;
+}
+function toggleShortcutCheatsheet(force) {
+    let el = document.getElementById('shortcut-cheatsheet');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'shortcut-cheatsheet';
+        el.setAttribute('role', 'dialog');
+        el.setAttribute('aria-label', 'Keyboard shortcuts');
+        el.style.cssText = 'display:none; position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.55); align-items:center; justify-content:center;';
+        el.innerHTML =
+            '<div style="background:var(--card-bg); color:var(--text); border:1px solid var(--border-strong); border-radius:12px; padding:1.5rem 2rem; max-width:22rem;">' +
+            '<h3 style="margin-top:0;">⌨️ Keyboard shortcuts</h3>' +
+            '<table style="font-size:0.9rem; border-collapse:collapse;">' +
+            '<tr><td style="padding:0.25rem 1rem 0.25rem 0;"><kbd>/</kbd></td><td>Focus the channel filter</td></tr>' +
+            '<tr><td style="padding:0.25rem 1rem 0.25rem 0;"><kbd>1</kbd>–<kbd>6</kbd></td><td>Switch dashboard tabs</td></tr>' +
+            '<tr><td style="padding:0.25rem 1rem 0.25rem 0;"><kbd>t</kbd></td><td>Cycle the theme</td></tr>' +
+            '<tr><td style="padding:0.25rem 1rem 0.25rem 0;"><kbd>?</kbd></td><td>Toggle this cheatsheet</td></tr>' +
+            '<tr><td style="padding:0.25rem 1rem 0.25rem 0;"><kbd>Esc</kbd></td><td>Close this cheatsheet</td></tr>' +
+            '</table>' +
+            '<p class="hint-text" style="margin-bottom:0;">Click outside or press <kbd>?</kbd> again to close.</p>' +
+            '</div>';
+        el.addEventListener('click', (e) => { if (e.target === el) toggleShortcutCheatsheet(false); });
+        document.body.appendChild(el);
+    }
+    const show = force !== undefined ? force : el.style.display !== 'flex';
+    el.style.display = show ? 'flex' : 'none';
+}
+function handleGlobalShortcuts(e) {
+    if (e.key === 'Escape') {
+        const sheet = document.getElementById('shortcut-cheatsheet');
+        if (sheet && sheet.style.display === 'flex') toggleShortcutCheatsheet(false);
+        return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey || !_shortcutTargetOk()) return;
+    const key = e.key;
+    if (key === '/') {
+        const f = document.getElementById('channel-filter');
+        if (f) { e.preventDefault(); f.focus(); }
+    } else if (key === 't') {
+        toggleTheme();
+    } else if (key === '?') {
+        e.preventDefault();
+        toggleShortcutCheatsheet();
+    } else if (key >= '1' && key <= '6') {
+        const tab = SHORTCUT_TABS[parseInt(key, 10) - 1];
+        if (tab && document.getElementById('btn-' + tab)) switchTab(tab);
+    }
+}
 function switchTab(tabName) {
     document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(el => {
+        el.classList.remove('active');
+        el.setAttribute('aria-selected', 'false');
+        el.setAttribute('tabindex', '-1');
+    });
     const pane = document.getElementById('tab-' + tabName);
     const btn = document.getElementById('btn-' + tabName);
     if (pane) pane.classList.add('active');
-    if (btn) btn.classList.add('active');
+    if (btn) {
+        btn.classList.add('active');
+        btn.setAttribute('aria-selected', 'true');
+        btn.setAttribute('tabindex', '0');
+    }
     if (tabName === 'logs') loadLogs();
     if (tabName === 'performance' && window.refreshPerformanceTab) window.refreshPerformanceTab(true);
     const url = new URL(window.location);
@@ -135,8 +201,16 @@ function toggleLogAutoRefresh(enabled) {
         _logAutoRefreshTimer = window.setInterval(loadLogs, 5000);
     }
 }
+function _updateFilterEmptyState(emptyId, queryId, query, visibleCount) {
+    const emptyEl = document.getElementById(emptyId);
+    if (!emptyEl) return;
+    emptyEl.style.display = (query && !visibleCount) ? '' : 'none';
+    const queryEl = document.getElementById(queryId);
+    if (queryEl) queryEl.textContent = query;
+}
 function filterCatalog(value) {
     const query = (value || '').toLowerCase().trim();
+    let totalVisible = 0;
     document.querySelectorAll('.catalog-group').forEach(group => {
         let visible = 0;
         group.querySelectorAll('.catalog-item').forEach(item => {
@@ -146,14 +220,35 @@ function filterCatalog(value) {
         });
         group.style.display = visible ? '' : 'none';
         if (query && visible) group.open = true;
+        totalVisible += visible;
     });
+    _updateFilterEmptyState('catalog-filter-empty', 'catalog-filter-query', (value || '').trim(), totalVisible);
 }
 function filterChannels(value) {
     const query = (value || '').toLowerCase().trim();
+    let visible = 0;
     document.querySelectorAll('.channel-card').forEach(card => {
         const matches = !query || (card.dataset.channelName || '').toLowerCase().includes(query);
         card.style.display = matches ? '' : 'none';
+        if (matches) visible += 1;
     });
+    _updateFilterEmptyState('channel-filter-empty', 'channel-filter-query', (value || '').trim(), visible);
+}
+function clearChannelFilter() {
+    const el = document.getElementById('channel-filter');
+    if (el) {
+        el.value = '';
+        filterChannels('');
+        el.focus();
+    }
+}
+function clearCatalogFilter() {
+    const el = document.getElementById('catalog-filter');
+    if (el) {
+        el.value = '';
+        filterCatalog('');
+        el.focus();
+    }
 }
 function updateCatalogSelectionCount() {
     const selected = document.querySelectorAll('#catalog-form input[name="catalog_keys"]:checked').length;
@@ -218,6 +313,14 @@ function applyStatusSnapshot(snapshot) {
             }
         }
         if (candidateText) candidateText.textContent = 'Backups: ' + candidateCount;
+        const nowNext = card.querySelector('[data-role="now-next"]');
+        if (nowNext) {
+            let html = '📺 ' + escapeHtml(channel.now_title || '');
+            if (channel.next_title) {
+                html += ' <span style="color: var(--text-dim);">· Next: ' + escapeHtml(channel.next_title) + '</span>';
+            }
+            nowNext.innerHTML = html;
+        }
         if (watchingBadge) {
             if (channel.watching) {
                 watchingBadge.style.display = '';
@@ -484,6 +587,46 @@ window.addEventListener('DOMContentLoaded', () => {
         logFilterInput.addEventListener('input', renderLogLines);
     }
 
+    // Persist channel/catalog filter text and scroll position across the
+    // form-POST-303 full-page reloads (sessionStorage: per-tab, no residue).
+    const _persistFilter = (id, key) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        try {
+            const saved = sessionStorage.getItem(key);
+            if (saved) {
+                el.value = saved;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            el.addEventListener('input', () => sessionStorage.setItem(key, el.value));
+        } catch (e) { /* private mode */ }
+    };
+    _persistFilter('channel-filter', 'jb-channel-filter');
+    _persistFilter('catalog-filter', 'jb-catalog-filter');
+    try {
+        const savedY = sessionStorage.getItem('jb-scroll-y');
+        if (savedY !== null) window.scrollTo(0, parseInt(savedY, 10) || 0);
+    } catch (e) { /* private mode */ }
+    window.addEventListener('beforeunload', () => {
+        try { sessionStorage.setItem('jb-scroll-y', String(window.scrollY)); } catch (e) { /* private mode */ }
+    });
+
+    // Global keyboard shortcuts and tablist arrow-key navigation (roving tabindex).
+    document.addEventListener('keydown', handleGlobalShortcuts);
+    const tablist = document.querySelector('[role="tablist"]');
+    if (tablist) {
+        tablist.addEventListener('keydown', (e) => {
+            if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+            const tabs = Array.from(tablist.querySelectorAll('[role="tab"]'));
+            const idx = tabs.indexOf(document.activeElement);
+            if (idx < 0) return;
+            e.preventDefault();
+            const next = tabs[(idx + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+            next.focus();
+            next.click();
+        });
+    }
+
     // The Performance tab refreshes whenever it is the visible tab, including after the
     // operator switches to it (the page may have loaded on another tab).
     {
@@ -494,8 +637,11 @@ window.addEventListener('DOMContentLoaded', () => {
         async function refreshPerformanceTab(withTopTeams) {
             if (!document.getElementById('performance-metrics')) return;
             try {
-                const cache = await fetch('/api/cache-metrics').then(r => r.json());
-                const perf = await fetch('/api/performance-stats').then(r => r.json());
+                const [cache, perf, playback] = await Promise.all([
+                    fetch('/api/cache-metrics').then(r => r.json()),
+                    fetch('/api/performance-stats').then(r => r.json()),
+                    fetch('/api/playback-stats').then(r => r.json()),
+                ]);
 
                 const cacheEl = document.getElementById('cache-hit-rate');
                 const playEl = document.getElementById('playback-sessions');
@@ -526,7 +672,6 @@ window.addEventListener('DOMContentLoaded', () => {
                 }
 
                 if (withTopTeams) {
-                    const playback = await fetch('/api/playback-stats').then(r => r.json());
                     const topEl = document.getElementById('top-teams-list');
                     if (topEl && playback.top_watched_teams) {
                         topEl.innerHTML = playback.top_watched_teams.map(t => `<div style="padding: 0.5rem; background: var(--surface-2); border-radius: 6px; display: flex; justify-content: space-between;"><span>${escapeHtml(t.team_id)}</span><span style="color: var(--success);">${escapeHtml(t.plays)} plays</span></div>`).join('');

@@ -22,7 +22,7 @@ from db import _METRIC_WRITER
 import engine_settings
 import engine_stats
 from upstream import _fetch_upstream_body, _hls_response, HLS_MEDIA_TYPE
-from legacy_proxy import _legacy_proxy_stream
+from legacy_proxy import _legacy_proxy_stream, set_legacy_failure_hook
 import ffmpeg_proc
 import placeholder
 from placeholder import _ensure_placeholder_running, _placeholder_cooldown_remaining
@@ -209,6 +209,20 @@ def _on_session_failure(channel_id: str, source_key: tuple, reason: str) -> None
     )
 
 
+def _on_legacy_proxy_failure(team_id: str, reason: str) -> None:
+    """Legacy passthrough playback hit a dead upstream (manifest 502s, chunk
+    failures, stalls). Resolve the active candidate and feed it through the
+    normal session failure path so failover happens in seconds instead of
+    waiting for the 30s probe cycle."""
+    data = stream_state.get(team_id)
+    candidates = (data or {}).get("candidates") or []
+    if not candidates:
+        return
+    active_index = (data or {}).get("active_index", 0)
+    candidate = candidates[min(active_index, len(candidates) - 1)]
+    _on_session_failure(team_id, candidate_source_key(candidate), reason)
+
+
 def _on_session_incompatible(channel_id: str, source_key: tuple, reason: str) -> bool:
     """Returns True when a compatible standby exists (the session keeps going
     and picks it up), False to let a cold-starting session use the legacy proxy."""
@@ -287,9 +301,15 @@ def _start_on_placeholder(channel_id: str) -> bool:
         return False
     data["startup_placeholder_until"] = time.monotonic() + STARTUP_PLACEHOLDER_SECONDS
     LOGGER.info("Stream slow to start; showing No Signal meanwhile channel=%s", channel_id)
+    engine_stats.record_placeholder_fallback()
     _request_placeholder_start()
     SESSIONS.poke(channel_id)
     return True
+
+
+# Legacy passthrough playback failures drive the same failover machinery as
+# session playback (see legacy_proxy.set_legacy_failure_hook).
+set_legacy_failure_hook(_on_legacy_proxy_failure)
 
 
 def _is_raceable_channel(session_id: str) -> bool:
@@ -383,7 +403,15 @@ async def _serve_session_playlist(session_id: str, segment_prefix: str, legacy=N
         # Fix 1: race the top candidates for a healthy one before the
         # session's serial poll begins, so one dead first candidate can't eat
         # the whole startup budget.
-        if not await _race_cold_candidates(session_id):
+        try:
+            race_won = await _race_cold_candidates(session_id)
+        except Exception:
+            # The race does network I/O; an unexpected error here must not
+            # turn a tune-in into a 500.
+            LOGGER.exception("Cold-start race failed channel=%s; starting No-Signal placeholder", session_id)
+            race_won = False
+        engine_stats.record_cold_race(race_won)
+        if not race_won:
             # Fix 2: no healthy candidate found quickly: start No-Signal NOW
             # so Jellyfin's ffmpeg always gets a playable playlist on first
             # open (it does not retry a failed first open). The real source

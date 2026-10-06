@@ -46,16 +46,23 @@
             : 'not run yet';
         const placeholder = isNil(p.default_priority) ? 'auto' : esc(p.default_priority);
         const value = isNil(p.priority) ? '' : esc(p.priority);
+        const retryBtn = p.breaker_open ? `<button type="button" class="btn-secondary" data-role="retry" style="margin-left: 0.25rem;">Retry now</button>` : '';
+        const suggestion = p.suggested_domain
+            ? `<div class="hint-text" style="margin-top: 0.25rem;">Suggested domain: <strong>${esc(p.suggested_domain)}</strong> ` +
+              `<button type="button" class="btn-secondary" data-role="apply-domain" data-url="${esc(p.suggested_domain)}">Apply</button> ` +
+              `<button type="button" class="btn-secondary" data-role="dismiss-domain">Dismiss</button></div>`
+            : '';
         return `<div style="background: var(--surface-2); padding: 0.75rem; border-radius: 8px; border: 1px solid var(--border); ${p.enabled ? '' : 'opacity: 0.6;'}" data-provider="${esc(p.name)}">
             <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
                 <strong>${esc(p.name)}</strong>
                 <span>
                     <label style="margin-right: 0.5rem;"><input type="checkbox" data-role="enabled" ${p.enabled ? 'checked' : ''}> enabled</label>
                     <label style="margin-right: 0.5rem;">priority <input type="number" data-role="priority" min="0" max="999" style="width: 4.5rem;" placeholder="${placeholder}" value="${value}"></label>
-                    <button type="button" class="btn-secondary" data-role="test">Test</button>
+                    <button type="button" class="btn-secondary" data-role="test">Test</button>${retryBtn}
                 </span>
             </div>
             <div class="hint-text">Last success: ${relativeTime(p.last_success)} &middot; index events: ${events} &middot; last search: ${last} &middot; ${breaker}</div>
+            ${suggestion}
             ${testLine(testResults[p.name])}
         </div>`;
     }
@@ -111,10 +118,54 @@
         const row = event.target.closest('[data-provider]');
         if (row && (role === 'enabled' || role === 'priority')) saveSettings(row.dataset.provider, row);
     });
+    async function runRetry(name) {
+        testResults[name] = 'running';
+        render();
+        try {
+            const resp = await fetch(`/api/providers/${encodeURIComponent(name)}/retry`, { method: 'POST' });
+            testResults[name] = resp.ok ? await resp.json() : { error: resp.status === 429 ? 'A test is already running' : 'Retry failed' };
+            if (typeof showToast === 'function') showToast(resp.ok ? name + ' breaker cleared, test ran' : 'Could not retry ' + name, 2500, !resp.ok);
+        } catch (e) {
+            testResults[name] = { error: 'Retry failed' };
+        }
+        render();
+        refresh();
+    }
+
+    async function applyDomain(name, url) {
+        try {
+            const resp = await fetch(`/api/providers/${encodeURIComponent(name)}/apply-domain`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url }),
+            });
+            if (typeof showToast === 'function') showToast(resp.ok ? name + ' domain updated' : 'Could not update domain', 2500, !resp.ok);
+        } catch (e) {
+            if (typeof showToast === 'function') showToast('Could not update domain', 2500, true);
+        }
+        refresh();
+    }
+
+    async function dismissDomain(name) {
+        try {
+            await fetch(`/api/providers/${encodeURIComponent(name)}/apply-domain`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ dismiss: true }),
+            });
+        } catch (e) { /* keep the last render */ }
+        refresh();
+    }
+
     list.addEventListener('click', (event) => {
-        const button = event.target.closest('[data-role="test"]');
+        const button = event.target.closest('[data-role="test"],[data-role="retry"],[data-role="apply-domain"],[data-role="dismiss-domain"]');
         const row = button && button.closest('[data-provider]');
-        if (row) runTest(row.dataset.provider);
+        if (!row || !button) return;
+        const role = button.dataset.role;
+        if (role === 'test') runTest(row.dataset.provider);
+        else if (role === 'retry') runRetry(row.dataset.provider);
+        else if (role === 'apply-domain') applyDomain(row.dataset.provider, button.dataset.url);
+        else if (role === 'dismiss-domain') dismissDomain(row.dataset.provider);
     });
     document.addEventListener('click', (event) => {
         if (event.target.closest && event.target.closest('#btn-performance')) refresh();

@@ -45,48 +45,53 @@
             {% if update_banner.url %} <a href="{{ update_banner.url }}" target="_blank" rel="noopener noreferrer">Release notes</a>{% endif %}
         </div>
         {% endif %}
+        {% if setup_needed %}
+        <div class="card" role="status" style="border-color: var(--accent);">
+            🧭 <strong>Welcome to Jellyball!</strong> Run the <a href="/setup">setup wizard</a> to connect Jellyfin, pick your teams, and get your tuner URLs in three steps.
+        </div>
+        {% endif %}
         {% if m3u_loopback_warning %}
         <div class="card" role="alert" style="border-color: var(--warning);">
             ⚠️ The M3U playlist was recently served with a <strong>localhost</strong> address, which Jellyfin on another machine cannot reach. Open the M3U URL via this server's LAN address instead, or set <code>PUBLIC_BASE_URL</code> (e.g. <code>PUBLIC_BASE_URL=http://192.168.1.10:8000</code>) so handed-out stream URLs always work.
         </div>
         {% endif %}
-        <div class="tabs-nav">
-            <button type="button" class="tab-btn {{ 'active' if tab == 'channels' else '' }}" id="btn-channels" onclick="switchTab('channels')">📺 Channels &amp; Streams</button>
-            <button type="button" class="tab-btn {{ 'active' if tab == 'metrics' else '' }}" id="btn-metrics" onclick="switchTab('metrics')">📊 Stability Metrics</button>
-            <button type="button" class="tab-btn {{ 'active' if tab == 'performance' else '' }}" id="btn-performance" onclick="switchTab('performance')">⚡ Performance</button>
-            <button type="button" class="tab-btn {{ 'active' if tab == 'playback' else '' }}" id="btn-playback" onclick="switchTab('playback')">⚙️ Settings</button>
-            <button type="button" class="tab-btn {{ 'active' if tab == 'alerts' else '' }}" id="btn-alerts" onclick="switchTab('alerts')">🔔 Alerts &amp; Integrations</button>
-            <button type="button" class="tab-btn {{ 'active' if tab == 'logs' else '' }}" id="btn-logs" onclick="switchTab('logs')">📜 Logs</button>
+        <div class="tabs-nav" role="tablist" aria-label="Dashboard sections">
+            <button type="button" role="tab" aria-selected="{{ 'true' if tab == 'channels' else 'false' }}" aria-controls="tab-channels" tabindex="{{ '0' if tab == 'channels' else '-1' }}" class="tab-btn {{ 'active' if tab == 'channels' else '' }}" id="btn-channels" onclick="switchTab('channels')">📺 Channels &amp; Streams</button>
+            <button type="button" role="tab" aria-selected="{{ 'true' if tab == 'metrics' else 'false' }}" aria-controls="tab-metrics" tabindex="{{ '0' if tab == 'metrics' else '-1' }}" class="tab-btn {{ 'active' if tab == 'metrics' else '' }}" id="btn-metrics" onclick="switchTab('metrics')">📊 Stability Metrics</button>
+            <button type="button" role="tab" aria-selected="{{ 'true' if tab == 'performance' else 'false' }}" aria-controls="tab-performance" tabindex="{{ '0' if tab == 'performance' else '-1' }}" class="tab-btn {{ 'active' if tab == 'performance' else '' }}" id="btn-performance" onclick="switchTab('performance')">⚡ Performance</button>
+            <button type="button" role="tab" aria-selected="{{ 'true' if tab == 'playback' else 'false' }}" aria-controls="tab-playback" tabindex="{{ '0' if tab == 'playback' else '-1' }}" class="tab-btn {{ 'active' if tab == 'playback' else '' }}" id="btn-playback" onclick="switchTab('playback')">⚙️ Settings</button>
+            <button type="button" role="tab" aria-selected="{{ 'true' if tab == 'alerts' else 'false' }}" aria-controls="tab-alerts" tabindex="{{ '0' if tab == 'alerts' else '-1' }}" class="tab-btn {{ 'active' if tab == 'alerts' else '' }}" id="btn-alerts" onclick="switchTab('alerts')">🔔 Alerts &amp; Integrations</button>
+            <button type="button" role="tab" aria-selected="{{ 'true' if tab == 'logs' else 'false' }}" aria-controls="tab-logs" tabindex="{{ '0' if tab == 'logs' else '-1' }}" class="tab-btn {{ 'active' if tab == 'logs' else '' }}" id="btn-logs" onclick="switchTab('logs')">📜 Logs</button>
             {% for extra in extra_tabs %}
-            <button type="button" class="tab-btn {{ 'active' if tab == extra.key else '' }}" id="btn-{{ extra.key }}" onclick="switchTab('{{ extra.key }}')">{{ extra.label }}</button>
+            <button type="button" role="tab" aria-selected="{{ 'true' if tab == extra.key else 'false' }}" aria-controls="tab-{{ extra.key }}" tabindex="{{ '0' if tab == extra.key else '-1' }}" class="tab-btn {{ 'active' if tab == extra.key else '' }}" id="btn-{{ extra.key }}" onclick="switchTab('{{ extra.key }}')">{{ extra.label }}</button>
             {% endfor %}
         </div>
-        <div id="tab-channels" class="tab-pane {{ 'active' if tab == 'channels' else '' }}">
+        <div id="tab-channels" class="tab-pane {{ 'active' if tab == 'channels' else '' }}" role="tabpanel" aria-labelledby="btn-channels" tabindex="0">
             {% include "partials/channels.html" %}
             {% with pane = 'channels' %}{% include "partials/_cards.html" %}{% endwith %}
         </div>
-        <div id="tab-metrics" class="tab-pane {{ 'active' if tab == 'metrics' else '' }}">
+        <div id="tab-metrics" class="tab-pane {{ 'active' if tab == 'metrics' else '' }}" role="tabpanel" aria-labelledby="btn-metrics" tabindex="0">
             {% include "partials/metrics.html" %}
             {% with pane = 'metrics' %}{% include "partials/_cards.html" %}{% endwith %}
         </div>
-        <div id="tab-performance" class="tab-pane {{ 'active' if tab == 'performance' else '' }}">
+        <div id="tab-performance" class="tab-pane {{ 'active' if tab == 'performance' else '' }}" role="tabpanel" aria-labelledby="btn-performance" tabindex="0">
             {% include "partials/performance.html" %}
             {% with pane = 'performance' %}{% include "partials/_cards.html" %}{% endwith %}
         </div>
-        <div id="tab-logs" class="tab-pane {{ 'active' if tab == 'logs' else '' }}">
+        <div id="tab-logs" class="tab-pane {{ 'active' if tab == 'logs' else '' }}" role="tabpanel" aria-labelledby="btn-logs" tabindex="0">
             {% include "partials/logs.html" %}
             {% with pane = 'logs' %}{% include "partials/_cards.html" %}{% endwith %}
         </div>
-        <div id="tab-playback" class="tab-pane {{ 'active' if tab == 'playback' else '' }}">
+        <div id="tab-playback" class="tab-pane {{ 'active' if tab == 'playback' else '' }}" role="tabpanel" aria-labelledby="btn-playback" tabindex="0">
             {% include "partials/playback.html" %}
             {% with pane = 'playback' %}{% include "partials/_cards.html" %}{% endwith %}
         </div>
-        <div id="tab-alerts" class="tab-pane {{ 'active' if tab == 'alerts' else '' }}">
+        <div id="tab-alerts" class="tab-pane {{ 'active' if tab == 'alerts' else '' }}" role="tabpanel" aria-labelledby="btn-alerts" tabindex="0">
             {% include "partials/alerts.html" %}
             {% with pane = 'alerts' %}{% include "partials/_cards.html" %}{% endwith %}
         </div>
         {% for extra in extra_tabs %}
-        <div id="tab-{{ extra.key }}" class="tab-pane {{ 'active' if tab == extra.key else '' }}">
+        <div id="tab-{{ extra.key }}" class="tab-pane {{ 'active' if tab == extra.key else '' }}" role="tabpanel" aria-labelledby="btn-{{ extra.key }}" tabindex="0">
             {% with pane = extra.key %}{% include "partials/_cards.html" %}{% endwith %}
         </div>
         {% endfor %}
