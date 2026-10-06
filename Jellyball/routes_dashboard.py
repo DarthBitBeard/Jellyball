@@ -4,6 +4,7 @@ channels, Multi-View, favorites)."""
 import asyncio
 import time
 import urllib.parse
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -584,6 +585,8 @@ async def stop_multiview(channel_id: str, auth: bool = Depends(verify_dashboard_
 async def start_multiview(channel_id: str, auth: bool = Depends(verify_dashboard_auth)):
     """Explicit start: clears a manual stop and any backoff, then starts the
     grid now (the idle monitor stops it again if nobody watches)."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", channel_id):
+        raise HTTPException(status_code=400, detail="Invalid channel id")
     data = stream_state.get(channel_id)
     if data and data.get("type") == "multiview":
         _clear_multiview_manual_stop(channel_id, "explicit start")
