@@ -20,7 +20,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-from config import _log_failure, DATA_DIR, LOGGER
+from config import DATA_DIR, LOGGER
 
 
 # bcrypt is used directly: passlib 1.7.4 is unmaintained and its bcrypt backend
@@ -96,9 +96,9 @@ def _configure_dashboard_auth(bind_host: str) -> None:
             try:
                 DASHBOARD_PASSWORD_FILE.chmod(0o600)
             except OSError as exc:
-                _log_failure("restrict dashboard password file permissions", exc)
+                LOGGER.warning("restrict dashboard password file permissions failed (%s)", type(exc).__name__)
         except OSError as exc:
-            _log_failure("save generated dashboard password", exc)
+            LOGGER.warning("save generated dashboard password failed (%s)", type(exc).__name__)
         # Point at the file only — never log the plaintext password.
         LOGGER.warning(
             "Dashboard listens on %s with no DASHBOARD_PASSWORD: generated one for user=%s (saved to %s)",
@@ -288,7 +288,7 @@ def regenerate_dashboard_password() -> str:
         if DASHBOARD_PASSWORD_FILE.exists():
             DASHBOARD_PASSWORD_FILE.unlink()
     except OSError as exc:
-        _log_failure("remove dashboard password file before rotation", exc)
+        LOGGER.warning("remove dashboard password file before rotation failed (%s)", type(exc).__name__)
         raise
     # Clear in-memory state and reuse _configure_dashboard_auth's existing
     # generator (chmod 0600 file write) so rotation does not introduce a new
@@ -325,9 +325,9 @@ def _load_relay_signing_key() -> bytes:
         try:
             key_file.chmod(0o600)
         except OSError as exc:
-            _log_failure("restrict relay signing key permissions", exc)
+            LOGGER.warning("restrict relay signing key permissions failed (%s)", type(exc).__name__)
     except OSError as exc:
-        _log_failure("save relay signing key", exc)
+        LOGGER.warning("save relay signing key failed (%s)", type(exc).__name__)
     return key
 
 
@@ -343,9 +343,9 @@ def rotate_relay_signing_key() -> None:
         try:
             key_file.chmod(0o600)
         except OSError as exc:
-            _log_failure("restrict relay signing key permissions", exc)
+            LOGGER.warning("restrict relay signing key permissions failed (%s)", type(exc).__name__)
     except OSError as exc:
-        _log_failure("save rotated relay signing key", exc)
+        LOGGER.warning("save rotated relay signing key failed (%s)", type(exc).__name__)
         raise
     LOGGER.warning("Relay signing key rotated; previously issued relay URLs are now invalid")
 

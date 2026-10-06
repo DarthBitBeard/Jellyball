@@ -501,7 +501,9 @@ def get_setting(key: str, default: str = "") -> str:
         if key in SECRET_SETTING_KEYS:
             LOGGER.warning("read a secret setting failed (%s)", type(exc).__name__)
         else:
-            _log_failure(f"read setting {key}", exc)
+            # Do not interpolate `key` into the log: CodeQL treats variables
+            # named `key` as sensitive and flags clear-text logging of them.
+            _log_failure("read an app setting", exc)
     return default
 
 def set_setting(key: str, value: str):
