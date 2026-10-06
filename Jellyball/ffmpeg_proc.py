@@ -601,7 +601,11 @@ async def _wait_for_first_segment(
             if "#EXTINF" in text:
                 first_segment = next((line for line in text.splitlines() if line.endswith(".ts")), None)
                 if first_segment:
-                    candidate = out_dir / first_segment
+                    segment_path = Path(first_segment)
+                    if segment_path.is_absolute() or ".." in segment_path.parts:
+                        await asyncio.sleep(poll_interval)
+                        continue
+                    candidate = out_dir / segment_path
                     try:
                         resolved_candidate = candidate.resolve()
                         resolved_candidate.relative_to(resolved_out_dir)
