@@ -14,7 +14,7 @@ import socket
 import time
 import urllib.parse
 from collections import OrderedDict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
@@ -36,7 +36,11 @@ except ImportError:
 _BCRYPT_HASH_PREFIXES = ("$2a$", "$2b$", "$2y$")
 # bcrypt verification deliberately costs ~100-300ms, and the dashboard polls
 # several authenticated API routes; remember recent successful logins briefly.
-_VERIFIED_CREDENTIALS: "OrderedDict[str, float]" = OrderedDict()
+# Store the successful password bytes (already present on the request) and
+# compare with compare_digest — never hash passwords with a fast digest just
+# to build a cache key (CodeQL py/weak-sensitive-data-hashing).
+# value: (password_bytes, verified_at_monotonic, configured_password_snapshot)
+_VERIFIED_CREDENTIALS: "OrderedDict[str, Tuple[bytes, float, str]]" = OrderedDict()
 _VERIFIED_CREDENTIALS_TTL = 600.0
 _VERIFIED_CREDENTIALS_MAX = 32
 
@@ -179,17 +183,20 @@ def verify_dashboard_auth(request: Request = None, credentials: Optional[HTTPBas
 
     # compare_digest on str raises TypeError for non-ASCII input; compare bytes.
     is_user_ok = secrets.compare_digest(credentials.username.encode("utf-8"), DASHBOARD_USERNAME.encode("utf-8"))
-    cache_key = hashlib.sha256(
-        f"{credentials.username}\0{credentials.password}\0{DASHBOARD_PASSWORD}".encode("utf-8")
-    ).hexdigest()
-    verified_at = _VERIFIED_CREDENTIALS.get(cache_key)
-    if verified_at is not None and now - verified_at < _VERIFIED_CREDENTIALS_TTL:
+    attempted_password = credentials.password.encode("utf-8")
+    cached = _VERIFIED_CREDENTIALS.get(credentials.username)
+    if (
+        cached is not None
+        and cached[2] == DASHBOARD_PASSWORD
+        and now - cached[1] < _VERIFIED_CREDENTIALS_TTL
+        and secrets.compare_digest(cached[0], attempted_password)
+    ):
         is_pass_ok = True
     else:
         is_pass_ok = _dashboard_password_matches(credentials.password, DASHBOARD_PASSWORD)
         if is_pass_ok and is_user_ok:
-            _VERIFIED_CREDENTIALS[cache_key] = now
-            _VERIFIED_CREDENTIALS.move_to_end(cache_key)
+            _VERIFIED_CREDENTIALS[credentials.username] = (attempted_password, now, DASHBOARD_PASSWORD)
+            _VERIFIED_CREDENTIALS.move_to_end(credentials.username)
             while len(_VERIFIED_CREDENTIALS) > _VERIFIED_CREDENTIALS_MAX:
                 _VERIFIED_CREDENTIALS.popitem(last=False)
 

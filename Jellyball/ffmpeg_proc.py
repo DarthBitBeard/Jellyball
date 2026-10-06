@@ -581,6 +581,18 @@ def _prepare_run_dir(run_dir: Path, audio_outputs: int) -> None:
         (run_dir / f"a{idx}").mkdir(parents=True, exist_ok=True)
 
 
+# Playlist segment names written by ffmpeg are plain basenames; reject anything
+# that could escape out_dir before joining (CodeQL py/path-injection).
+_SAFE_SEGMENT_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _safe_child_path(root: Path, name: str) -> Optional[Path]:
+    """Join root/name only when name is a single safe path segment."""
+    if not name or not _SAFE_SEGMENT_NAME.fullmatch(name):
+        return None
+    return root / name
+
+
 async def _wait_for_first_segment(
     out_dir: Path,
     process: "asyncio.subprocess.Process",
@@ -599,7 +611,8 @@ async def _wait_for_first_segment(
                 text = ""
             if "#EXTINF" in text:
                 first_segment = next((line for line in text.splitlines() if line.endswith(".ts")), None)
-                if first_segment and (out_dir / first_segment).exists():
+                segment_path = _safe_child_path(out_dir, first_segment) if first_segment else None
+                if segment_path is not None and segment_path.exists():
                     return True
         await asyncio.sleep(poll_interval)
     return False
