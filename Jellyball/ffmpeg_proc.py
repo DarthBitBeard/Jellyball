@@ -19,7 +19,7 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, Iterable, List, NamedTuple, Optional, Set, Tuple, Union
 
-from config import _log_failure, BUNDLE_DIR, LOGGER
+from config import _log_failure, BUNDLE_DIR, DATA_DIR, LOGGER
 from state import _spawn_background_task
 from network_safety import bounded_float
 
@@ -37,6 +37,18 @@ def _default_ffmpeg_path() -> str:
 
 
 FFMPEG_PATH = os.getenv("FFMPEG_PATH") or _default_ffmpeg_path()
+MULTIVIEW_OUTPUT_ROOT = (DATA_DIR / "multiview").resolve()
+
+
+def _resolve_within(base_dir: Path, candidate: Path) -> Optional[Path]:
+    """Resolve candidate and ensure it is contained under base_dir."""
+    try:
+        resolved_base = base_dir.resolve()
+        resolved_candidate = candidate.resolve()
+        resolved_candidate.relative_to(resolved_base)
+        return resolved_candidate
+    except (OSError, ValueError):
+        return None
 
 
 def _jellyfin_ffmpeg_path() -> Optional[str]:
@@ -587,9 +599,11 @@ async def _wait_for_first_segment(
     timeout: float,
     poll_interval: float = 0.25,
 ) -> bool:
-    playlist = out_dir / "index.m3u8"
+    resolved_out_dir = _resolve_within(MULTIVIEW_OUTPUT_ROOT, out_dir)
+    if resolved_out_dir is None:
+        return False
+    playlist = resolved_out_dir / "index.m3u8"
     deadline = time.monotonic() + timeout
-    resolved_out_dir = out_dir.resolve()
     while time.monotonic() < deadline:
         if process.returncode is not None:
             return False
