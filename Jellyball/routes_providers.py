@@ -63,6 +63,7 @@ def provider_rows(db_stats: dict) -> list:
             "position": index,
             "breaker_open": bool(breaker["open"]),
             "breaker_failures": int(breaker["failures"]),
+            "suggested_domain": scrapers.get_suggested_domain(name),
             "last_success": stats.get("last_success"),
             "index_events": last.get("index_events") if last.get("index_events") is not None else stats.get("index_events"),
             "last_outcome": last.get("outcome"),
@@ -98,6 +99,59 @@ async def update_provider_settings(name: str, body: ProviderSettingsRequest, aut
     provider = _find_provider(name)
     await asyncio.to_thread(provider_settings.set_provider_sync, provider.name, body.enabled, body.priority)
     return {"name": provider.name, "enabled": body.enabled, "priority": body.priority}
+
+
+@router.post("/api/providers/{name}/retry", response_class=JSONResponse)
+async def retry_provider(name: str, body: Optional[ProviderTestRequest] = None, auth: bool = Depends(verify_dashboard_auth)):
+    """Clear the circuit breaker and run a test search right now, so a fixed
+    provider (e.g. after a domain edit) doesn't wait out the hidden cooldown."""
+    provider = _find_provider(name)
+    scrapers.reset_provider_breaker(name)
+    terms = provider_tools.clean_terms(body.terms if body else None)
+    try:
+        browser = await scrapers.get_healthy_browser()
+        return await provider_tools.dry_run(provider, terms, browser=browser)
+    except provider_tools.ProviderBusy:
+        raise HTTPException(status_code=429, detail="A test of this provider is already running")
+    except Exception as exc:  # noqa: BLE001
+        _log_failure(f"retry provider {name}", exc)
+        raise HTTPException(status_code=500, detail="Provider retry failed")
+
+
+class ProviderDomainRequest(BaseModel):
+    url: Optional[str] = None
+    dismiss: bool = False
+
+
+@router.post("/api/providers/{name}/apply-domain", response_class=JSONResponse)
+async def apply_provider_domain(name: str, body: ProviderDomainRequest, auth: bool = Depends(verify_dashboard_auth)):
+    """Apply (or dismiss) an auto-probed suggested domain for a provider. Uses
+    the same validation and live-apply path as the dashboard's Provider Domains
+    card, and clears the breaker so the new domain is used immediately."""
+    from config import _validate_upstream_url
+    from db import set_setting_async
+
+    provider = _find_provider(name)
+    if body.dismiss or not (body.url or "").strip():
+        scrapers.dismiss_suggested_domain(name)
+        return {"name": provider.name, "dismissed": True}
+    validated = _validate_upstream_url(body.url.strip())
+    if not validated:
+        raise HTTPException(status_code=400, detail="Not a valid public http(s) URL")
+    url = validated.rstrip("/")
+    await set_setting_async(scrapers._provider_url_setting_key(provider.name), url)
+    scrapers._set_provider_url_override(provider, url)
+    scrapers.dismiss_suggested_domain(name)
+    scrapers.reset_provider_breaker(name)
+    return {"name": provider.name, "url": url}
+
+
+@router.post("/api/providers/selftest", response_class=JSONResponse)
+async def run_selftest_now(auth: bool = Depends(verify_dashboard_auth)):
+    """Run the nightly provider self-test on demand and return the digest."""
+    summary = await provider_tools.run_provider_selftest()
+    await provider_tools.send_selftest_digest(summary)
+    return summary
 
 
 async def _provider_card_context(request: Request) -> dict:

@@ -207,6 +207,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
             str(data.get("category") or "manual").upper()
         )
         remove_label = "Disable" if data.get("catalog_key") else "Remove"
+        guide = epg.now_next_for_channel(t_id, data)
 
         active_provider = ""
         if candidates_list:
@@ -227,6 +228,8 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
             "is_favorite": t_id in favorites,
             "remove_label": remove_label,
             "auto_disable_after": data.get('auto_disable_after', ''),
+            "now_title": guide["now"],
+            "next_title": guide["next"],
         }
         channel.update(_channel_watch_fields(t_id, data))
         return channel
@@ -301,6 +304,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         "webhook_discord_badge": webhook_discord_badge,
         "webhook_telegram_badge": webhook_telegram_badge,
         "channels_empty": not any(data.get('type') != "multiview" for data in stream_state.values()),
+        "setup_needed": not stream_state and not jellyfin_cfg.get("jellyfin_api_key"),
         "auth_mode": security.DASHBOARD_AUTH_MODE,
         "dashboard_password_file": str(security.DASHBOARD_PASSWORD_FILE),
         "catalog_source_text": catalog_source_text,
@@ -314,6 +318,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         "failover_stats": failover_stats,
         "events": events,
         "provider_url_rows": provider_url_rows,
+        "provider_names": [row["name"] for row in provider_url_rows],
         "jellyfin_cfg": jellyfin_cfg,
         "jellyfin_status": jellyfin_status,
         "jellyfin_tested_range": TESTED_RANGE_TEXT,
@@ -412,6 +417,30 @@ async def test_jellyfin_refresh_endpoint(auth: bool = Depends(verify_dashboard_a
 async def test_alert(auth: bool = Depends(verify_dashboard_auth)):
     await send_alert("🧪 Jellyball Notification Test", "Proactive monitoring alerts are functioning correctly.", "info")
     return RedirectResponse(url="/?tab=alerts&status=test_sent", status_code=303)
+
+
+@router.post("/settings/rotate-dashboard-password")
+async def rotate_dashboard_password(auth: bool = Depends(verify_dashboard_auth)):
+    """Generate a fresh dashboard password (only when Jellyball generated the
+    current one; a DASHBOARD_PASSWORD env value cannot be rotated from here)."""
+    if security.DASHBOARD_AUTH_MODE != "generated":
+        return RedirectResponse(url="/?tab=alerts&status=rotation_unavailable", status_code=303)
+    try:
+        security.regenerate_dashboard_password()
+    except OSError:
+        return RedirectResponse(url="/?tab=alerts&status=rotation_failed", status_code=303)
+    return RedirectResponse(url="/?tab=alerts&status=password_rotated", status_code=303)
+
+
+@router.post("/settings/rotate-relay-key")
+async def rotate_relay_signing_key(auth: bool = Depends(verify_dashboard_auth)):
+    """Rotate the HMAC key signing relay URLs. Previously issued relay URLs
+    stop validating, so in-flight streams retune on their next refresh."""
+    try:
+        security.rotate_relay_signing_key()
+    except OSError:
+        return RedirectResponse(url="/?tab=alerts&status=rotation_failed", status_code=303)
+    return RedirectResponse(url="/?tab=alerts&status=relay_key_rotated", status_code=303)
 
 
 def _catalog_selection_changes(
