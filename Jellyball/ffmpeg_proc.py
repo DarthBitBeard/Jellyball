@@ -581,12 +581,26 @@ def _prepare_run_dir(run_dir: Path, audio_outputs: int) -> None:
         (run_dir / f"a{idx}").mkdir(parents=True, exist_ok=True)
 
 
+def _is_safe_child_path(candidate: Path, root: Path) -> bool:
+    """Return True when candidate resolves under root (after normalization)."""
+    try:
+        candidate_resolved = candidate.resolve(strict=False)
+        root_resolved = root.resolve(strict=False)
+        candidate_resolved.relative_to(root_resolved)
+        return True
+    except Exception:
+        return False
+
+
 async def _wait_for_first_segment(
     out_dir: Path,
     process: "asyncio.subprocess.Process",
     timeout: float,
     poll_interval: float = 0.25,
 ) -> bool:
+    if not _is_safe_child_path(out_dir, BUNDLE_DIR):
+        LOGGER.warning("Refusing to read playlist from unsafe output directory: %s", out_dir)
+        return False
     playlist = out_dir / "index.m3u8"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
