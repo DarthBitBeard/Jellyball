@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="color-scheme" content="dark light"><title>Jellyball Setup Wizard</title>
+    <script>
+        (function() {
+            try {
+                var t = localStorage.getItem('theme');
+                if (t === 'dark') t = 'midnight';
+                else if (t === 'light') t = 'arctic';
+                if (!t || ['midnight', 'arctic', 'mission'].indexOf(t) < 0) {
+                    t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'arctic' : 'midnight';
+                }
+                document.documentElement.setAttribute('data-theme', t);
+                var m = document.querySelector('meta[name="color-scheme"]');
+                if (m) m.setAttribute('content', t === 'arctic' ? 'light' : 'dark');
+            } catch (e) {}
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/dashboard.css">
+    <link rel="icon" href="/assets/favicon.ico" sizes="any">
+    <link rel="icon" href="/assets/favicon-32.png" type="image/png">
+    <link rel="apple-touch-icon" href="/assets/favicon-180.png">
+    <style>
+        .wizard { max-width: 760px; margin: 0 auto; }
+        .wizard-steps { display: flex; gap: 0.5rem; margin: 1.25rem 0 1.5rem; }
+        .wizard-step { flex: 1; text-align: center; padding: 0.65rem 0.25rem; border-radius: 10px;
+            background: var(--surface-2); color: var(--text-muted); font-size: 0.85rem; font-weight: 600; }
+        .wizard-step.active { background: var(--accent); color: var(--on-accent); }
+        .wizard-step.done { background: var(--surface-3); color: var(--text); }
+        .wizard-pane { display: none; }
+        .wizard-pane.active { display: block; }
+        .wizard .card { margin-bottom: 1.25rem; }
+        .wizard label.field { display: block; margin: 0.9rem 0 0.3rem; font-weight: 600; color: var(--text); }
+        .wizard input[type="text"], .wizard input[type="password"], .wizard input[type="search"] {
+            width: 100%; padding: 0.7rem 0.8rem; border-radius: 8px; border: 1px solid var(--border-strong);
+            background: var(--surface-1); color: var(--text); font-size: 0.95rem; box-sizing: border-box; }
+        .wizard .hint { color: var(--text-muted); font-size: 0.85rem; margin-top: 0.3rem; }
+        .wizard .row { display: flex; gap: 0.75rem; margin-top: 1.1rem; flex-wrap: wrap; }
+        .wizard .row button { width: auto; min-width: 11rem; }
+        .wizard-result { display: none; margin-top: 1rem; padding: 0.8rem 1rem; border-radius: 8px;
+            border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--text); font-size: 0.92rem; }
+        .wizard-result.show { display: block; }
+        .wizard-result.ok { border-color: var(--success); }
+        .wizard-result.err { border-color: var(--danger); }
+        .team-group { margin-top: 1rem; border: 1px solid var(--border-strong); border-radius: 10px; overflow: hidden; }
+        .team-group > summary, .team-group-label { padding: 0.6rem 0.9rem; background: var(--surface-2);
+            font-weight: 700; color: var(--text); cursor: pointer; list-style: none; }
+        .team-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+            gap: 0.35rem 0.9rem; padding: 0.8rem 0.9rem; max-height: 260px; overflow-y: auto; }
+        .team-list label { display: flex; align-items: center; gap: 0.5rem; color: var(--text-soft);
+            font-size: 0.9rem; cursor: pointer; }
+        .team-list input[type="checkbox"] { accent-color: var(--accent); width: 1rem; height: 1rem; }
+        .endpoint-row { display: flex; gap: 0.6rem; margin-top: 0.8rem; }
+        .endpoint-row input { flex: 1; }
+        .endpoint-row button { width: auto; min-width: 7rem; }
+        .skip-link { color: var(--text-muted); font-size: 0.88rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="wizard">
+            <header>
+                <h1>🧭 Jellyball Setup Wizard</h1>
+                <p>Get your teams into Jellyfin in three steps.</p>
+            </header>
+
+            <div class="wizard-steps" aria-label="Setup progress">
+                <div class="wizard-step active" id="step-ind-1">1. Connect Jellyfin</div>
+                <div class="wizard-step" id="step-ind-2">2. Pick teams</div>
+                <div class="wizard-step" id="step-ind-3">3. Copy endpoints</div>
+            </div>
+
+            <!-- STEP 1 -->
+            <section class="wizard-pane active" id="step-1" aria-label="Step 1: connect Jellyfin">
+                <div class="card">
+                    <h2>Connect Jellyfin</h2>
+                    <p class="hint">Jellyball needs your Jellyfin server's address and an API key so it can trigger guide refreshes.</p>
+                    {% if jellyfin_configured %}
+                    <p class="hint">✅ Jellyfin is already connected. You can update the details below or continue.</p>
+                    {% endif %}
+                    <label class="field" for="jf-url">Jellyfin URL</label>
+                    <input type="text" id="jf-url" value="{{ jellyfin_url }}" placeholder="http://192.168.1.10:8096" autocomplete="off">
+                    <label class="field" for="jf-key">API key</label>
+                    <input type="password" id="jf-key" placeholder="Paste your Jellyfin API key" autocomplete="off">
+                    <p class="hint">Dashboard &gt; API Keys in Jellyfin. The key is stored on this server only.</p>
+                    <label class="field" for="jf-task">Scheduled task ID <span class="hint">(optional, auto-detected on test)</span></label>
+                    <input type="text" id="jf-task" value="{{ jellyfin_task_id }}" placeholder="Leave blank to auto-detect" autocomplete="off">
+                    <div class="wizard-result" id="jf-test-result" role="status"></div>
+                    <div class="row">
+                        <button type="button" class="btn-secondary" id="jf-test-btn" onclick="testJellyfin()">Test connection</button>
+                        <button type="button" id="jf-save-btn" onclick="saveJellyfin()">Save &amp; continue →</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- STEP 2 -->
+            <section class="wizard-pane" id="step-2" aria-label="Step 2: pick teams">
+                <div class="card">
+                    <h2>Pick your teams</h2>
+                    <p class="hint">Choose the teams you want as Live TV channels in Jellyfin. You can change this any time on the dashboard.</p>
+                    <input type="search" id="team-filter" placeholder="Filter teams…" aria-label="Filter teams" oninput="filterTeams(this.value)">
+                    <div id="team-groups">
+                    {% for group in catalog_groups %}
+                        <details class="team-group" open>
+                            <summary class="team-group-label">{{ group.label }}</summary>
+                            <div class="team-list">
+                            {% for entry in group.entries %}
+                                <label data-name="{{ entry.name | lower }}"><input type="checkbox" class="team-check" value="{{ entry.catalog_key }}" {% if entry.checked %}checked{% endif %}> {{ entry.name }}</label>
+                            {% endfor %}
+                            </div>
+                        </details>
+                    {% endfor %}
+                    </div>
+                    <div class="wizard-result" id="teams-result" role="status"></div>
+                    <div class="row">
+                        <button type="button" class="btn-secondary" onclick="goStep(1)">← Back</button>
+                        <button type="button" id="teams-save-btn" onclick="saveTeams()">Add selected teams</button>
+                        <button type="button" class="btn-secondary" onclick="goStep(3)">Skip →</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- STEP 3 -->
+            <section class="wizard-pane" id="step-3" aria-label="Step 3: copy endpoints">
+                <div class="card">
+                    <h2>Add Jellyball to Jellyfin</h2>
+                    <p class="hint">In Jellyfin, go to Dashboard → Live TV → Tuner Devices → Add, choose "M3U Tuner", and paste the playlist URL. Then add the guide URL under TV Guide Providers.</p>
+                    <label class="field">M3U tuner playlist</label>
+                    <div class="endpoint-row">
+                        <input type="text" readonly id="ep-playlist" value="{{ playlist_url }}" onclick="this.select()" aria-label="M3U playlist URL">
+                        <button type="button" class="btn-secondary" onclick="copyEndpoint('ep-playlist')">Copy</button>
+                    </div>
+                    <label class="field">XMLTV guide</label>
+                    <div class="endpoint-row">
+                        <input type="text" readonly id="ep-epg" value="{{ epg_url }}" onclick="this.select()" aria-label="XMLTV EPG URL">
+                        <button type="button" class="btn-secondary" onclick="copyEndpoint('ep-epg')">Copy</button>
+                    </div>
+                    <div class="wizard-result" id="verify-result" role="status"></div>
+                    <div class="row">
+                        <button type="button" class="btn-secondary" onclick="goStep(2)">← Back</button>
+                        <button type="button" id="verify-btn" onclick="verifyJellyfin()">Verify in Jellyfin</button>
+                        <a class="skip-link" href="/" style="align-self:center;">Finish → dashboard</a>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </div>
+<script>
+"use strict";
+function goStep(n) {
+    for (var i = 1; i <= 3; i++) {
+        document.getElementById('step-' + i).classList.toggle('active', i === n);
+        var ind = document.getElementById('step-ind-' + i);
+        ind.classList.toggle('active', i === n);
+        ind.classList.toggle('done', i < n);
+    }
+    window.scrollTo(0, 0);
+}
+function showResult(id, ok, text) {
+    var el = document.getElementById(id);
+    el.className = 'wizard-result show ' + (ok ? 'ok' : 'err');
+    el.textContent = text;
+}
+async function postJSON(url, body) {
+    var resp = await fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body || {})
+    });
+    var data = {};
+    try { data = await resp.json(); } catch (e) {}
+    return {status: resp.status, data: data};
+}
+function jellyfinForm() {
+    return {
+        url: document.getElementById('jf-url').value.trim(),
+        api_key: document.getElementById('jf-key').value.trim(),
+        task_id: document.getElementById('jf-task').value.trim()
+    };
+}
+async function testJellyfin() {
+    var btn = document.getElementById('jf-test-btn');
+    btn.disabled = true;
+    showResult('jf-test-result', true, '⏳ Testing connection…');
+    try {
+        var r = await postJSON('/setup/jellyfin/test', jellyfinForm());
+        if (r.data.ok) {
+            if (r.data.task_id && !document.getElementById('jf-task').value.trim()) {
+                document.getElementById('jf-task').value = r.data.task_id;
+            }
+            showResult('jf-test-result', true, '✅ Connected. Jellyfin answered and the Refresh Guide task is ready.');
+        } else {
+            showResult('jf-test-result', false, '❌ ' + (r.data.reason || 'Connection failed.'));
+        }
+    } catch (e) {
+        showResult('jf-test-result', false, '❌ Test failed: ' + e.message);
+    }
+    btn.disabled = false;
+}
+async function saveJellyfin() {
+    var btn = document.getElementById('jf-save-btn');
+    btn.disabled = true;
+    try {
+        var r = await postJSON('/setup/jellyfin', jellyfinForm());
+        if (r.data.ok) {
+            goStep(2);
+        } else {
+            showResult('jf-test-result', false, '❌ ' + (r.data.error || 'Could not save.'));
+        }
+    } catch (e) {
+        showResult('jf-test-result', false, '❌ Save failed: ' + e.message);
+    }
+    btn.disabled = false;
+}
+function selectedTeamKeys() {
+    var keys = [];
+    document.querySelectorAll('.team-check:checked').forEach(function (cb) { keys.push(cb.value); });
+    return keys;
+}
+async function saveTeams() {
+    var btn = document.getElementById('teams-save-btn');
+    btn.disabled = true;
+    showResult('teams-result', true, '⏳ Applying…');
+    try {
+        var r = await postJSON('/setup/teams', {catalog_keys: selectedTeamKeys()});
+        if (r.data.ok) {
+            var parts = [];
+            if (r.data.enabled) parts.push(r.data.enabled + ' added');
+            if (r.data.disabled) parts.push(r.data.disabled + ' removed');
+            showResult('teams-result', true, '✅ ' + (parts.length ? parts.join(', ') : 'No changes') +
+                '. ' + r.data.channels + ' channel(s) total. Continuing…');
+            setTimeout(function () { goStep(3); }, 900);
+        } else {
+            showResult('teams-result', false, '❌ ' + (r.data.error || 'Could not apply.'));
+        }
+    } catch (e) {
+        showResult('teams-result', false, '❌ ' + e.message);
+    }
+    btn.disabled = false;
+}
+function filterTeams(q) {
+    q = q.trim().toLowerCase();
+    document.querySelectorAll('#team-groups .team-group').forEach(function (group) {
+        var visible = 0;
+        group.querySelectorAll('label[data-name]').forEach(function (label) {
+            var show = !q || label.getAttribute('data-name').indexOf(q) !== -1;
+            label.style.display = show ? '' : 'none';
+            if (show) visible++;
+        });
+        group.style.display = visible ? '' : 'none';
+        group.open = !!q || visible > 0;
+    });
+}
+function copyEndpoint(id) {
+    var input = document.getElementById(id);
+    input.select();
+    var done = function (ok) { showResult('verify-result', ok, ok ? '📋 Copied to clipboard.' : '❌ Copy failed, select and copy manually.'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(input.value).then(function () { done(true); }, function () { done(false); });
+    } else {
+        try { done(document.execCommand('copy')); } catch (e) { done(false); }
+    }
+}
+async function verifyJellyfin() {
+    var btn = document.getElementById('verify-btn');
+    btn.disabled = true;
+    showResult('verify-result', true, '⏳ Asking Jellyfin to refresh its guide…');
+    try {
+        var r = await postJSON('/setup/verify', {});
+        if (r.data.ok) {
+            showResult('verify-result', true, '✅ Jellyfin accepted the refresh. Give it a minute, then check Live TV → Guide in Jellyfin.');
+        } else {
+            showResult('verify-result', false, '❌ ' + (r.data.reason || 'Refresh failed.') + ' You can retry from the dashboard Alerts tab.');
+        }
+    } catch (e) {
+        showResult('verify-result', false, '❌ ' + e.message);
+    }
+    btn.disabled = false;
+}
+</script>
+</body>
+</html>

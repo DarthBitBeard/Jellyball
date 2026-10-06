@@ -80,6 +80,11 @@ def _json(payload: dict):
 
 
 class EspnScheduleTests(unittest.TestCase):
+    def setUp(self):
+        # fetch_espn_team_schedule caches per (sport, slug); each test uses
+        # its own payload for the same team, so the cache must not leak.
+        espn_schedule._ESPN_SCHEDULE_CACHE.clear()
+
     def test_earliest_upcoming_game_is_chosen(self):
         payload = _schedule(
             NOW + timedelta(days=7),
@@ -109,6 +114,8 @@ class EspnScheduleTests(unittest.TestCase):
     def test_non_200_is_a_failed_lookup(self):
         for status in (404, 503):
             with self.subTest(status=status):
+                # Failed lookups are cached briefly, so clear between subtests.
+                espn_schedule._ESPN_SCHEDULE_CACHE.clear()
                 result, urls = _fetch(
                     lambda request, status=status: httpx.Response(status, request=request),
                     "Buffalo Bills", category="nfl", source_id="buf",
@@ -172,6 +179,60 @@ class EspnScheduleTests(unittest.TestCase):
     def test_old_import_locations_still_work(self):
         self.assertIs(catalog.fetch_espn_team_schedule, espn_schedule.fetch_espn_team_schedule)
         self.assertIs(failover.fetch_espn_team_schedule, espn_schedule.fetch_espn_team_schedule)
+
+
+class ScheduleCacheTests(unittest.TestCase):
+    def setUp(self):
+        espn_schedule._ESPN_SCHEDULE_CACHE.clear()
+
+    def _fetch_twice(self, handler):
+        requests = []
+
+        def recording_handler(request):
+            requests.append(request)
+            return handler(request)
+
+        async def go():
+            clear_dns_cache()
+            client = httpx.AsyncClient(transport=httpx.MockTransport(recording_handler))
+            try:
+                with patch.object(state, "SHARED_HTTP_CLIENT", client), \
+                        patch.object(espn_schedule, "datetime", _FrozenDatetime), \
+                        patch.object(socket, "getaddrinfo", side_effect=_public_getaddrinfo):
+                    first = await espn_schedule.fetch_espn_team_schedule(
+                        "Buffalo Bills", category="nfl", source_id="buf")
+                    second = await espn_schedule.fetch_espn_team_schedule(
+                        "Buffalo Bills", category="nfl", source_id="buf")
+                    return first, second
+            finally:
+                await client.aclose()
+                clear_dns_cache()
+
+        return asyncio.run(go()), len(requests)
+
+    def test_successful_lookup_is_cached(self):
+        (first, second), request_count = self._fetch_twice(
+            _json(_schedule(NOW + timedelta(days=2))))
+        self.assertEqual(request_count, 1)
+        self.assertEqual(first, second)
+        self.assertTrue(first[2])
+        self.assertEqual(first[0], NOW + timedelta(days=2))
+
+    def test_failed_lookup_is_cached_briefly(self):
+        (first, second), request_count = self._fetch_twice(
+            lambda request: httpx.Response(503, request=request))
+        self.assertEqual(request_count, 1)
+        self.assertEqual(first, (None, None, False))
+        self.assertEqual(second, (None, None, False))
+
+    def test_cache_key_is_per_team(self):
+        espn_schedule._ESPN_SCHEDULE_CACHE.clear()
+        (first, _), count = self._fetch_twice(_json(_schedule(NOW + timedelta(days=2))))
+        self.assertEqual(count, 1)
+        # A different team slug is a different cache key and fetches again.
+        result, _ = _fetch(_json(_schedule(NOW + timedelta(days=3))), "Miami Heat",
+                           category="nba", source_id="mia")
+        self.assertEqual(result[0], NOW + timedelta(days=3))
 
 
 if __name__ == "__main__":

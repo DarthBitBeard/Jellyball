@@ -23,9 +23,10 @@
                     {%- endif -%}</span>
             </div>
             <p class="meta-text" data-role="candidate-count">Backups: {{ channel.candidates_count }}</p>
+            <p class="meta-text" data-role="now-next">📺 <span data-role="now-title">{{ channel.now_title }}</span>{% if channel.next_title %}<span data-role="next-title" style="color: var(--text-dim);"> · Next: {{ channel.next_title }}</span>{% endif %}</p>
             {% if channel.has_candidates %}
             <form action="/override/{{ channel.team_id }}" method="post" style="margin-top:0.75rem; display:flex; gap:0.5rem; align-items:center;">
-                <select name="candidate_index" style="flex:1; padding:0.55rem; border-radius:6px; background:var(--surface-2); color:#fff; border:1px solid var(--border-strong); font-size:0.85rem;">
+                <select name="candidate_index" style="flex:1; padding:0.55rem; border-radius:6px; background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong); font-size:0.85rem;">
                     {% for opt in channel.candidates_options %}
                     <option value="{{ opt.idx }}">{{ opt.label }}</option>
                     {% endfor %}
@@ -43,7 +44,7 @@
                     <button type="submit" style="width: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; background: var(--surface-3); border: 1px solid var(--border-strong);">🔄 Rescrape</button>
                 </form>
                 <button type="button" onclick="testTeamStream('{{ channel.team_id }}')" style="width: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; background: var(--surface-3); border: 1px solid var(--border-strong); color: var(--text-soft); border-radius: 6px; cursor: pointer;">🧪 Test Stream</button>
-                <form action="/remove_team/{{ channel.team_id }}" method="post" style="display: inline;" onsubmit="return confirm('{{ channel.remove_label }} {{ channel.name }}?')">
+                <form action="/remove_team/{{ channel.team_id }}" method="post" style="display: inline;" onsubmit='return confirm({{ (channel.remove_label ~ " " ~ channel.name ~ "?")|tojson }})'>
                     <button class="btn-danger" type="submit" style="width: auto; padding: 0.5rem 0.75rem; margin-top: 0; font-size: 0.8rem;">{{ channel.remove_label }}</button>
                 </form>
             </div>
@@ -51,7 +52,7 @@
             <details style="margin-top: 0.5rem;">
                 <summary style="font-size: 0.8rem; color: var(--text-muted); cursor: pointer;">⏰ Schedule auto-disable</summary>
                 <form action="/team/{{ channel.team_id }}/schedule-disable" method="post" style="display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem;">
-                    <input type="date" name="disable_date" value="{{ channel.auto_disable_after }}" style="flex: 1; padding: 0.5rem; border-radius: 6px; background: var(--surface-2); color: #fff; border: 1px solid var(--border-strong); font-size: 0.8rem;">
+                    <input type="date" name="disable_date" value="{{ channel.auto_disable_after }}" style="flex: 1; padding: 0.5rem; border-radius: 6px; background: var(--surface-2); color: var(--text); border: 1px solid var(--border-strong); font-size: 0.8rem;">
                     <button type="submit" style="width: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; background: var(--surface-3); border: 1px solid var(--border-strong);">Save</button>
                 </form>
             </details>
@@ -63,11 +64,7 @@
 {% if channels_empty %}
 <div class="card first-run-banner">
     <h3 style="margin-top:0;">👋 Welcome to Jellyball</h3>
-    <p class="hint-text">No channels are enabled yet. Pick teams or always-live sports channels from the <a href="#catalog-section" onclick="document.getElementById('catalog-filter').focus();">Sports Catalog</a> below to get started.</p>
-    <div class="feed-box">
-        <div class="feed-item"><label>M3U Tuner Playlist URL (Click to copy)</label><input type="text" readonly value="{{ base_url }}/playlist.m3u" onclick="copyToClipboard(this.value, 'Playlist URL copied!')" aria-label="Copy M3U playlist URL"></div>
-        <div class="feed-item"><label>XMLTV EPG Guide URL (Click to copy)</label><input type="text" readonly value="{{ base_url }}/epg.xml" onclick="copyToClipboard(this.value, 'EPG URL copied!')" aria-label="Copy XMLTV EPG URL"></div>
-    </div>
+    <p class="hint-text">No channels are enabled yet. Pick teams or always-live sports channels from the <a href="#catalog-section" onclick="document.getElementById('catalog-filter').focus();">Sports Catalog</a> below to get started. Your M3U/EPG feed URLs are in the Jellyfin Integration Endpoints card below.</p>
     {% if auth_mode == 'open' %}
     <p class="hint-text">🔓 The dashboard has no password set, so it only accepts connections from this computer (local-only access).</p>
     {% elif auth_mode == 'generated' %}
@@ -88,6 +85,7 @@
     <p class="hint-text">{{ catalog_source_text }} Available entries: {{ catalog_entries_count }}. Select as many entries as needed, then apply them together.</p>
     <form action="/catalog/apply" method="post" id="catalog-form">
         <input id="catalog-filter" class="catalog-filter" type="text" placeholder="Filter teams and channels..." oninput="filterCatalog(this.value)">
+        <div id="catalog-filter-empty" class="hint-text" style="display: none; padding: 0.5rem 0;">No catalog entries match &ldquo;<span id="catalog-filter-query"></span>&rdquo;. <button type="button" onclick="clearCatalogFilter()" style="width: auto; padding: 0.25rem 0.6rem; font-size: 0.8rem; background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 6px; cursor: pointer;">Clear filter</button></div>
         <div class="catalog-list">
             {% for group in catalog_groups %}
             <details class="catalog-group">
@@ -118,24 +116,18 @@
             <h3 style="margin-top: 0; margin-bottom: 0.25rem;">🔄 Bulk Provider Override</h3>
             <p class="hint-text" style="margin: 0;">Temporarily force all active streams to use a specific provider.</p>
         </div>
-        <select id="global-provider-override" style="padding: 0.65rem; border-radius: 6px; background: var(--surface-2); color: #fff; border: 1px solid var(--border-strong); font-size: 0.9rem; min-width: 180px; cursor: pointer;">
+        <select id="global-provider-override" style="padding: 0.65rem; border-radius: 6px; background: var(--surface-2); color: var(--text); border: 1px solid var(--border-strong); font-size: 0.9rem; min-width: 180px; cursor: pointer;">
             <option value="">No Override (Auto)</option>
-            <option value="iSportSurge">iSportSurge</option>
-            <option value="MyBuffStreams">MyBuffStreams</option>
-            <option value="MethStreams">MethStreams</option>
-            <option value="StreamEast">StreamEast</option>
-            <option value="Footybite">Footybite</option>
-            <option value="1Stream">1Stream</option>
-            <option value="Streamed">Streamed</option>
-            <option value="TopStreams">TopStreams</option>
-            <option value="TheTVApp">TheTVApp</option>
-            <option value="DaddyLive">DaddyLive</option>
+            {% for pname in provider_names %}
+            <option value="{{ pname }}">{{ pname }}</option>
+            {% endfor %}
         </select>
     </div>
 </div>
 <div id="channels-changed-notice" class="channels-changed-notice" onclick="window.location.reload()">Channels changed — click to refresh</div>
 {% if not channels_empty %}
 <input id="channel-filter" class="channel-filter" type="text" placeholder="Filter your channels..." oninput="filterChannels(this.value)" aria-label="Filter enabled channels">
+<div id="channel-filter-empty" class="card" style="display: none; text-align: center; color: var(--text-muted);">No channels match &ldquo;<span id="channel-filter-query"></span>&rdquo;. <button type="button" onclick="clearChannelFilter()" style="width: auto; padding: 0.25rem 0.6rem; font-size: 0.8rem; background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 6px; cursor: pointer;">Clear filter</button></div>
 {% endif %}
 <div class="team-grid">
     {% if channels_empty %}
@@ -171,7 +163,7 @@
             <input type="hidden" id="multiview-team-ids" name="member_team_ids" value="">
             <div style="display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center;">
                 <input type="text" name="name" placeholder="Channel name (e.g. NFL Sunday Quad-Box)" required style="flex: 1; min-width: 220px;">
-                <select name="layout" style="padding: 0.6rem; border-radius: 6px; background:var(--surface-2); color:#fff; border:1px solid var(--border-strong);">
+                <select name="layout" style="padding: 0.6rem; border-radius: 6px; background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong);">
                     <option value="grid_2x2">2x2 Grid (4 channels)</option>
                     <option value="side_by_side_2">Side-by-Side (2 channels)</option>
                 </select>
@@ -194,7 +186,7 @@
         </div>
         <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; align-items: center;">
             <form action="/multiview/{{ mv.mv_id }}/set-audio" method="post" style="display:flex; gap:0.5rem; align-items:center;">
-                <select name="active_audio_team_id" style="padding:0.5rem; border-radius:6px; background:var(--surface-2); color:#fff; border:1px solid var(--border-strong); font-size:0.8rem;">
+                <select name="active_audio_team_id" style="padding:0.5rem; border-radius:6px; background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong); font-size:0.8rem;">
                     {% for opt in mv.audio_options %}
                     <option value="{{ opt.team_id }}" {{ 'selected' if opt.selected else '' }}>{{ opt.name }}</option>
                     {% endfor %}
@@ -207,7 +199,7 @@
             <form action="/multiview/{{ mv.mv_id }}/stop" method="post" style="display:inline;">
                 <button type="submit" style="width:auto; padding:0.5rem 0.75rem; font-size:0.8rem; background:var(--surface-3); border:1px solid var(--border-strong);">⏹️ Stop</button>
             </form>
-            <form action="/multiview/{{ mv.mv_id }}/remove" method="post" style="display:inline;" onsubmit="return confirm('Remove Multi-View {{ mv.name }}?')">
+            <form action="/multiview/{{ mv.mv_id }}/remove" method="post" style="display:inline;" onsubmit='return confirm({{ ("Remove Multi-View " ~ mv.name ~ "?")|tojson }})'>
                 <button class="btn-danger" type="submit" style="width:auto; padding:0.5rem 0.75rem; margin-top:0; font-size:0.8rem;">Remove</button>
             </form>
         </div>

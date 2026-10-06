@@ -26,6 +26,7 @@ import security
 PUBLIC_BY_DESIGN = {
     # Monitoring and Jellyfin's tuner: fetched with no credentials (README: Security model).
     "/healthz",
+    "/readyz",
     "/playlist.m3u",
     "/epg.xml",
     # Playback: Jellyfin's ffmpeg and the player fetch these with no credentials.
