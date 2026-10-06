@@ -1,19 +1,26 @@
 """Regenerate the JellyBall 2.1.3 brand assets ("Crystal Trophy" identity).
 
 Approach: every shipped asset is derived from one committed master source,
-``assets/jellyball-lockup-master.png`` (the approved crystal-football +
-crystal "jellyball" wordmark lockup, converted from the reference art).
-Re-running this script reproduces the committed files byte-for-byte
-(PIL PNG output is deterministic for identical input):
+``assets/jellyball-logo.jpg`` (the approved crystal-football + crystal
+"jellyball" wordmark lockup, 1120px, JPEG q88). Re-running this script
+reproduces the committed files byte-for-byte:
 
     python Jellyball/create_brand_assets.py
 
+The master JPG was produced from Landon-approved reference art
+(a 2240px AI-generated crystal lockup) by downscaling to 1120px wide with
+LANCZOS and saving at JPEG quality 88. The derivation below is fully
+deterministic (fixed crop geometry, MEDIANCUT quantization, fixed ICO
+sizes), so the script doubles as the reproducibility proof.
+
 Derived assets:
-    jellyball-lockup-master.png  2240x1120 master lockup (committed source)
-    jellyball-logo.png           the master lockup, shipped as-is
-    jellyball-icon.png           256px square app/tray icon (ball crop)
-    jellyball.ico                Windows icon, multi-size (ball crop)
-    favicon.ico                  browser favicon, multi-size (ball crop)
+    jellyball-logo.jpg           1120px master lockup (committed source,
+                                 also the shipped logo: README header,
+                                 No-Signal placeholder)
+    jellyball-icon.png           256px square app/tray icon (ball crop,
+                                 256-color quantized PNG)
+    jellyball.ico                Windows icon: 16/32/48/128 (ball crop)
+    favicon.ico                  browser favicon: 16/32/48 (ball crop)
     favicon-32.png               32px PNG favicon fallback
     favicon-180.png              180px Apple touch icon
 
@@ -29,28 +36,21 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
-LOCKUP_MASTER = ASSETS / "jellyball-lockup-master.png"
-
-# Approved final lockup art (read-only reference, not committed).
-CONCEPT = Path.home() / (
-    "workspace/jellyball-review/logo-concepts/"
-    "media-generation-jellyball-crystal-lockup-full-0-d6764859-"
-    "c39d-42a2-af0a-ce83d582a8a0.webp"
-)
+LOGO_MASTER = ASSETS / "jellyball-logo.jpg"
 
 # Fraction of the lockup height that holds the football (wordmark is below).
 BALL_REGION_FRACTION = 0.62
 CROP_PADDING_FRACTION = 0.08
 CONTENT_THRESHOLD = 26
 
+# Windows icon sizes shipped in jellyball.ico (largest-first not required;
+# 128px cap keeps the file small while covering high-DPI taskbar use).
+ICO_SIZES = [(16, 16), (32, 32), (48, 48), (128, 128)]
+FAVICON_ICO_SIZES = [(16, 16), (32, 32), (48, 48)]
+
 
 def _ensure_assets_dir() -> None:
     ASSETS.mkdir(parents=True, exist_ok=True)
-
-
-def build_lockup_master() -> Image.Image:
-    """Convert the approved reference art to the committed PNG master."""
-    return Image.open(CONCEPT).convert("RGB")
 
 
 def ball_mark(lockup: Image.Image) -> Image.Image:
@@ -89,18 +89,18 @@ def ball_mark(lockup: Image.Image) -> Image.Image:
 
 def create_assets() -> None:
     _ensure_assets_dir()
-    lockup = build_lockup_master()
-    lockup.save(LOCKUP_MASTER, optimize=True)
-    lockup.save(ASSETS / "jellyball-logo.png", optimize=True)
+    lockup = Image.open(LOGO_MASTER).convert("RGB")
 
     mark = ball_mark(lockup)
 
     icon = mark.resize((256, 256), Image.Resampling.LANCZOS)
-    icon.save(ASSETS / "jellyball-icon.png", optimize=True)
+    # 256-color quantization keeps the 256px icon small without visible
+    # banding; MEDIANCUT is deterministic for identical input.
+    icon_q = icon.quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+    icon_q.save(ASSETS / "jellyball-icon.png", optimize=True)
 
-    ico_sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-    icon.save(ASSETS / "jellyball.ico", sizes=ico_sizes)
-    icon.save(ASSETS / "favicon.ico", sizes=ico_sizes)
+    icon.save(ASSETS / "jellyball.ico", sizes=ICO_SIZES)
+    icon.save(ASSETS / "favicon.ico", sizes=FAVICON_ICO_SIZES)
 
     mark.resize((32, 32), Image.Resampling.LANCZOS).save(ASSETS / "favicon-32.png", optimize=True)
     mark.resize((180, 180), Image.Resampling.LANCZOS).save(ASSETS / "favicon-180.png", optimize=True)
