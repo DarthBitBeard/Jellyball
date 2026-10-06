@@ -1,4 +1,25 @@
 <div class="card">
+    <h3>Appearance</h3>
+    <p class="hint-text">Pick a dashboard theme. The header button cycles through them; your choice is remembered on this device.</p>
+    <div class="theme-picker" role="group" aria-label="Dashboard theme">
+        <button type="button" class="theme-option" data-theme-option="midnight" onclick="setTheme('midnight')" aria-pressed="false">
+            <span class="theme-swatch theme-swatch-midnight" aria-hidden="true"></span>
+            <span class="theme-option-name">Midnight Broadcast</span>
+            <span class="theme-option-desc">Dark, glassy sports-network glow with pulsing live indicators.</span>
+        </button>
+        <button type="button" class="theme-option" data-theme-option="arctic" onclick="setTheme('arctic')" aria-pressed="false">
+            <span class="theme-swatch theme-swatch-arctic" aria-hidden="true"></span>
+            <span class="theme-option-name">Arctic Minimal</span>
+            <span class="theme-option-desc">Light, airy and ultra-clean with generous whitespace.</span>
+        </button>
+        <button type="button" class="theme-option" data-theme-option="mission" onclick="setTheme('mission')" aria-pressed="false">
+            <span class="theme-swatch theme-swatch-mission" aria-hidden="true"></span>
+            <span class="theme-option-name">Mission Control</span>
+            <span class="theme-option-desc">Dense dark ops console with monospace data readouts.</span>
+        </button>
+    </div>
+</div>
+<div class="card">
     <h3>Advanced Settings</h3>
     <p class="hint-text">Leave a field blank to use its default (the .env value, or the built-in default). Changes apply immediately.</p>
     <form action="/settings/advanced" method="post" style="display: flex; flex-direction: column; gap: 1.25rem;">
