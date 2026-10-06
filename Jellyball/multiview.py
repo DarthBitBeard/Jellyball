@@ -890,7 +890,12 @@ async def _launch_multiview_run(
         _MULTIVIEW_PROCESSES[channel_id] = entry
         try:
             results = await asyncio.gather(*(
-                _wait_for_first_segment(run_dir / f"a{idx}", process, MULTIVIEW_STARTUP_TIMEOUT_SECONDS)
+                _wait_for_first_segment(
+                    run_dir / f"a{idx}",
+                    process,
+                    MULTIVIEW_STARTUP_TIMEOUT_SECONDS,
+                    safe_root=run_dir,
+                )
                 for idx in range(len(inputs))
             ))
         except asyncio.CancelledError:
