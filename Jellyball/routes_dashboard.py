@@ -584,6 +584,14 @@ async def stop_multiview(channel_id: str, auth: bool = Depends(verify_dashboard_
 async def start_multiview(channel_id: str, auth: bool = Depends(verify_dashboard_auth)):
     """Explicit start: clears a manual stop and any backoff, then starts the
     grid now (the idle monitor stops it again if nobody watches)."""
+    if (
+        not channel_id
+        or ".." in channel_id
+        or "/" in channel_id
+        or "\\" in channel_id
+        or channel_id.startswith(".")
+    ):
+        raise HTTPException(status_code=400, detail="Invalid channel id")
     data = stream_state.get(channel_id)
     if data and data.get("type") == "multiview":
         _clear_multiview_manual_stop(channel_id, "explicit start")
