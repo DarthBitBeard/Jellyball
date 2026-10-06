@@ -5,9 +5,11 @@ DB_FILE is read at call time as a module global (tests patch `db.DB_FILE`).
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
+import secrets
 import sqlite3
 import threading
 import time
@@ -23,6 +25,15 @@ import migrations_providers
 import migrations_setup
 import migrations_sports
 from version import __version__
+
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+    _FERNET_AVAILABLE = True
+except ImportError:
+    Fernet = None  # type: ignore[assignment]
+    InvalidToken = Exception  # type: ignore[assignment]
+    _FERNET_AVAILABLE = False
+    LOGGER.error("cryptography is not installed; secret settings will be stored unencrypted")
 
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
@@ -371,6 +382,98 @@ def _fetch_expired_scheduled_teams() -> list:
         return cursor.fetchall()
 
 
+# --- Secrets encryption at rest -------------------------------------------
+# Credential settings are AES-encrypted before they reach SQLite, so a copied
+# database file alone does not disclose them. The 32-byte key lives in the
+# data dir with 0600 permissions (same pattern as relay-signing.key).
+
+_SETTINGS_ENCRYPTION_KEY_FILE = DATA_DIR / "settings-encryption.key"
+_SETTINGS_ENCRYPTED_MARKER = "enc:v1:"
+
+#: app_settings keys whose values are encrypted at rest.
+SECRET_SETTING_KEYS = frozenset({
+    "jellyfin_api_key",
+    "telegram_bot_token",
+    "discord_webhook_url",
+})
+
+_FERNET_LOCK = threading.Lock()
+_FERNET_BY_KEYFILE: Dict[str, "Fernet"] = {}
+
+
+def _settings_encryption_key_file() -> Path:
+    return _SETTINGS_ENCRYPTION_KEY_FILE
+
+
+def _load_settings_encryption_key() -> bytes:
+    """32 raw bytes from the data dir, generated once and kept with 0600 perms."""
+    key_file = _settings_encryption_key_file()
+    try:
+        key = key_file.read_bytes()
+        if len(key) == 32:
+            return key
+    except OSError:
+        pass
+    key = secrets.token_bytes(32)
+    try:
+        key_file.write_bytes(key)
+        try:
+            key_file.chmod(0o600)
+        except OSError as exc:
+            _log_failure("restrict settings encryption key permissions", exc)
+    except OSError as exc:
+        _log_failure("save settings encryption key", exc)
+    return key
+
+
+def _settings_fernet() -> "Optional[Fernet]":
+    """Fernet instance for secret settings, cached per key-file path (tests
+    point the key file at a temp dir). None when cryptography is unavailable."""
+    if not _FERNET_AVAILABLE:
+        return None
+    key_path = str(_settings_encryption_key_file())
+    with _FERNET_LOCK:
+        fernet = _FERNET_BY_KEYFILE.get(key_path)
+    if fernet is None:
+        raw = _load_settings_encryption_key()
+        fernet = Fernet(base64.urlsafe_b64encode(raw))
+        with _FERNET_LOCK:
+            _FERNET_BY_KEYFILE[key_path] = fernet
+    return fernet
+
+
+def _encrypt_setting_value(value: str) -> str:
+    fernet = _settings_fernet()
+    if fernet is None:
+        return value
+    return _SETTINGS_ENCRYPTED_MARKER + fernet.encrypt(value.encode("utf-8")).decode("ascii")
+
+
+def _decrypt_setting_value(stored: str) -> Optional[str]:
+    """Plaintext for an encrypted value, or None when it is not encrypted or
+    cannot be decrypted with the current key."""
+    if not stored.startswith(_SETTINGS_ENCRYPTED_MARKER):
+        return None
+    fernet = _settings_fernet()
+    if fernet is None:
+        return None
+    try:
+        return fernet.decrypt(stored[len(_SETTINGS_ENCRYPTED_MARKER):].encode("ascii")).decode("utf-8")
+    except (InvalidToken, ValueError, UnicodeDecodeError):
+        return None
+
+
+def _migrate_secret_to_encrypted(key: str, plaintext: str) -> None:
+    """Rewrite a legacy plaintext secret as ciphertext. Called on read so
+    existing installs migrate without any explicit step."""
+    if _settings_fernet() is None:
+        return
+    try:
+        set_setting(key, plaintext)  # set_setting encrypts SECRET_SETTING_KEYS
+    except Exception as exc:
+        _log_failure(f"migrate setting {key} to encrypted storage", exc)
+
+
 def get_setting(key: str, default: str = "") -> str:
     try:
         with _db_session() as conn:
@@ -378,12 +481,26 @@ def get_setting(key: str, default: str = "") -> str:
             cursor.execute("SELECT value FROM app_settings WHERE key=?", (key,))
             row = cursor.fetchone()
             if row and row[0] is not None:
-                return row[0]
+                value = row[0]
+                if key in SECRET_SETTING_KEYS and value:
+                    if value.startswith(_SETTINGS_ENCRYPTED_MARKER):
+                        decrypted = _decrypt_setting_value(value)
+                        if decrypted is None:
+                            LOGGER.error(
+                                "Setting %s is encrypted but cannot be decrypted "
+                                "(wrong key file?); returning the default", key)
+                            return default
+                        return decrypted
+                    # Legacy plaintext value: encrypt it in place, transparently.
+                    _migrate_secret_to_encrypted(key, value)
+                return value
     except Exception as exc:
         _log_failure(f"read setting {key}", exc)
     return default
 
 def set_setting(key: str, value: str):
+    if key in SECRET_SETTING_KEYS and value and not value.startswith(_SETTINGS_ENCRYPTED_MARKER):
+        value = _encrypt_setting_value(value)
     with _db_session() as conn:
         conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)", (key, value))
         conn.commit()
