@@ -587,6 +587,7 @@ async def _wait_for_first_segment(
     timeout: float,
     poll_interval: float = 0.25,
 ) -> bool:
+    out_dir = out_dir.resolve(strict=False)
     playlist = out_dir / "index.m3u8"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -599,8 +600,15 @@ async def _wait_for_first_segment(
                 text = ""
             if "#EXTINF" in text:
                 first_segment = next((line for line in text.splitlines() if line.endswith(".ts")), None)
-                if first_segment and (out_dir / first_segment).exists():
-                    return True
+                if first_segment:
+                    segment_rel = Path(first_segment)
+                    if segment_rel.is_absolute() or ".." in segment_rel.parts:
+                        await asyncio.sleep(poll_interval)
+                        continue
+                    segment_path = (out_dir / segment_rel).resolve(strict=False)
+                    if out_dir == segment_path or out_dir in segment_path.parents:
+                        if segment_path.exists():
+                            return True
         await asyncio.sleep(poll_interval)
     return False
 
