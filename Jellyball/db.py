@@ -420,9 +420,11 @@ def _load_settings_encryption_key() -> bytes:
         try:
             key_file.chmod(0o600)
         except OSError as exc:
-            _log_failure("restrict settings encryption key permissions", exc)
+            # Log type only — never pass the exception near key material into
+            # the shared failure logger (CodeQL clear-text-logging).
+            LOGGER.warning("restrict settings encryption key permissions failed (%s)", type(exc).__name__)
     except OSError as exc:
-        _log_failure("save settings encryption key", exc)
+        LOGGER.warning("save settings encryption key failed (%s)", type(exc).__name__)
     return key
 
 
@@ -471,7 +473,8 @@ def _migrate_secret_to_encrypted(key: str, plaintext: str) -> None:
     try:
         set_setting(key, plaintext)  # set_setting encrypts SECRET_SETTING_KEYS
     except Exception as exc:
-        _log_failure(f"migrate setting {key} to encrypted storage", exc)
+        # Never log the setting name or exception detail next to plaintext secrets.
+        LOGGER.warning("migrate a secret setting to encrypted storage failed (%s)", type(exc).__name__)
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -487,15 +490,18 @@ def get_setting(key: str, default: str = "") -> str:
                         decrypted = _decrypt_setting_value(value)
                         if decrypted is None:
                             LOGGER.error(
-                                "Setting %s is encrypted but cannot be decrypted "
-                                "(wrong key file?); returning the default", key)
+                                "An encrypted secret setting cannot be decrypted "
+                                "(wrong key file?); returning the default")
                             return default
                         return decrypted
                     # Legacy plaintext value: encrypt it in place, transparently.
                     _migrate_secret_to_encrypted(key, value)
                 return value
     except Exception as exc:
-        _log_failure(f"read setting {key}", exc)
+        if key in SECRET_SETTING_KEYS:
+            LOGGER.warning("read a secret setting failed (%s)", type(exc).__name__)
+        else:
+            _log_failure(f"read setting {key}", exc)
     return default
 
 def set_setting(key: str, value: str):

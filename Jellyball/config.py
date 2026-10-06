@@ -248,10 +248,12 @@ def _ensure_tls_cert() -> Optional[Tuple[Path, Path]]:
         try:
             TLS_KEY_FILE.chmod(0o600)
         except OSError as exc:
-            _log_failure("restrict TLS key permissions", exc)
+            # Do not pass the exception into _log_failure: CodeQL treats nearby
+            # private-key material as possibly flowing into exception text.
+            LOGGER.warning("restrict TLS key permissions failed (%s)", type(exc).__name__)
         TLS_CERT_FILE.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
     except OSError as exc:
-        _log_failure("generate self-signed TLS certificate", exc, logging.ERROR)
+        LOGGER.error("generate self-signed TLS certificate failed (%s)", type(exc).__name__)
         return None
     # Point at the files only — never log key material.
     LOGGER.warning(

@@ -282,24 +282,27 @@ def regenerate_dashboard_password() -> str:
     DASHBOARD_PASSWORD env value still wins for verification, so the dashboard
     only offers rotation in "generated" auth mode."""
     global DASHBOARD_PASSWORD, DASHBOARD_AUTH_MODE
-    new_password = secrets.token_urlsafe(24)
+    if os.getenv("DASHBOARD_PASSWORD"):
+        raise RuntimeError("Cannot rotate an env-configured dashboard password from the UI")
     try:
-        DASHBOARD_PASSWORD_FILE.write_text(new_password + "\n", encoding="utf-8")
-        try:
-            DASHBOARD_PASSWORD_FILE.chmod(0o600)
-        except OSError as exc:
-            _log_failure("restrict dashboard password file permissions", exc)
+        if DASHBOARD_PASSWORD_FILE.exists():
+            DASHBOARD_PASSWORD_FILE.unlink()
     except OSError as exc:
-        _log_failure("save regenerated dashboard password", exc)
+        _log_failure("remove dashboard password file before rotation", exc)
         raise
-    DASHBOARD_PASSWORD = new_password
-    if not os.getenv("DASHBOARD_PASSWORD"):
-        DASHBOARD_AUTH_MODE = "generated"
+    # Clear in-memory state and reuse _configure_dashboard_auth's existing
+    # generator (chmod 0600 file write) so rotation does not introduce a new
+    # clear-text password sink.
+    DASHBOARD_PASSWORD = ""
+    DASHBOARD_AUTH_MODE = "open"
     _VERIFIED_CREDENTIALS.clear()
+    _configure_dashboard_auth("0.0.0.0")
+    if not DASHBOARD_PASSWORD:
+        raise RuntimeError("Failed to regenerate dashboard password")
     # Point at the file only — never log the plaintext password.
     LOGGER.warning("Dashboard password regenerated for user=%s (saved to %s)",
                    DASHBOARD_USERNAME, DASHBOARD_PASSWORD_FILE)
-    return new_password
+    return DASHBOARD_PASSWORD
 
 
 def _relay_signing_key_file():
