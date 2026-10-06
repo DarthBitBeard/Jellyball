@@ -295,3 +295,10 @@ table { width: 100%; border-collapse: collapse; } .hint-text { font-size: 0.8rem
 .theme-swatch-mission { background: linear-gradient(135deg, #080b0d 45%, #ffb000 160%); }
 .theme-option-name { font-weight: 700; font-size: 0.95rem; }
 .theme-option-desc { font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; }
+
+/* WebKit's native calendar-picker icon is dark-on-dark in the dark themes;
+   invert it there so the schedule auto-disable date input stays usable. */
+:root[data-theme="midnight"] input[type="date"]::-webkit-calendar-picker-indicator,
+:root[data-theme="mission"] input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: invert(0.75);
+}
