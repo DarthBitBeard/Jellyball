@@ -476,5 +476,236 @@ class DashboardPollingTests(unittest.TestCase):
         self.assertIn("window.refreshPerformanceTab", source)
 
 
+class MirrorDomainTests(TempDbCase):
+    """Automatic provider domain failover: mirror probing, suggestions,
+    auto-switch, and breaker reset."""
+
+    def setUp(self):
+        super().setUp()
+        scrapers._PROVIDER_SUGGESTED_DOMAINS.clear()
+        scrapers._MIRROR_PROBE_INFLIGHT.clear()
+        scrapers._PROVIDER_BREAKERS.clear()
+
+    def tearDown(self):
+        scrapers._PROVIDER_SUGGESTED_DOMAINS.clear()
+        scrapers._MIRROR_PROBE_INFLIGHT.clear()
+        scrapers._PROVIDER_BREAKERS.clear()
+        super().tearDown()
+
+    def _run_probe(self, name, mirrors, html_by_mirror):
+        async def fake_fetch(client, url, headers=None, timeout=None):
+            return html_by_mirror.get(url)
+
+        async def go():
+            # The probe builds a real httpx.AsyncClient, which the sandbox's
+            # proxy env breaks; the fetch itself is stubbed, so stub the
+            # client too.
+            with patch.dict(scrapers.PROVIDER_MIRROR_DOMAINS, {name: mirrors}), \
+                    patch.object(scrapers, "fetch_bounded_text", side_effect=fake_fetch), \
+                    patch("httpx.AsyncClient", return_value=AsyncMock()):
+                await scrapers._probe_provider_mirrors(name)
+
+        asyncio.run(go())
+
+    def test_working_mirror_is_recorded_as_suggestion(self):
+        name = "MethStreams"
+        big_html = "<html><body>" + "<a href='/game/1'>Team A vs Team B</a>" * 40 + "</body></html>"
+        self._run_probe(
+            name,
+            ["https://methstreams-dead.example", "https://methstreams-alive.example"],
+            {"https://methstreams-alive.example": big_html},
+        )
+        self.assertEqual(
+            scrapers.get_suggested_domain(name), "https://methstreams-alive.example"
+        )
+
+    def test_probe_with_no_working_mirror_records_nothing(self):
+        name = "MethStreams"
+        self._run_probe(name, ["https://methstreams-dead.example"], {})
+        self.assertIsNone(scrapers.get_suggested_domain(name))
+
+    def test_probe_skips_the_current_base_url(self):
+        name = "MethStreams"
+        provider = next(p for p in scrapers.ACTIVE_PROVIDERS if p.name == name)
+        current = provider.base_url.rstrip("/")
+        big_html = "<html><body>" + "<a href='/game/1'>x</a>" * 40 + "</body></html>"
+        self._run_probe(name, [current], {current: big_html})
+        # The current URL is never suggested, even when it serves HTML.
+        self.assertIsNone(scrapers.get_suggested_domain(name))
+
+    def test_autoswitch_applies_the_mirror_and_clears_the_breaker(self):
+        name = "MethStreams"
+        provider = next(p for p in scrapers.ACTIVE_PROVIDERS if p.name == name)
+        original_override = scrapers._PROVIDER_BASE_URL_OVERRIDES.get(name)
+        big_html = "<html><body>" + "<a href='/game/1'>x</a>" * 40 + "</body></html>"
+        for _ in range(scrapers.PROVIDER_BREAKER_FAILURES):
+            scrapers._provider_breaker_failure(name)
+        self.assertTrue(scrapers._provider_breaker_open(name))
+        try:
+            with patch.object(scrapers, "PROVIDER_DOMAIN_AUTOSWITCH", True), \
+                    patch("alerts.send_alert", new=AsyncMock()):
+                self._run_probe(
+                    name,
+                    ["https://methstreams-alive.example"],
+                    {"https://methstreams-alive.example": big_html},
+                )
+            self.assertEqual(provider.base_url, "https://methstreams-alive.example")
+            self.assertFalse(scrapers._provider_breaker_open(name))
+            self.assertIsNone(scrapers.get_suggested_domain(name))
+        finally:
+            if original_override:
+                scrapers._PROVIDER_BASE_URL_OVERRIDES[name] = original_override
+            else:
+                scrapers._PROVIDER_BASE_URL_OVERRIDES.pop(name, None)
+
+    def test_reset_provider_breaker_clears_an_open_breaker(self):
+        name = "MethStreams"
+        for _ in range(scrapers.PROVIDER_BREAKER_FAILURES):
+            scrapers._provider_breaker_failure(name)
+        self.assertTrue(scrapers._provider_breaker_open(name))
+        scrapers.reset_provider_breaker(name)
+        self.assertFalse(scrapers._provider_breaker_open(name))
+
+    def test_successful_search_clears_a_pending_suggestion(self):
+        name = "MethStreams"
+        scrapers._PROVIDER_SUGGESTED_DOMAINS[name] = "https://methstreams-alive.example"
+        scrapers._provider_breaker_success(name)
+        self.assertIsNone(scrapers.get_suggested_domain(name))
+
+    def test_dismiss_suggested_domain(self):
+        name = "MethStreams"
+        scrapers._PROVIDER_SUGGESTED_DOMAINS[name] = "https://methstreams-alive.example"
+        scrapers.dismiss_suggested_domain(name)
+        self.assertIsNone(scrapers.get_suggested_domain(name))
+
+    def test_maybe_probe_spawns_one_background_probe(self):
+        name = "MethStreams"
+
+        async def go():
+            with patch.dict(scrapers.PROVIDER_MIRROR_DOMAINS, {name: ["https://m.example"]}), \
+                    patch.object(scrapers, "_probe_provider_mirrors", new=AsyncMock()) as probe:
+                scrapers._maybe_probe_provider_mirrors(name)
+                scrapers._maybe_probe_provider_mirrors(name)  # duplicate suppressed
+                for _ in range(10):
+                    await asyncio.sleep(0)
+                self.assertEqual(probe.await_count, 1)
+
+        asyncio.run(go())
+        # A provider with no mirrors configured never probes.
+        with patch.object(scrapers, "_probe_provider_mirrors", new=AsyncMock()) as probe:
+            scrapers._maybe_probe_provider_mirrors("NoMirrorsProv")
+            self.assertNotIn("NoMirrorsProv", scrapers._MIRROR_PROBE_INFLIGHT)
+            self.assertEqual(probe.await_count, 0)
+
+    def test_mirror_env_parsing_ignores_garbage(self):
+        with patch.dict(os.environ, {"PROVIDER_MIRROR_DOMAINS": "not json"}):
+            self.assertEqual(scrapers._load_provider_mirror_domains(), {})
+        with patch.dict(os.environ, {"PROVIDER_MIRROR_DOMAINS": '{"A": ["notaurl", "https://ok.example/x/"]}'}):
+            self.assertEqual(
+                scrapers._load_provider_mirror_domains(), {"A": ["https://ok.example"]}
+            )
+
+
+class RetryRouteTests(TempDbCase):
+    def _call(self, method, path, **kwargs):
+        async def go():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=main.app), base_url="http://127.0.0.1:8000"
+            ) as client:
+                return await client.request(method, path, **kwargs)
+
+        with patch.object(security, "DASHBOARD_PASSWORD", ""):
+            return asyncio.run(go())
+
+    def test_retry_endpoint_clears_the_breaker_and_runs_a_dry_run(self):
+        name = scrapers.ACTIVE_PROVIDERS[0].name
+        for _ in range(scrapers.PROVIDER_BREAKER_FAILURES):
+            scrapers._provider_breaker_failure(name)
+        self.assertTrue(scrapers._provider_breaker_open(name))
+        fake = {"provider": name, "outcome": "ok", "streams": 2}
+        with patch.object(scrapers, "get_healthy_browser", AsyncMock(return_value=None)), \
+                patch.object(provider_tools, "dry_run", AsyncMock(return_value=fake)):
+            response = self._call("POST", f"/api/providers/{name}/retry", json={"terms": ["Bills"]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), fake)
+        self.assertFalse(scrapers._provider_breaker_open(name))
+
+    def test_retry_endpoint_reports_busy_as_429(self):
+        name = scrapers.ACTIVE_PROVIDERS[0].name
+        with patch.object(scrapers, "get_healthy_browser", AsyncMock(return_value=None)), \
+                patch.object(provider_tools, "dry_run", AsyncMock(side_effect=provider_tools.ProviderBusy(name))):
+            response = self._call("POST", f"/api/providers/{name}/retry")
+        self.assertEqual(response.status_code, 429)
+
+    def test_apply_domain_endpoint_validates_applies_and_dismisses(self):
+        name = "MethStreams"
+        provider = next(p for p in scrapers.ACTIVE_PROVIDERS if p.name == name)
+        original_override = scrapers._PROVIDER_BASE_URL_OVERRIDES.get(name)
+        try:
+            bad = self._call("POST", f"/api/providers/{name}/apply-domain", json={"url": "notaurl"})
+            self.assertEqual(bad.status_code, 400)
+            ok = self._call(
+                "POST", f"/api/providers/{name}/apply-domain",
+                json={"url": "https://methstreams-new.example/"},
+            )
+            self.assertEqual(ok.status_code, 200)
+            self.assertEqual(ok.json()["url"], "https://methstreams-new.example")
+            self.assertEqual(provider.base_url, "https://methstreams-new.example")
+            dismissed = self._call("POST", f"/api/providers/{name}/apply-domain", json={"dismiss": True})
+            self.assertEqual(dismissed.json(), {"name": name, "dismissed": True})
+            self.assertEqual(self._call("POST", "/api/providers/Nope/apply-domain", json={"dismiss": True}).status_code, 404)
+        finally:
+            if original_override:
+                scrapers._PROVIDER_BASE_URL_OVERRIDES[name] = original_override
+            else:
+                scrapers._PROVIDER_BASE_URL_OVERRIDES.pop(name, None)
+
+    def test_provider_list_includes_suggested_domain(self):
+        name = scrapers.ACTIVE_PROVIDERS[0].name
+        scrapers._PROVIDER_SUGGESTED_DOMAINS[name] = "https://suggested.example"
+        try:
+            rows = self._call("GET", "/api/providers").json()["providers"]
+            row = next(p for p in rows if p["name"] == name)
+            self.assertEqual(row["suggested_domain"], "https://suggested.example")
+        finally:
+            scrapers._PROVIDER_SUGGESTED_DOMAINS.pop(name, None)
+
+
+class SelftestTests(TempDbCase):
+    def test_degraded_providers_are_collected(self):
+        async def fake_dry_run(provider, terms, browser=None, timeout=None):
+            if provider.name == "BadProv":
+                return {"provider": "BadProv", "outcome": "error", "error_class": "connect"}
+            return {"provider": provider.name, "outcome": "ok", "error_class": None}
+
+        providers = [MagicMock(name="GoodProv"), MagicMock(name="BadProv")]
+        providers[0].name = "GoodProv"
+        providers[1].name = "BadProv"
+        with patch("provider_settings.filter_enabled", return_value=providers), \
+                patch.object(scrapers, "get_healthy_browser", AsyncMock(return_value=None)), \
+                patch.object(provider_tools, "dry_run", side_effect=fake_dry_run):
+            summary = asyncio.run(provider_tools.run_provider_selftest())
+        self.assertEqual(summary["checked"], 2)
+        self.assertEqual(len(summary["degraded"]), 1)
+        self.assertEqual(summary["degraded"][0]["provider"], "BadProv")
+
+    def test_digest_is_sent_only_when_something_is_degraded(self):
+        async def go():
+            with patch("alerts.send_alert", new=AsyncMock()) as send:
+                sent = await provider_tools.send_selftest_digest({"checked": 3, "degraded": []})
+                self.assertFalse(sent)
+                send.assert_not_awaited()
+                sent = await provider_tools.send_selftest_digest(
+                    {"checked": 3, "degraded": [{"provider": "BadProv", "outcome": "error", "error_class": "connect"}]}
+                )
+                self.assertTrue(sent)
+                send.assert_awaited_once()
+                title = send.await_args.args[0]
+                self.assertIn("BadProv", send.await_args.args[1])
+                self.assertEqual(title, "Nightly provider self-test")
+
+        asyncio.run(go())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -73,6 +73,7 @@ class OfflineCase(unittest.IsolatedAsyncioTestCase):
         overrides.start()
         self.addCleanup(overrides.stop)
         scrapers._SCRAPE_INDEX_CACHE.clear()
+        espn_schedule._ESPN_SCHEDULE_CACHE.clear()
         scrapers._SCRAPE_INDEX_INFLIGHT.clear()
         self.addCleanup(scrapers._SCRAPE_INDEX_CACHE.clear)
         self.addCleanup(scrapers._SCRAPE_INDEX_INFLIGHT.clear)
@@ -199,6 +200,9 @@ class EspnScheduleContractTests(OfflineCase):
         ]
         for offset, included in cases:
             with self.subTest(offset=offset):
+                # The schedule cache is keyed by (sport, slug), not by frozen
+                # time, so each subTest needs a fresh lookup.
+                espn_schedule._ESPN_SCHEDULE_CACHE.clear()
                 document = shifted(self.NFL, [offset, self.FAR, self.FAR * 2])
                 (start, _, ok), _ = await self.fetch(document, category="nfl", source_id="buf")
                 self.assertTrue(ok)
