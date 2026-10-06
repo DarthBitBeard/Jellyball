@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Deque, Dict, List, Optional, Tuple
 
 from ts_normalize import TsNormalizer, find_ts_start
+import engine_stats
 
 LOGGER = logging.getLogger("jellyball.session")
 
@@ -44,6 +45,48 @@ try:  # AES-128 HLS decryption
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 except ImportError:  # pragma: no cover - dependency is pinned in requirements
     Cipher = None
+
+
+# ---------------------------------------------------------------------------
+# Persisted sequence high-water mark
+# ---------------------------------------------------------------------------
+
+# app_settings key holding the highest media sequence number any session has
+# published. A restart seeds next_seq from max(persisted, wall clock) so an
+# NTP step backwards (or a clock change) can't regress sequence numbers and
+# confuse players mid-guide-refresh.
+_NEXT_SEQ_SETTING_KEY = "engine.next_seq_max"
+_NEXT_SEQ_PERSIST_SECONDS = 60.0
+# In-process high-water mark: sessions only write when they exceed it, so one
+# DB write per minute per active channel is the worst case.
+_NEXT_SEQ_HIGH_WATER = 0
+
+
+def _load_persisted_next_seq() -> int:
+    """Seed for a new ChannelSession's next_seq."""
+    global _NEXT_SEQ_HIGH_WATER
+    persisted = 0
+    try:
+        # Late import: db is app wiring; this module stays importable without it.
+        from db import get_setting
+        persisted = int(get_setting(_NEXT_SEQ_SETTING_KEY, "0") or 0)
+    except Exception:
+        persisted = 0
+    _NEXT_SEQ_HIGH_WATER = max(_NEXT_SEQ_HIGH_WATER, persisted)
+    return max(_NEXT_SEQ_HIGH_WATER, int(time.time()))
+
+
+def _persist_next_seq(value: int) -> None:
+    """Durably record a new high-water mark (best effort)."""
+    global _NEXT_SEQ_HIGH_WATER
+    if value <= _NEXT_SEQ_HIGH_WATER:
+        return
+    _NEXT_SEQ_HIGH_WATER = value
+    try:
+        from db import set_setting
+        set_setting(_NEXT_SEQ_SETTING_KEY, str(value))
+    except Exception:
+        LOGGER.debug("persist next_seq failed value=%d", value)
 
 
 # ---------------------------------------------------------------------------
@@ -379,9 +422,14 @@ class ChannelSession:
         self.cfg = config
         self.window: Deque[SessionSegment] = deque()
         self.grace: "OrderedDict[int, SessionSegment]" = OrderedDict()
-        # Seeded from the wall clock so numbering never goes backwards, even
-        # across an idle stop/restart or an application restart.
-        self.next_seq = int(time.time())
+        # Seeded from max(persisted high-water mark, wall clock) so numbering
+        # never goes backwards, even across an application restart combined
+        # with an NTP step backwards.
+        self.next_seq = _load_persisted_next_seq()
+        self._next_seq_persisted_at = 0.0
+        # Time to first published segment for the current run (ms); reset on
+        # every new run. None until the first segment is published.
+        self.tune_in_latency_ms: Optional[float] = None
         self.discontinuity_seq = 0
         self.target_duration = 0
         self.source: Optional[SourceSpec] = None
@@ -445,7 +493,27 @@ class ChannelSession:
             if not self.window:
                 self.state = "starting"
             self.started_at = time.monotonic()
+            # A new run measures its own time-to-first-segment.
+            self.tune_in_latency_ms = None
             self._task = asyncio.create_task(self._run(), name=f"hls session {self.channel_id}")
+
+    def reset_legacy(self) -> None:
+        """Leave the legacy passthrough so the next poll uses the session engine.
+
+        Called when failover moved the active candidate while this session was
+        parked in legacy state: the new candidate is session-compatible, so
+        serving it through the legacy passthrough for the rest of
+        legacy_retry_seconds would waste the normalizing engine (and its real
+        playback failover). Safe to call when not in legacy state.
+        """
+        if self.state != "legacy":
+            return
+        LOGGER.info("Channel session leaving legacy proxy after failover channel=%s", self.channel_id)
+        self.state = "idle"
+        self.legacy_reason = ""
+        self.legacy_since = 0.0
+        self._ready.clear()
+        self.ensure_running()
 
     def poke(self) -> None:
         """Poll now (e.g. right after failover moved the active candidate)."""
@@ -540,6 +608,7 @@ class ChannelSession:
             "segment_ms_p95": round(1000 * p95) if p95 is not None else None,
             "seconds_since_segment": round(time.monotonic() - self.last_new_segment_at, 1) if self.window else None,
             "uptime_seconds": round(time.monotonic() - self.started_at) if self.started_at and self.is_running else 0,
+            "tune_in_latency_ms": self.tune_in_latency_ms,
         }
 
     def snapshot(self) -> dict:
@@ -568,6 +637,8 @@ class ChannelSession:
             await asyncio.gather(task, return_exceptions=True)
         self._task = None
         self._release_memory()
+        # Durable high-water mark so a restart never regresses numbering.
+        _persist_next_seq(self.next_seq)
 
     # -- loop ---------------------------------------------------------------
 
@@ -725,6 +796,11 @@ class ChannelSession:
                 self._check_stale()
             return
         await self._ingest(new)
+        # Durable sequence high-water mark, throttled (see _persist_next_seq).
+        now = time.monotonic()
+        if now - self._next_seq_persisted_at >= _NEXT_SEQ_PERSIST_SECONDS:
+            self._next_seq_persisted_at = now
+            _persist_next_seq(self.next_seq)
 
     def _live_edge_count(self, segments: List[UpstreamSegment]) -> int:
         gap = self._switch_gap
@@ -902,6 +978,11 @@ class ChannelSession:
 
     def _publish(self, segment: SessionSegment) -> None:
         self.next_seq += 1
+        if self.tune_in_latency_ms is None and self.started_at is not None:
+            # First published segment of this run: time-to-first-segment, the
+            # headline number for whether cold-start work is paying off.
+            self.tune_in_latency_ms = round((time.monotonic() - self.started_at) * 1000, 1)
+            engine_stats.record_tune_in_latency(self.tune_in_latency_ms)
         self.pending_discontinuity = False
         self.consecutive_segment_failures = 0
         self.last_new_segment_at = self._stale_timer_start = time.monotonic()
