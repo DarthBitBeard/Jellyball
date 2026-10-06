@@ -5,6 +5,24 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-10-05
+
+### Added
+
+- Three selectable dashboard themes replace the old dark/light toggle: Midnight Broadcast (dark, glassy sports-network glow with pulsing live indicators), Arctic Minimal (light, airy and ultra-clean), and Mission Control (dense dark ops console with monospace data readouts). Pick one in Settings or cycle them with the header button; the choice is remembered per device, and old dark/light settings migrate automatically.
+- New PUBLIC_BASE_URL setting overrides the base URL handed out in the M3U playlist and dashboard links (for when Jellyfin runs on another host but the M3U is fetched via localhost), and the dashboard now warns when the M3U was recently served with a loopback-only address.
+
+### Fixed
+
+- Cold-start tune-in no longer waits out a dead first candidate: unstarted sessions now fail over after a single failure (instead of three), and the top three candidates' playlists are fetched in parallel with the first healthy one winning, instead of purely serial failover. Steady-state (already playing) failover behavior is unchanged.
+- Jellyfin tune-in reliability: the No-Signal placeholder now starts immediately at tune time (when ffmpeg is available) so Jellyfin's ffmpeg always receives a playable playlist on first open instead of a 503 after a 20s wait; the startup budget is raised from 20s to 45s, and a 503 is only answered when the session is genuinely exhausted with no placeholder available. The real stream takes over through the normal discontinuity machinery when ready.
+- Upstream media fetches now send the provider session cookies captured by the Playwright scraper, so CDN/WAF checks that the real browser passed no longer 403 the server-side playlist and segment requests.
+- On cold start, a 401/403 (expired CDN token) now fails over to the next candidate immediately instead of only scheduling a background rescrape; the rescrape still runs as a backstop.
+
+### Internal
+
+- Session playlist fetch failures now log the upstream HTTP status code (throttled), so all-403 situations are diagnosable from the log instead of only counted.
+
 ## [2.1.0] - 2026-10-04
 
 ### Added
