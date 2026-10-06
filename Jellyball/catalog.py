@@ -71,6 +71,68 @@ async def _fetch_espn_directory(category: str, client: httpx.AsyncClient) -> Tup
         return ()
 
 
+def _persist_team_catalog_sync(grouped: Dict[str, Tuple[TeamSlug, ...]]) -> None:
+    """Replace the persisted catalog with the last good merged one (best-effort;
+    failures are logged by the caller, never raised into the refresh path)."""
+    import json
+
+    from db import _db_session  # late: keep catalog importable without db
+
+    rows = [
+        (category, record.slug, record.canonical, record.logo_sport,
+         json.dumps(list(record.aliases)), record.team_id)
+        for category, records in grouped.items()
+        for record in records
+    ]
+    with _db_session() as conn:
+        conn.execute("DELETE FROM team_catalog_cache")
+        conn.executemany(
+            "INSERT INTO team_catalog_cache "
+            "(category, slug, canonical, logo_sport, aliases, team_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+
+
+def _load_persisted_team_catalog_sync() -> Dict[str, Tuple[TeamSlug, ...]]:
+    """The last good merged catalog from a previous run, or {} when none was
+    ever persisted (e.g. a fresh install or a pre-2.2.0 database)."""
+    import json
+
+    from db import _db_session  # late: keep catalog importable without db
+
+    try:
+        with _db_session() as conn:
+            rows = conn.execute(
+                "SELECT category, slug, canonical, logo_sport, aliases, team_id "
+                "FROM team_catalog_cache"
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - a missing table must not break startup
+        _log_failure("load persisted team catalog", exc)
+        return {}
+    grouped: Dict[str, List[TeamSlug]] = {}
+    for category, slug, canonical, logo_sport, aliases_json, team_id in rows:
+        try:
+            aliases = tuple(json.loads(aliases_json or "[]"))
+        except Exception:
+            aliases = ()
+        grouped.setdefault(category, []).append(
+            TeamSlug(
+                canonical=canonical,
+                category=category,
+                slug=slug,
+                logo_sport=logo_sport or "",
+                aliases=aliases,
+                team_id=team_id or "",
+            )
+        )
+    return {
+        category: tuple(sorted(records, key=lambda record: record.display_name.casefold()))
+        for category, records in grouped.items()
+    }
+
+
 async def get_team_catalog() -> Dict[str, Tuple[TeamSlug, ...]]:
     """Return grouped catalog records, refreshing college directories periodically."""
     global _CATALOG_CACHE, _CATALOG_CACHE_LOADED_AT, _CATALOG_REMOTE_LOADED
@@ -127,11 +189,30 @@ async def get_team_catalog() -> Dict[str, Tuple[TeamSlug, ...]]:
         # full interval. Static records remain usable while ESPN recovers.
         if remote_success:
             _CATALOG_CACHE_LOADED_AT = time.monotonic()
+            # Persist the last good merged catalog off the event loop, but only
+            # when every college directory came back: a partial merge must not
+            # overwrite a previously good full one.
+            if all(
+                isinstance(result, tuple) and result
+                for result in remote_results
+            ):
+                try:
+                    await asyncio.to_thread(_persist_team_catalog_sync, _CATALOG_CACHE)
+                except Exception as exc:
+                    _log_failure("persist team catalog", exc)
         elif not previous_catalog:
-            _CATALOG_CACHE_LOADED_AT = time.monotonic() - max(
-                0.0,
-                CATALOG_REFRESH_SECONDS - CATALOG_FAILURE_RETRY_SECONDS,
-            )
+            # No usable in-memory catalog (e.g. a restart during an ESPN
+            # outage): fall back to the last good merged catalog from the DB
+            # instead of dropping college coverage to the static list.
+            persisted = await asyncio.to_thread(_load_persisted_team_catalog_sync)
+            if persisted:
+                _CATALOG_CACHE = persisted
+                _CATALOG_CACHE_LOADED_AT = time.monotonic()
+            else:
+                _CATALOG_CACHE_LOADED_AT = time.monotonic() - max(
+                    0.0,
+                    CATALOG_REFRESH_SECONDS - CATALOG_FAILURE_RETRY_SECONDS,
+                )
         return dict(_CATALOG_CACHE)
 
 
