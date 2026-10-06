@@ -487,6 +487,19 @@ All five are also editable in Advanced Settings ("Legacy proxy" group).
 | :--- | :--- | :--- |
 | `PLAYWRIGHT_BROWSERS_PATH` | *(set automatically)* | Playwright's Chromium cache location; override only if you know you need to |
 
+### Backups
+
+Everything Jellyball cannot rebuild lives in one place: the data directory
+(`%LOCALAPPDATA%\Jellyball` on Windows, `~/.local/share/Jellyball` on Linux,
+`/app/data` in Docker, or `$JELLYBALL_DATA_DIR` if set). That folder holds
+`sports_proxy.db` (channels, schedules, settings, provider history),
+`dashboard-password.txt`, `relay-signing.key`, `.env`, and `jellyball.log`.
+Back up that single directory and you can rebuild from scratch; lose it and
+you start over. Copy it while Jellyball is stopped (or copy the live
+`sports_proxy.db` with SQLite's `.backup`, which is safe on a running
+database), and keep a few dated copies somewhere other than the same disk.
+Restore is the reverse: stop Jellyball, put the directory back, start it.
+
 ---
 
 ## Troubleshooting

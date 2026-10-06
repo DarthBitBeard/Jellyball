@@ -9,14 +9,16 @@ modules read it as `config.PORT`.
 """
 import os
 import sys
+import ipaddress
 import logging
 import re
 import queue
+from datetime import datetime, timedelta, timezone
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 import socket
 from pathlib import Path
 from html import escape as html_escape
-from typing import Optional
+from typing import Optional, Tuple
 
 # Resolve configuration and writable data independently of the current directory.
 # This is important when the application is launched from a Jellyfin service or a shortcut.
@@ -183,6 +185,81 @@ from stream_extractor import DEFAULT_USER_AGENT  # noqa: E402
 from network_safety import bounded_float, bounded_int, validate_http_url  # noqa: E402
 
 PORT = bounded_int(os.getenv("PORT", "8000"), 8000, 1, 65535)
+
+
+# --- Built-in TLS -----------------------------------------------------------
+# JELLYBALL_TLS=1 serves the dashboard over HTTPS with a self-signed
+# certificate generated into the data dir on first run. Off by default; plain
+# HTTP remains the fallback. A self-signed cert still encrypts the Basic-auth
+# password on the wire (browsers will show a trust warning, which is expected).
+TLS_ENABLED = os.getenv("JELLYBALL_TLS", "").strip().lower() in {"1", "true", "yes", "on"}
+TLS_CERT_FILE = DATA_DIR / "tls-cert.pem"
+TLS_KEY_FILE = DATA_DIR / "tls-key.pem"
+
+
+def _server_scheme() -> str:
+    return "https" if TLS_ENABLED else "http"
+
+
+def _ensure_tls_cert() -> Optional[Tuple[Path, Path]]:
+    """(cert, key) paths for uvicorn's ssl_certfile/ssl_keyfile, or None when
+    TLS is disabled or unavailable. Generates a self-signed certificate on
+    first use; an existing pair is reused untouched."""
+    if not TLS_ENABLED:
+        return None
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+    except ImportError:
+        LOGGER.error("JELLYBALL_TLS is set but the 'cryptography' package is not installed; serving plain HTTP")
+        return None
+    if TLS_CERT_FILE.exists() and TLS_KEY_FILE.exists():
+        return (TLS_CERT_FILE, TLS_KEY_FILE)
+    try:
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Jellyball")])
+        now = datetime.now(timezone.utc)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + timedelta(days=3650))
+            .add_extension(
+                x509.SubjectAlternativeName([
+                    x509.DNSName("localhost"),
+                    x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+                ]),
+                critical=False,
+            )
+            .sign(key, hashes.SHA256())
+        )
+        TLS_KEY_FILE.write_bytes(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            )
+        )
+        try:
+            TLS_KEY_FILE.chmod(0o600)
+        except OSError as exc:
+            _log_failure("restrict TLS key permissions", exc)
+        TLS_CERT_FILE.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    except OSError as exc:
+        _log_failure("generate self-signed TLS certificate", exc, logging.ERROR)
+        return None
+    # Point at the files only — never log key material.
+    LOGGER.warning(
+        "Generated a self-signed TLS certificate (%s); browsers will show a trust "
+        "warning, which is expected for a self-signed LAN certificate",
+        TLS_CERT_FILE,
+    )
+    return (TLS_CERT_FILE, TLS_KEY_FILE)
 
 
 def _find_available_port(preferred_port: int, host: str = "127.0.0.1") -> int:
