@@ -11,7 +11,7 @@ import threading
 import time
 import urllib.parse
 from collections import OrderedDict
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import httpx
 from fastapi import APIRouter, Request
@@ -167,6 +167,82 @@ _MAX_STORED_SEGMENTS = 5000
 _MANIFEST_SEGMENTS_LOCK = threading.Lock()
 _MANIFEST_MEDIA_SEGMENTS: "OrderedDict[str, List[str]]" = OrderedDict()
 _SEGMENT_TO_MANIFEST: "OrderedDict[str, str]" = OrderedDict()
+
+# --- Legacy playback failure reporting -------------------------------------
+# Failures on the legacy passthrough proxy used to be invisible to the
+# failover machinery: a dying legacy source waited out the 30s probe cycle
+# instead of failing over in seconds. The hook below is registered by
+# sessions.py at import ((team_id, reason) -> None) and feeds the same
+# report_failure path session playback uses.
+_LEGACY_FAILURE_HOOK: Optional[Callable[[str, str], None]] = None
+# (team_id, manifest_url) -> last report, monotonic: one failover request per
+# window per source no matter how often the player polls.
+_LEGACY_FAILURE_THROTTLE: Dict[Tuple[str, str], float] = {}
+_LEGACY_FAILURE_THROTTLE_SECONDS = 30.0
+# (team_id, manifest_url) -> consecutive upstream failures (manifest fetch or
+# chunk relay). Manifests are polled every few seconds during playback, so 2
+# consecutive failures mean the source is dead, not blipping; chunks get 3.
+_LEGACY_UPSTREAM_FAILURES: Dict[Tuple[str, str], int] = {}
+_LEGACY_MANIFEST_FAILURE_THRESHOLD = 2
+_LEGACY_CHUNK_FAILURE_THRESHOLD = 3
+# manifest/effective URL -> team_id, so chunk failures (which carry only a
+# signed upstream URL) can be attributed to their channel.
+_MANIFEST_TEAM: "OrderedDict[str, str]" = OrderedDict()
+_MAX_MANIFEST_TEAMS = 128
+
+
+def set_legacy_failure_hook(hook: Optional[Callable[[str, str], None]]) -> None:
+    """Registered once by sessions.py: (team_id, reason) -> None."""
+    global _LEGACY_FAILURE_HOOK
+    _LEGACY_FAILURE_HOOK = hook
+
+
+def _note_manifest_team(manifest_url: str, team_id: str) -> None:
+    if not manifest_url or not team_id:
+        return
+    _MANIFEST_TEAM[manifest_url] = team_id
+    _MANIFEST_TEAM.move_to_end(manifest_url)
+    while len(_MANIFEST_TEAM) > _MAX_MANIFEST_TEAMS:
+        _MANIFEST_TEAM.popitem(last=False)
+
+
+def _manifest_team_for_chunk(chunk_url: str) -> Tuple[str, str]:
+    """(team_id, manifest_url) for a chunk relay URL, or ("", "") when unknown."""
+    with _MANIFEST_SEGMENTS_LOCK:
+        manifest_url = _SEGMENT_TO_MANIFEST.get(chunk_url) or ""
+    if not manifest_url:
+        return "", ""
+    return _MANIFEST_TEAM.get(manifest_url) or "", manifest_url
+
+
+def _legacy_upstream_ok(team_id: str, manifest_url: str) -> None:
+    _LEGACY_UPSTREAM_FAILURES.pop((team_id, manifest_url), None)
+
+
+def _legacy_upstream_failed(team_id: str, manifest_url: str, reason: str, threshold: int) -> None:
+    """Count a consecutive upstream failure; report through the failover hook
+    when it reaches threshold, then reset the count so a still-dead source
+    re-reports after another `threshold` failures (one report per throttle
+    window regardless)."""
+    if not team_id or not manifest_url:
+        return
+    key = (team_id, manifest_url)
+    count = _LEGACY_UPSTREAM_FAILURES.get(key, 0) + 1
+    _LEGACY_UPSTREAM_FAILURES[key] = count
+    if count < threshold:
+        return
+    _LEGACY_UPSTREAM_FAILURES[key] = 0
+    hook = _LEGACY_FAILURE_HOOK
+    if hook is None:
+        return
+    now = time.monotonic()
+    if now - _LEGACY_FAILURE_THROTTLE.get(key, 0.0) < _LEGACY_FAILURE_THROTTLE_SECONDS:
+        return
+    _LEGACY_FAILURE_THROTTLE[key] = now
+    try:
+        hook(team_id, reason)
+    except Exception:
+        LOGGER.exception("legacy failure hook failed team=%s", team_id)
 
 
 def _reorder_hls_variants(manifest_lines: List[str]) -> List[str]:
@@ -453,10 +529,15 @@ async def _legacy_proxy_stream(team_id: str, request: Request, provider: str = "
     try:
         result = await _fetch_upstream_body(client, target_url, headers, MAX_MANIFEST_BYTES)
         if result is None:
+            _legacy_upstream_failed(team_id, target_url, "legacy manifest unreachable", _LEGACY_MANIFEST_FAILURE_THRESHOLD)
             return Response(status_code=502, content="Upstream manifest unavailable")
         status_code, effective_url, _, body, _ = result
         if status_code != 200:
+            _legacy_upstream_failed(team_id, target_url, f"legacy manifest status {status_code}", _LEGACY_MANIFEST_FAILURE_THRESHOLD)
             return Response(status_code=status_code)
+        _legacy_upstream_ok(team_id, target_url)
+        _note_manifest_team(target_url, team_id)
+        _note_manifest_team(effective_url, team_id)
         manifest_text = body.decode("utf-8", errors="replace")
         await _ensure_startup_buffer(
             f"{effective_url}\0{referer}\0{origin}",
@@ -469,6 +550,7 @@ async def _legacy_proxy_stream(team_id: str, request: Request, provider: str = "
         return _hls_response(rewritten)
     except Exception as exc:
         _log_failure(f"proxy manifest team={team_id}", exc, logging.ERROR)
+        _legacy_upstream_failed(team_id, target_url, "legacy manifest error", _LEGACY_MANIFEST_FAILURE_THRESHOLD)
         return Response(status_code=502, content="Upstream manifest unavailable")
     finally:
         if owns_client:
@@ -775,7 +857,14 @@ async def proxy_chunk(request: Request, url: str, ref: str = "", org: str = "", 
         release_singleflight()
         if owns_client:
             await client.aclose()
+        chunk_team_id, chunk_manifest_url = _manifest_team_for_chunk(decoded_url)
+        _legacy_upstream_failed(chunk_team_id, chunk_manifest_url, "legacy chunk unavailable", _LEGACY_CHUNK_FAILURE_THRESHOLD)
         return Response(status_code=status_code, content="Upstream chunk unavailable")
+
+    # Attribute this chunk's team for mid-body failure reporting below; a
+    # clean open also resets the consecutive-failure count.
+    chunk_team_id, chunk_manifest_url = _manifest_team_for_chunk(decoded_url)
+    _legacy_upstream_ok(chunk_team_id, chunk_manifest_url)
 
     out_headers = dict(cache_headers) if not range_header else {"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"}
     for key in ("content-range", "accept-ranges"):
@@ -812,6 +901,9 @@ async def proxy_chunk(request: Request, url: str, ref: str = "", org: str = "", 
                 await CHUNK_CACHE.put(cache_key, bytes(chunk_buffer), STREAM_CHUNK_CACHE_TTL)
         except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
             _log_failure("relay upstream chunk", exc)
+            # A stall mid-body: the player sees a truncated segment, so count
+            # it like an open failure toward failover.
+            _legacy_upstream_failed(chunk_team_id, chunk_manifest_url, "legacy chunk interrupted", _LEGACY_CHUNK_FAILURE_THRESHOLD)
             raise _UpstreamBodyInterrupted() from exc
         finally:
             await close_upstream()

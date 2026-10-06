@@ -32,6 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from playwright.async_api import async_playwright
 
 from config import (
+    _ensure_tls_cert,
     _find_available_port,
     _log_failure,
     _LOG_LISTENER,
@@ -56,6 +57,7 @@ import scrapers
 import catalog
 from catalog import _special_channel_for, _sport_labeled_name, resolve_espn_logo
 from updates import update_check_loop
+import provider_tools
 import legacy_proxy
 from legacy_proxy import _STARTUP_BUFFER_TASKS, PREFETCH_CONCURRENCY
 from ffmpeg_proc import _check_ffmpeg_available, _child_process_creationflags, run_roots
@@ -135,6 +137,7 @@ async def lifespan(app: FastAPI):
     _load_tunable_overrides()
     catalog.SHOW_OFFSEASON_CHANNELS = get_setting("show_offseason_channels", "0") == "1"
     _spawn_background_task(update_check_loop(), "update check")
+    _spawn_background_task(provider_tools.provider_selftest_loop(), "nightly provider self-test")
     stream_state.clear()
     _TEAM_SCRAPE_TASKS.clear()
     _SCRAPE_IN_FLIGHT.clear()
@@ -352,9 +355,93 @@ class RequestDiagnosticsMiddleware:
             await response(scope, receive, send)
 
 
+def _monotonic() -> float:
+    """Clock for the rate limiter; a module-level indirection so tests can patch it."""
+    return time.monotonic()
+
+
+class RateLimitMiddleware:
+    """Pure ASGI token-bucket rate limiter for expensive endpoints.
+
+    Blast-radius control, not a security boundary: it keeps one misbehaving
+    client or runaway poller from saturating the server through the endpoints
+    that do real work per request (stream tests, rescrapes, config imports) or
+    serve unauthenticated bytes (the /stream/ segment path). Buckets are per
+    client IP so one bad actor cannot starve everyone else.
+    """
+
+    # (path prefix, bucket capacity, refill tokens per second)
+    RULES = (
+        ("/api/test-stream", 10, 10 / 60.0),
+        ("/rescrape/", 20, 20 / 60.0),
+        ("/api/import-config", 5, 5 / 60.0),
+        # Segment relay: generous, a single viewer fetches a segment every few
+        # seconds, but an abusive poller still gets throttled.
+        ("/stream/", 240, 4.0),
+    )
+    _MAX_BUCKETS = 10000
+    _BUCKET_TTL_SECONDS = 600.0
+
+    def __init__(self, asgi_app) -> None:
+        self.app = asgi_app
+        # (rule_index, client_ip) -> [tokens, last_refill_monotonic]
+        self._buckets: dict = {}
+
+    def _rule_for(self, path: str):
+        for index, (prefix, _capacity, _refill) in enumerate(self.RULES):
+            if path.startswith(prefix):
+                return index
+        return None
+
+    def _prune(self, now: float) -> None:
+        if len(self._buckets) <= self._MAX_BUCKETS:
+            return
+        cutoff = now - self._BUCKET_TTL_SECONDS
+        stale = [key for key, (_tokens, last) in self._buckets.items() if last < cutoff]
+        for key in stale:
+            del self._buckets[key]
+
+    def _allowed(self, rule_index: int, client_ip: str) -> tuple:
+        """Return (allowed, retry_after_seconds)."""
+        _prefix, capacity, refill = self.RULES[rule_index]
+        now = _monotonic()
+        self._prune(now)
+        key = (rule_index, client_ip)
+        tokens, last = self._buckets.get(key, (float(capacity), now))
+        tokens = min(float(capacity), tokens + (now - last) * refill)
+        if tokens >= 1.0:
+            self._buckets[key] = [tokens - 1.0, now]
+            return True, 0.0
+        self._buckets[key] = [tokens, now]
+        retry_after = max(1.0, (1.0 - tokens) / refill)
+        return False, retry_after
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        rule_index = self._rule_for(scope.get("path") or "")
+        if rule_index is None:
+            await self.app(scope, receive, send)
+            return
+        client = scope.get("client")
+        client_ip = client[0] if client else "unknown"
+        allowed, retry_after = self._allowed(rule_index, client_ip)
+        if allowed:
+            await self.app(scope, receive, send)
+            return
+        response = JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded, try again later"},
+            headers={"Retry-After": str(int(retry_after) + 1)},
+        )
+        await response(scope, receive, send)
+
+
 app = FastAPI(title="Jellyball", version=__version__, lifespan=lifespan)
 app.add_middleware(CsrfOriginMiddleware)
 app.add_middleware(RequestDiagnosticsMiddleware)
+app.add_middleware(RateLimitMiddleware)
 
 # Dashboard static assets (the templates are routes_dashboard.TEMPLATES). Resolved
 # with _resource_path so the source tree and the PyInstaller bundle both work.
@@ -444,6 +531,11 @@ def build_server(host: str, port: int):
         http_impl = "httptools"
     except ImportError:
         http_impl = "auto"
+    tls_files = _ensure_tls_cert()
+    if tls_files is not None:
+        LOGGER.warning(
+            "Serving the dashboard over HTTPS with a self-signed certificate "
+            "(JELLYBALL_TLS=1); browsers will show a trust warning")
     config = uvicorn.Config(
         app,
         host=host,
@@ -462,6 +554,10 @@ def build_server(host: str, port: int):
         # (comma-separated; default loopback). Lets the login lockout and
         # request logs see the real client IP behind a reverse proxy.
         forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
+        **(
+            {"ssl_certfile": str(tls_files[0]), "ssl_keyfile": str(tls_files[1])}
+            if tls_files is not None else {}
+        ),
     )
     return uvicorn.Server(config)
 
@@ -487,7 +583,7 @@ def run_headless(stop_event: Optional[threading.Event] = None) -> int:
             server.should_exit = True
 
         threading.Thread(target=_watch_stop, name="jellyball-stop-watch", daemon=True).start()
-    LOGGER.info("Jellyball %s running headless at http://%s:%s", __version__, host, config.PORT)
+    LOGGER.info("Jellyball %s running headless at %s://%s:%s", __version__, config._server_scheme(), host, config.PORT)
     try:
         server.run()
     finally:
@@ -516,7 +612,7 @@ class TrayApplication:
         )
 
     def open_gui(self, icon, item):
-        webbrowser.open(f"http://127.0.0.1:{config.PORT}/")
+        webbrowser.open(f"{config._server_scheme()}://127.0.0.1:{config.PORT}/")
 
     def quit(self, icon, item):
         if self.server:
@@ -585,7 +681,7 @@ class TrayApplication:
                 # The Windows service (or another tray instance) already runs
                 # Jellyball here: just open its dashboard.
                 LOGGER.info("Jellyball already running on port %s; opening its dashboard", config.PORT)
-                webbrowser.open(f"http://127.0.0.1:{config.PORT}/")
+                webbrowser.open(f"{config._server_scheme()}://127.0.0.1:{config.PORT}/")
                 return
             if not _wait_for_port(host, config.PORT, 10.0):
                 selected_port = _find_available_port(config.PORT, host)
@@ -605,8 +701,8 @@ class TrayApplication:
             self._pending_notices.append(
                 f"Dashboard password generated (user {security.DASHBOARD_USERNAME}); it is in {security.DASHBOARD_PASSWORD_FILE}."
             )
-        LOGGER.info("Jellyball %s web GUI available at http://127.0.0.1:%s", __version__, config.PORT)
-        threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{config.PORT}/")).start()
+        LOGGER.info("Jellyball %s web GUI available at %s://127.0.0.1:%s", __version__, config._server_scheme(), config.PORT)
+        threading.Timer(1.0, lambda: webbrowser.open(f"{config._server_scheme()}://127.0.0.1:{config.PORT}/")).start()
         try:
             self.icon.run(setup=self._on_icon_ready)
         finally:

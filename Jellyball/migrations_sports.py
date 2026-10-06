@@ -12,4 +12,26 @@ into SCHEMA_MIGRATIONS and applies the pending ones in version order. Rules:
 - This module must not import db (db imports it).
 """
 
-MIGRATIONS: list = []
+import sqlite3
+
+
+def _team_catalog_cache_table(conn: sqlite3.Connection) -> None:
+    """2.2.0: persist the last good merged ESPN team catalog, so a restart
+    during an ESPN outage keeps serving college teams instead of dropping to
+    the smaller static list."""
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS team_catalog_cache
+           (category TEXT NOT NULL,
+            slug TEXT NOT NULL,
+            canonical TEXT NOT NULL,
+            logo_sport TEXT NOT NULL DEFAULT '',
+            aliases TEXT NOT NULL DEFAULT '[]',
+            team_id TEXT NOT NULL DEFAULT '',
+            fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (category, slug))"""
+    )
+
+
+MIGRATIONS: list = [
+    (200, _team_catalog_cache_table),
+]
