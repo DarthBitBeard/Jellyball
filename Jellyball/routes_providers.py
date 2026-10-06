@@ -132,10 +132,11 @@ async def apply_provider_domain(name: str, body: ProviderDomainRequest, auth: bo
     from db import set_setting_async
 
     provider = _find_provider(name)
-    if body.dismiss or not (body.url or "").strip():
+    suggested = (body.url or "").strip()
+    if body.dismiss or not suggested:
         scrapers.dismiss_suggested_domain(name)
         return {"name": provider.name, "dismissed": True}
-    validated = _validate_upstream_url(body.url.strip())
+    validated = _validate_upstream_url(suggested)
     if not validated:
         raise HTTPException(status_code=400, detail="Not a valid public http(s) URL")
     url = validated.rstrip("/")
