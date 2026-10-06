@@ -477,8 +477,8 @@ async def _legacy_proxy_stream(team_id: str, request: Request, provider: str = "
 
 @router.get("/substream.m3u8")
 async def proxy_substream(request: Request, url: str, ref: str = "", org: str = "", sig: str = ""):
-    decoded_url = url
-    decoded_ref = ref or ""
+    decoded_url = (await validate_http_url_async(url)) or ""
+    decoded_ref = ((await validate_http_url_async(ref)) if ref else "") or ""
     decoded_origin = org or ""
     if not _relay_signature_ok(decoded_url, decoded_ref, decoded_origin, sig):
         return Response(status_code=403, content="Unsigned relay URL")
@@ -523,8 +523,8 @@ async def proxy_substream(request: Request, url: str, ref: str = "", org: str = 
 @router.get("/resource")
 async def proxy_resource(request: Request, url: str, ref: str = "", org: str = "", sig: str = ""):
     """Proxy HLS key and initialization resources with the original media type."""
-    decoded_url = url
-    decoded_ref = ref or ""
+    decoded_url = (await validate_http_url_async(url)) or ""
+    decoded_ref = ((await validate_http_url_async(ref)) if ref else "") or ""
     decoded_origin = org or ""
     if not _relay_signature_ok(decoded_url, decoded_ref, decoded_origin, sig):
         return Response(status_code=403, content="Unsigned relay URL")
