@@ -29,17 +29,48 @@ function copyToClipboard(text, message = 'Copied!') {
         showToast('Failed to copy', 3000, true);
     });
 }
-function toggleTheme() {
-    const html = document.documentElement;
-    const isDark = html.getAttribute('data-theme') !== 'light';
-    const newTheme = isDark ? 'light' : 'dark';
-    html.setAttribute('data-theme', newTheme);
-    localStorage.setItem('theme', newTheme);
+/* ---- Dashboard themes: midnight | arctic | mission ----
+   Persisted in localStorage under 'theme' (old 'dark'/'light' values migrate). */
+const THEMES = ['midnight', 'arctic', 'mission'];
+const THEME_META = {
+    midnight: { icon: '🌙', label: 'Midnight Broadcast', scheme: 'dark' },
+    arctic: { icon: '☀️', label: 'Arctic Minimal', scheme: 'light' },
+    mission: { icon: '🖥️', label: 'Mission Control', scheme: 'dark' },
+};
+function normalizeTheme(t) {
+    if (t === 'dark') return 'midnight';
+    if (t === 'light') return 'arctic';
+    return THEMES.indexOf(t) >= 0 ? t : 'midnight';
+}
+function getTheme() {
+    return normalizeTheme(document.documentElement.getAttribute('data-theme'));
+}
+function setTheme(theme) {
+    theme = normalizeTheme(theme);
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem('theme', theme); } catch (e) { /* private mode */ }
+    const meta = document.querySelector('meta[name="color-scheme"]');
+    if (meta) meta.setAttribute('content', THEME_META[theme].scheme);
     const btn = document.getElementById('theme-toggle');
-    btn.textContent = isDark ? '☀️' : '🌙';
-    btn.classList.remove('spin');
-    void btn.offsetWidth;
-    btn.classList.add('spin');
+    if (btn) {
+        btn.textContent = THEME_META[theme].icon;
+        btn.setAttribute('title', 'Theme: ' + THEME_META[theme].label + ' (click to change)');
+        btn.setAttribute('aria-label', 'Switch dashboard theme, current: ' + THEME_META[theme].label);
+    }
+    document.querySelectorAll('[data-theme-option]').forEach(function (el) {
+        el.setAttribute('aria-pressed', el.getAttribute('data-theme-option') === theme ? 'true' : 'false');
+    });
+}
+function toggleTheme() {
+    // Header quick-toggle: cycles midnight -> arctic -> mission.
+    const order = THEMES;
+    setTheme(order[(order.indexOf(getTheme()) + 1) % order.length]);
+    const btn = document.getElementById('theme-toggle');
+    if (btn) {
+        btn.classList.remove('spin');
+        void btn.offsetWidth;
+        btn.classList.add('spin');
+    }
 }
 function switchTab(tabName) {
     document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
@@ -420,8 +451,7 @@ window.addEventListener('DOMContentLoaded', () => {
         window.history.replaceState({}, '', newUrl);
     }
 
-    const currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
-    document.getElementById('theme-toggle').textContent = currentTheme === 'light' ? '☀️' : '🌙';
+    setTheme(getTheme());
 
     const overrideSelect = document.getElementById('global-provider-override');
     if (overrideSelect) {
