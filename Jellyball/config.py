@@ -112,12 +112,13 @@ def _safe_exception_detail(exc: BaseException, limit: int = 160) -> str:
 
 
 def _log_failure(operation: str, exc: BaseException, level: int = logging.WARNING) -> None:
-    """Log a failure with its type and a URL-scrubbed detail (URLs carry tokens)."""
-    detail = _safe_exception_detail(exc)
-    if detail:
-        LOGGER.log(level, "%s failed (%s: %s)", operation, type(exc).__name__, detail)
-    else:
-        LOGGER.log(level, "%s failed (%s)", operation, type(exc).__name__)
+    """Log a failure with its exception type only.
+
+    Exception message text is intentionally omitted: it can carry tokens, URL
+    query secrets, or key material, and clear-text logging of that is both a
+    real risk and a CodeQL finding.
+    """
+    LOGGER.log(level, "%s failed (%s)", operation, type(exc).__name__)
 
 
 def _bootstrap_runtime_files() -> None:
