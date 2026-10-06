@@ -359,6 +359,8 @@ app.add_middleware(RequestDiagnosticsMiddleware)
 # Dashboard static assets (the templates are routes_dashboard.TEMPLATES). Resolved
 # with _resource_path so the source tree and the PyInstaller bundle both work.
 app.mount("/static", StaticFiles(directory=str(_resource_path("static"))), name="static")
+# Brand assets (logo, favicons) so the dashboard <link rel="icon"> resolves.
+app.mount("/assets", StaticFiles(directory=str(_resource_path("assets"))), name="assets")
 
 # Route registration order: routes_stream registers /stream/{team_id}.m3u8 and
 # /stream/{team_id}/seg/... before the catch-all /stream/{team_id}.

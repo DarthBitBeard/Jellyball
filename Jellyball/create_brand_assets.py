@@ -1,100 +1,111 @@
+"""Regenerate the JellyBall 2.1.3 brand assets ("Crystal Trophy" identity).
+
+Approach: every shipped asset is derived from one committed master source,
+``assets/jellyball-lockup-master.png`` (the approved crystal-football +
+crystal "jellyball" wordmark lockup, converted from the reference art).
+Re-running this script reproduces the committed files byte-for-byte
+(PIL PNG output is deterministic for identical input):
+
+    python Jellyball/create_brand_assets.py
+
+Derived assets:
+    jellyball-lockup-master.png  2240x1120 master lockup (committed source)
+    jellyball-logo.png           the master lockup, shipped as-is
+    jellyball-icon.png           256px square app/tray icon (ball crop)
+    jellyball.ico                Windows icon, multi-size (ball crop)
+    favicon.ico                  browser favicon, multi-size (ball crop)
+    favicon-32.png               32px PNG favicon fallback
+    favicon-180.png              180px Apple touch icon
+
+The square icon is a content-aware crop of the crystal football out of the
+top ~62% of the lockup (the wordmark lives below that line): pixels brighter
+than the navy background are boxed, then squared around the box center with
+8% padding. The crop box is deterministic for the fixed master image.
+"""
+
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
+LOCKUP_MASTER = ASSETS / "jellyball-lockup-master.png"
+
+# Approved final lockup art (read-only reference, not committed).
+CONCEPT = Path.home() / (
+    "workspace/jellyball-review/logo-concepts/"
+    "media-generation-jellyball-crystal-lockup-full-0-d6764859-"
+    "c39d-42a2-af0a-ce83d582a8a0.webp"
+)
+
+# Fraction of the lockup height that holds the football (wordmark is below).
+BALL_REGION_FRACTION = 0.62
+CROP_PADDING_FRACTION = 0.08
+CONTENT_THRESHOLD = 26
 
 
 def _ensure_assets_dir() -> None:
     ASSETS.mkdir(parents=True, exist_ok=True)
 
 
-def font(size: int, bold: bool = False):
-    candidates = [
-        Path("C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf"),
-        Path("C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf"),
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return ImageFont.truetype(str(candidate), size)
-    return ImageFont.load_default()
+def build_lockup_master() -> Image.Image:
+    """Convert the approved reference art to the committed PNG master."""
+    return Image.open(CONCEPT).convert("RGB")
 
 
-def football_mark(size: int) -> Image.Image:
-    image = Image.new("RGBA", (size, size), (8, 12, 34, 0))
-    glow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    glow_draw = ImageDraw.Draw(glow)
-    pad = size * 0.10
-    glow_draw.ellipse((pad, pad, size - pad, size - pad), fill=(20, 190, 255, 120))
-    glow = glow.filter(ImageFilter.GaussianBlur(max(2, int(size * 0.08))))
-    image.alpha_composite(glow)
+def ball_mark(lockup: Image.Image) -> Image.Image:
+    """Square crop of the crystal football out of the lockup.
 
-    draw = ImageDraw.Draw(image)
-    cx = cy = size / 2
-    rx = size * 0.23
-    ry = size * 0.40
-    points = []
-    for index in range(72):
-        import math
-        angle = 2 * math.pi * index / 72
-        points.append((cx + rx * math.cos(angle), cy + ry * math.sin(angle)))
-    draw.polygon(points, fill=(25, 52, 93, 255), outline=(105, 132, 172, 255), width=max(2, size // 55))
+    The football sits above the wordmark with no gap between them, so the
+    crop is sized to the largest square that fits between the image top and
+    the wordmark's first content row, centered on the ball. The ball's
+    pointed tips may lose a few pixels per side; invisible at icon sizes.
+    """
+    width, height = lockup.size
+    gray = lockup.convert("L")
+    corner = gray.getpixel((0, 0))
+    mask = gray.point(lambda v: 255 if abs(v - corner) > CONTENT_THRESHOLD else 0)
 
-    # Cyan and magenta football panels.
-    draw.arc((cx - rx * 1.02, cy - ry * 0.94, cx + rx * 1.02, cy + ry * 0.94), 205, 330, fill=(35, 224, 236, 255), width=max(4, size // 22))
-    draw.arc((cx - rx * 1.02, cy - ry * 0.94, cx + rx * 1.02, cy + ry * 0.94), 25, 150, fill=(204, 40, 235, 255), width=max(4, size // 22))
-    draw.arc((cx - rx * 0.82, cy - ry * 0.76, cx + rx * 0.82, cy + ry * 0.76), 198, 315, fill=(17, 145, 242, 255), width=max(3, size // 30))
-    draw.arc((cx - rx * 0.82, cy - ry * 0.76, cx + rx * 0.82, cy + ry * 0.76), 18, 135, fill=(170, 33, 207, 255), width=max(3, size // 30))
+    region_height = int(height * BALL_REGION_FRACTION)
+    ball_bbox = mask.crop((0, 0, width, region_height)).getbbox()
+    if not ball_bbox:
+        raise RuntimeError("No football found in lockup ball region")
+    left, upper, right, lower = ball_bbox
 
-    # White football laces.
-    lace_width = max(3, size // 28)
-    draw.line((cx - size * 0.16, cy - size * 0.18, cx + size * 0.16, cy + size * 0.18), fill=(245, 250, 255, 255), width=lace_width)
-    for offset in (-0.11, -0.035, 0.04, 0.115):
-        x = cx + size * offset
-        y = cy + size * offset
-        draw.line((x - size * 0.045, y - size * 0.045, x + size * 0.045, y + size * 0.045), fill=(245, 250, 255, 255), width=lace_width)
+    # First content row below the ball = top of the wordmark.
+    wordmark_top = height
+    for y in range(lower, height):
+        if mask.crop((0, y, width, y + 1)).getbbox():
+            wordmark_top = y
+            break
 
-    return image
+    side = min(int(max(right - left, lower - upper) * (1 + CROP_PADDING_FRACTION)), wordmark_top - 4)
+    cx = (left + right) // 2
+    x0 = min(max(cx - side // 2, 0), width - side)
+    y1 = wordmark_top - 4
+    y0 = max(y1 - side, 0)
+    return lockup.crop((x0, y0, x0 + side, y0 + side))
 
 
-def create_assets():
-    full = Image.new("RGBA", (768, 768), (8, 9, 43, 255))
-    background = Image.new("RGBA", full.size, (0, 0, 0, 0))
-    bg_draw = ImageDraw.Draw(background)
-    bg_draw.ellipse((-180, 20, 600, 600), fill=(10, 136, 205, 110))
-    bg_draw.ellipse((350, 260, 980, 900), fill=(132, 0, 205, 120))
-    background = background.filter(ImageFilter.GaussianBlur(80))
-    full.alpha_composite(background)
+def create_assets() -> None:
+    _ensure_assets_dir()
+    lockup = build_lockup_master()
+    lockup.save(LOCKUP_MASTER, optimize=True)
+    lockup.save(ASSETS / "jellyball-logo.png", optimize=True)
 
-    panel = Image.new("RGBA", (620, 620), (0, 0, 0, 0))
-    panel_draw = ImageDraw.Draw(panel)
-    panel_draw.rounded_rectangle((8, 8, 612, 612), radius=78, fill=(24, 35, 59, 235), outline=(99, 126, 169, 255), width=7)
-    panel_mark = football_mark(430)
-    panel.alpha_composite(panel_mark, (95, 45))
-    full.alpha_composite(panel, (74, 40))
+    mark = ball_mark(lockup)
 
-    draw = ImageDraw.Draw(full)
-    title = "JellyBall"
-    title_font = font(88, bold=True)
-    bbox = draw.textbbox((0, 0), title, font=title_font)
-    x = (768 - (bbox[2] - bbox[0])) // 2
-    y = 610
-    draw.text((x + 2, y + 2), title, font=title_font, fill=(8, 13, 34, 255))
-    draw.text((x, y), title, font=title_font, fill=(236, 244, 255, 255))
-    draw.text((x, y), "Jelly", font=title_font, fill=(38, 216, 232, 255))
-    draw.text((x, y + 3), "Jelly", font=title_font, fill=(208, 44, 229, 210))
-
-    full.save(ASSETS / "jellyball-logo.png", optimize=True)
-
-    icon = Image.new("RGBA", (256, 256), (8, 12, 34, 255))
-    icon_draw = ImageDraw.Draw(icon)
-    icon_draw.rounded_rectangle((4, 4, 252, 252), radius=42, fill=(24, 35, 59, 255), outline=(99, 126, 169, 255), width=4)
-    icon.alpha_composite(football_mark(220), (18, 18))
+    icon = mark.resize((256, 256), Image.Resampling.LANCZOS)
     icon.save(ASSETS / "jellyball-icon.png", optimize=True)
-    icon.save(ASSETS / "jellyball.ico", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+
+    ico_sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+    icon.save(ASSETS / "jellyball.ico", sizes=ico_sizes)
+    icon.save(ASSETS / "favicon.ico", sizes=ico_sizes)
+
+    mark.resize((32, 32), Image.Resampling.LANCZOS).save(ASSETS / "favicon-32.png", optimize=True)
+    mark.resize((180, 180), Image.Resampling.LANCZOS).save(ASSETS / "favicon-180.png", optimize=True)
 
 
 if __name__ == "__main__":
-    _ensure_assets_dir()
     create_assets()
     print(f"Created JellyBall assets in {ASSETS}")
