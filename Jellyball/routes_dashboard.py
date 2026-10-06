@@ -2,6 +2,7 @@
 channels, Multi-View, favorites)."""
 
 import asyncio
+import re
 import time
 import urllib.parse
 from datetime import datetime
@@ -69,6 +70,15 @@ from tunables import _advanced_settings_html, _apply_tunable, _coerce_tunable, _
 from version import __version__
 
 router = APIRouter()
+
+_MULTIVIEW_CHANNEL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _require_safe_channel_id(channel_id: str) -> str:
+    """Reject path-like channel ids before they reach filesystem joins."""
+    if not _MULTIVIEW_CHANNEL_ID_RE.fullmatch(channel_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid channel id")
+    return channel_id
 
 
 # Dashboard templates/static assets. Resolved with _resource_path so both the
@@ -592,6 +602,7 @@ async def create_multiview(
 
 @router.post("/multiview/{channel_id}/remove")
 async def remove_multiview(channel_id: str, auth: bool = Depends(verify_dashboard_auth)):
+    channel_id = _require_safe_channel_id(channel_id)
     data = stream_state.get(channel_id)
     if data and data.get("type") == "multiview":
         await _remove_channel(channel_id)
@@ -601,6 +612,7 @@ async def remove_multiview(channel_id: str, auth: bool = Depends(verify_dashboar
 
 @router.post("/multiview/{channel_id}/stop")
 async def stop_multiview(channel_id: str, auth: bool = Depends(verify_dashboard_auth)):
+    channel_id = _require_safe_channel_id(channel_id)
     data = stream_state.get(channel_id)
     if data and data.get("type") == "multiview":
         # Cancels a spawn in progress too, and keeps the grid stopped (viewers
@@ -613,6 +625,7 @@ async def stop_multiview(channel_id: str, auth: bool = Depends(verify_dashboard_
 async def start_multiview(channel_id: str, auth: bool = Depends(verify_dashboard_auth)):
     """Explicit start: clears a manual stop and any backoff, then starts the
     grid now (the idle monitor stops it again if nobody watches)."""
+    channel_id = _require_safe_channel_id(channel_id)
     data = stream_state.get(channel_id)
     if data and data.get("type") == "multiview":
         _clear_multiview_manual_stop(channel_id, "explicit start")
@@ -629,6 +642,7 @@ async def set_multiview_audio(
     active_audio_team_id: str = Form(...),
     auth: bool = Depends(verify_dashboard_auth),
 ):
+    channel_id = _require_safe_channel_id(channel_id)
     data = stream_state.get(channel_id)
     if not data or data.get("type") != "multiview":
         raise HTTPException(status_code=404, detail="Multi-View channel not found")

@@ -488,7 +488,10 @@ PORT_BIND_WAIT_SECONDS = bounded_float(os.getenv("PORT_BIND_WAIT_SECONDS", "30")
 
 
 def _port_is_free(host: str, port: int) -> bool:
-    bind_host = "0.0.0.0" if host in ("", "0.0.0.0") else host
+    # Probe on loopback when host is unspecified; never temporarily bind the
+    # availability check to all interfaces (CodeQL py/bind-socket-all-network-interfaces).
+    # Explicit 0.0.0.0 / :: still probes that address when the server will bind there.
+    bind_host = "127.0.0.1" if host == "" else host
     family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
     try:
         with socket.socket(family, socket.SOCK_STREAM) as probe:
@@ -563,7 +566,9 @@ def build_server(host: str, port: int):
 
 
 def _headless_host() -> str:
-    return os.getenv("JELLYBALL_HOST", "0.0.0.0" if sys.platform != "win32" else "127.0.0.1").strip() or "127.0.0.1"
+    # Default to loopback; Docker/compose sets JELLYBALL_HOST=0.0.0.0 explicitly
+    # when external exposure is intended.
+    return os.getenv("JELLYBALL_HOST", "127.0.0.1").strip() or "127.0.0.1"
 
 
 def run_headless(stop_event: Optional[threading.Event] = None) -> int:

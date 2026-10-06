@@ -1048,6 +1048,16 @@ class JellyballChangesTests(unittest.TestCase):
 
             self.assertTrue(asyncio.run(exercise()))
 
+    def test_wait_for_first_segment_rejects_path_traversal_segment_names(self):
+        from ffmpeg_proc import _safe_child_path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            self.assertIsNone(_safe_child_path(out_dir, "../etc/passwd"))
+            self.assertIsNone(_safe_child_path(out_dir, "a/b.ts"))
+            self.assertIsNone(_safe_child_path(out_dir, "a\\b.ts"))
+            self.assertEqual(_safe_child_path(out_dir, "seg_00001.ts"), out_dir / "seg_00001.ts")
+
     def test_wait_for_first_segment_returns_false_when_process_dies(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             out_dir = Path(tmpdir)
