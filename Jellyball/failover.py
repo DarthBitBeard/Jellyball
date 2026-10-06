@@ -602,6 +602,13 @@ async def _request_failover_unlocked(
     new_provider = candidates[next_index].get("provider", "Unknown")
     old_provider = active.get("provider", "Unknown")
     SESSIONS.poke(team_id)
+    # The session may be parked in the legacy passthrough (its old source was
+    # incompatible). The new candidate passed the session-compatibility filter
+    # in _pick_next_candidate, so hand it to the normalizing engine instead of
+    # leaving the passthrough serving it for the rest of the retry window.
+    session = SESSIONS.peek(team_id)
+    if session is not None:
+        session.reset_legacy()
     LOGGER.info(
         "Failover team=%s from=%s to=%s reason=%s",
         team_id, old_provider, new_provider, reason,
