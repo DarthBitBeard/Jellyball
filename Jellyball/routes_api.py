@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import shutil
 import time
 from datetime import datetime, timezone
 from typing import List
@@ -16,6 +17,7 @@ from state import is_multiview, stream_state
 import provider_tools
 from db import (
     _bulk_set_favorite_sync,
+    _connect_db,
     _export_teams_sync,
     _performance_stats_sync,
     _playback_stats_sync,
@@ -28,7 +30,9 @@ from jellyfin_client import load_status as load_jellyfin_status
 from updates import _update_available, _UPDATE_STATE
 from legacy_proxy import CHUNK_CACHE
 import engine_stats
+import epg
 import ffmpeg_proc
+import placeholder
 from sessions import SESSIONS
 from multiview import _multiview_cooldown_remaining, _MULTIVIEW_FAILURES, _MULTIVIEW_PROCESSES
 from failover import (
@@ -49,8 +53,92 @@ router = APIRouter()
 
 @router.get("/healthz")
 async def healthz():
-    """Unauthenticated liveness probe (Docker healthcheck, installer, tray)."""
+    """Unauthenticated liveness probe (Docker healthcheck, installer, tray).
+
+    Deliberately in-memory only: if this answers, the process is alive.
+    Use /readyz when you need to know the app can actually serve traffic.
+    """
     return {"status": "ok", "app": "jellyball", "version": __version__}
+
+
+# --- Readiness probe -----------------------------------------------------------
+# /readyz is the counterpart to /healthz: liveness says "the process is up",
+# readiness says "the process can do its job". Checks are ordered cheapest
+# first and the whole probe is bounded by _READYZ_TIMEOUT_SECONDS so a wedged
+# subsystem degrades the answer instead of hanging the probe.
+
+_READYZ_TIMEOUT_SECONDS = 10.0
+_READYZ_DISK_WARN_BYTES = 500 * 1024 * 1024
+_READYZ_DISK_FAIL_BYTES = 50 * 1024 * 1024
+
+
+def _check_database() -> dict:
+    """The DB must be readable AND writable (take and release the write lock)."""
+    try:
+        conn = _connect_db()
+        conn.execute("SELECT 1").fetchone()
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("ROLLBACK")
+        return {"status": "ok"}
+    except Exception as exc:  # locked, corrupt, or unwritable data dir
+        return {"status": "fail", "detail": type(exc).__name__}
+
+
+def _check_disk() -> dict:
+    """Free space on the data volume: fail when critically low, warn before that."""
+    try:
+        free = shutil.disk_usage(str(config.DATA_DIR)).free
+    except Exception as exc:
+        return {"status": "fail", "detail": type(exc).__name__}
+    if free < _READYZ_DISK_FAIL_BYTES:
+        return {"status": "fail", "detail": f"only {free // (1024 * 1024)} MiB free"}
+    if free < _READYZ_DISK_WARN_BYTES:
+        return {"status": "warn", "detail": f"only {free // (1024 * 1024)} MiB free"}
+    return {"status": "ok", "free_bytes": free}
+
+
+def _check_ffmpeg() -> dict:
+    """ffmpeg is only needed for Multi-View compositing, so a miss degrades."""
+    path = ffmpeg_proc.FFMPEG_PATH
+    found = bool(ffmpeg_proc.FFMPEG_AVAILABLE) or bool(shutil.which(path))
+    if found:
+        return {"status": "ok", "path": path}
+    return {"status": "warn", "detail": f"not found at {path}"}
+
+
+def _run_readiness_checks() -> dict:
+    return {
+        "database": _check_database(),
+        "disk": _check_disk(),
+        "ffmpeg": _check_ffmpeg(),
+    }
+
+
+@router.get("/readyz")
+async def readyz():
+    """Unauthenticated readiness probe: DB writability, disk space, ffmpeg.
+
+    Returns 200 with per-check detail; 503 when a critical check (database,
+    critically low disk) fails so orchestrators stop routing traffic here.
+    """
+    try:
+        checks = await asyncio.wait_for(
+            asyncio.to_thread(_run_readiness_checks), timeout=_READYZ_TIMEOUT_SECONDS
+        )
+    except Exception as exc:
+        checks = {"probe": {"status": "fail", "detail": type(exc).__name__}}
+    status = "ok"
+    for check in checks.values():
+        if check.get("status") == "fail":
+            status = "fail"
+            break
+        if check.get("status") in ("warn", "degraded"):
+            status = "degraded"
+    code = 503 if status == "fail" else 200
+    return JSONResponse(
+        status_code=code,
+        content={"status": status, "app": "jellyball", "version": __version__, "checks": checks},
+    )
 
 
 @router.get("/api/status")
@@ -71,9 +159,12 @@ async def api_status(auth: bool = Depends(verify_dashboard_auth)):
         active_index = data.get("active_index", 0)
         active = candidates[active_index] if 0 <= active_index < len(candidates) else None
         session = SESSIONS.peek(team_id)
+        guide = epg.now_next_for_channel(team_id, data)
         channels.append({
             "team_id": team_id,
             "name": data.get("name", team_id),
+            "now_title": guide["now"],
+            "next_title": guide["next"],
             "healthy": bool(data.get("is_healthy")),
             "watching": bool(session is not None and session.is_watched()),
             "on_placeholder": bool(session is not None and session.is_watched() and _session_on_placeholder(session)),
@@ -231,6 +322,39 @@ async def prometheus_metrics(auth: bool = Depends(verify_dashboard_auth)):
         "# HELP jellyball_playwright_pages_max Configured Playwright page cap.",
         "# TYPE jellyball_playwright_pages_max gauge",
         f"jellyball_playwright_pages_max {PLAYWRIGHT_MAX_PAGES}",
+    ]
+    race_stats = engine_stats.cold_race_stats()
+    tune_in = engine_stats.tune_in_latency_stats()
+    lines += [
+        "# HELP jellyball_cold_race_total Cold-start candidate races since start.",
+        "# TYPE jellyball_cold_race_total counter",
+        f"jellyball_cold_race_total {race_stats['total']}",
+        "# HELP jellyball_cold_race_won_total Cold-start races that picked a healthy candidate.",
+        "# TYPE jellyball_cold_race_won_total counter",
+        f"jellyball_cold_race_won_total {race_stats['won']}",
+        "# HELP jellyball_placeholder_fallbacks_total Tune-ins that started on the No-Signal placeholder.",
+        "# TYPE jellyball_placeholder_fallbacks_total counter",
+        f"jellyball_placeholder_fallbacks_total {engine_stats.placeholder_fallback_total()}",
+        "# HELP jellyball_tune_in_latency_ms_avg Average time to first segment per session run.",
+        "# TYPE jellyball_tune_in_latency_ms_avg gauge",
+        f"jellyball_tune_in_latency_ms_avg {tune_in['avg_ms']}",
+        "# HELP jellyball_tune_in_latency_ms_max Worst time to first segment per session run.",
+        "# TYPE jellyball_tune_in_latency_ms_max gauge",
+        f"jellyball_tune_in_latency_ms_max {tune_in['max_ms']}",
+        "# HELP jellyball_tune_in_latency_ms Last time-to-first-segment per channel.",
+        "# TYPE jellyball_tune_in_latency_ms gauge",
+    ]
+    for cid, snap in snapshots.items():
+        if snap.get("tune_in_latency_ms") is not None:
+            lines.append(f'jellyball_tune_in_latency_ms{{channel="{_prometheus_label(cid)}"}} {snap["tune_in_latency_ms"]}')
+    ph = placeholder.placeholder_health()
+    lines += [
+        "# HELP jellyball_placeholder_healthy 1 when the No-Signal placeholder ffmpeg is running and ready.",
+        "# TYPE jellyball_placeholder_healthy gauge",
+        f"jellyball_placeholder_healthy {1 if ph['ready'] else 0}",
+        "# HELP jellyball_placeholder_failures_total Consecutive No-Signal placeholder start failures.",
+        "# TYPE jellyball_placeholder_failures_total counter",
+        f"jellyball_placeholder_failures_total {ph['consecutive_failures']}",
     ]
     return "\n".join(lines) + "\n"
 
