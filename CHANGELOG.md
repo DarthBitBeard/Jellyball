@@ -5,6 +5,33 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-06
+
+### Added
+
+- Channel cards now show what is actually on: current and next programme titles from the guide data, live-updated by the dashboard's status poller. Dashboard usability pass: keyboard shortcuts (`/` focuses the channel filter, `1-6` switch tabs, `t` cycles the theme, `?` shows a cheatsheet), filter text and scroll position survive page reloads, the tab bar has proper tab semantics with arrow-key navigation, a recent-alerts history card on the Alerts tab, "no matches" empty states for the channel/catalog filters, parallel Performance tab loading, a visible date-picker icon in dark themes, readable control text in the Arctic theme, the bulk provider-override list now follows the real provider list, and the duplicated M3U/EPG URL card is gone.
+- Legacy playback failures now drive failover: 502s and stalls on the legacy passthrough proxy feed the same failure hooks as session playback, so a dying legacy source fails over in seconds instead of waiting for the probe cycle, and a session parked in legacy state leaves the passthrough as soon as failover picks a session-compatible candidate. Also: the cold-start candidate race can no longer 500 a tune-in (it falls back to No Signal), tune-in latency plus cold-start race win rate and placeholder-fallback counters are exposed on /metrics, the No-Signal placeholder's health is queryable for dashboard badging, media sequence numbers survive restarts via a persisted high-water mark, and Multi-View spawns on a member quorum instead of waiting the full warm-up timeout for the slowest member.
+- Ops hardening quick wins. `/healthz` stays the lightweight liveness probe and a new
+  unauthenticated `/readyz` endpoint reports database writability, disk space, and ffmpeg
+  availability, returning 503 when a critical check fails so orchestrators stop routing
+  traffic. Expensive endpoints (`/api/test-stream`, `/rescrape/*`, `/api/import-config`)
+  and the `/stream/*` segment path are now rate-limited per client IP as blast-radius
+  control. The Docker Compose service sets memory/CPU limits, drops all Linux capabilities,
+  and runs the root filesystem read-only with tmpfs for its scratch dirs. The opt-in
+  update check now cross-verifies the reported tag against the canonical GitHub Releases
+  API before showing the banner, and only accepts release links under this repo's tag
+  pages. The Linux install guide and README document the back-up-this-one-directory
+  disaster-recovery story for `JELLYBALL_DATA_DIR`.
+- Provider reliability: automatic domain failover and self-healing. When a provider's circuit breaker opens after repeated failures, its configured mirror domains (PROVIDER_MIRROR_DOMAINS) are probed automatically in the background; the first working mirror is suggested on the dashboard with one-click Apply, or applied immediately with PROVIDER_DOMAIN_AUTOSWITCH=1. The provider card also gains a "Retry now" button that clears the breaker and runs a test search at once. ESPN team-schedule lookups are now cached for 20 minutes, the merged team catalog is persisted to the database so restarts during an ESPN outage keep college coverage, and a nightly self-test dry-runs every provider and sends one digest of the degraded ones.
+- Credential settings (Jellyfin API key, Telegram bot token, Discord webhook URL) are now AES-encrypted at rest in the database, with the key kept in `settings-encryption.key` (0600) in the data directory; existing plaintext values migrate transparently on first read. The dashboard can now serve HTTPS via a self-signed certificate (`JELLYBALL_TLS=1`), the auto-generated dashboard password is 32 characters instead of 16, and both the dashboard password and the relay signing key can be rotated from the dashboard's Alerts tab.
+- Guided first-run setup wizard: a 3-step flow at `/setup` (connect Jellyfin with an inline connection test, pick teams from the catalog, copy the M3U/EPG endpoint URLs with a Jellyfin refresh check). The dashboard now shows a setup banner until channels exist and Jellyfin is connected.
+
+### Security
+
+- Harden CodeQL findings: avoid hashing dashboard passwords for the auth
+  cache, validate Multi-View channel ids and HLS segment names before
+  filesystem joins, and stop probing sockets on all interfaces by default.
+
 ## [2.1.3] - 2026-10-06
 
 ### Added

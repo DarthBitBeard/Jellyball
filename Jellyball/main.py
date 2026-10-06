@@ -539,6 +539,8 @@ def build_server(host: str, port: int):
         LOGGER.warning(
             "Serving the dashboard over HTTPS with a self-signed certificate "
             "(JELLYBALL_TLS=1); browsers will show a trust warning")
+    ssl_certfile = str(tls_files[0]) if tls_files is not None else None
+    ssl_keyfile = str(tls_files[1]) if tls_files is not None else None
     config = uvicorn.Config(
         app,
         host=host,
@@ -557,10 +559,8 @@ def build_server(host: str, port: int):
         # (comma-separated; default loopback). Lets the login lockout and
         # request logs see the real client IP behind a reverse proxy.
         forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
-        **(
-            {"ssl_certfile": str(tls_files[0]), "ssl_keyfile": str(tls_files[1])}
-            if tls_files is not None else {}
-        ),
+        ssl_certfile=ssl_certfile,
+        ssl_keyfile=ssl_keyfile,
     )
     return uvicorn.Server(config)
 

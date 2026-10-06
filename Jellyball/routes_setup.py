@@ -83,7 +83,11 @@ async def setup_wizard(request: Request, auth: bool = Depends(verify_dashboard_a
     """Render the 3-step setup wizard page."""
     cfg = await get_jellyfin_config()
     entries = await get_catalog_entries()
-    active_keys = {data.get("catalog_key") for data in stream_state.values() if data.get("catalog_key")}
+    active_keys = {
+        str(data["catalog_key"])
+        for data in stream_state.values()
+        if data.get("catalog_key")
+    }
     base_url = _public_base_url(request)
     return TEMPLATES.TemplateResponse(
         request,
@@ -186,7 +190,11 @@ async def setup_apply_teams(request: Request, auth: bool = Depends(verify_dashbo
     raw_keys = body.get("catalog_keys") or []
     selected_keys = {str(key).strip() for key in raw_keys if str(key).strip()}
     entries = await get_catalog_entries()
-    active_keys = {data.get("catalog_key") for data in stream_state.values() if data.get("catalog_key")}
+    active_keys = {
+        str(data["catalog_key"])
+        for data in stream_state.values()
+        if data.get("catalog_key")
+    }
     try:
         entries_by_key, keys_to_enable, keys_to_disable = _catalog_selection_changes(entries, selected_keys, active_keys)
     except ValueError as exc:
