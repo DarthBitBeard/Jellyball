@@ -587,10 +587,19 @@ _SAFE_SEGMENT_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _safe_child_path(root: Path, name: str) -> Optional[Path]:
-    """Join root/name only when name is a single safe path segment."""
+    """Join root/name only when the normalized path stays under root.
+
+    Uses os.path.normpath + startswith (CodeQL's recognized path-injection
+    sanitizer pattern); pathlib resolve/relative_to alone is not enough.
+    """
     if not name or not _SAFE_SEGMENT_NAME.fullmatch(name):
         return None
-    return root / name
+    root_str = os.path.realpath(str(root))
+    candidate = os.path.normpath(os.path.join(root_str, name))
+    root_prefix = root_str if root_str.endswith(os.sep) else root_str + os.sep
+    if not candidate.startswith(root_prefix):
+        return None
+    return Path(candidate)
 
 
 async def _wait_for_first_segment(
@@ -599,21 +608,27 @@ async def _wait_for_first_segment(
     timeout: float,
     poll_interval: float = 0.25,
 ) -> bool:
-    playlist = out_dir / "index.m3u8"
+    out_dir_str = os.path.realpath(str(out_dir))
+    playlist = os.path.normpath(os.path.join(out_dir_str, "index.m3u8"))
+    out_prefix = out_dir_str if out_dir_str.endswith(os.sep) else out_dir_str + os.sep
+    if not playlist.startswith(out_prefix):
+        return False
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if process.returncode is not None:
             return False
-        if playlist.exists():
+        if os.path.exists(playlist):
             try:
-                text = playlist.read_text(encoding="utf-8", errors="ignore")
+                with open(playlist, encoding="utf-8", errors="ignore") as handle:
+                    text = handle.read()
             except OSError:
                 text = ""
             if "#EXTINF" in text:
                 first_segment = next((line for line in text.splitlines() if line.endswith(".ts")), None)
-                segment_path = _safe_child_path(out_dir, first_segment) if first_segment else None
-                if segment_path is not None and segment_path.exists():
-                    return True
+                if first_segment and _SAFE_SEGMENT_NAME.fullmatch(first_segment):
+                    segment_path = os.path.normpath(os.path.join(out_dir_str, first_segment))
+                    if segment_path.startswith(out_prefix) and os.path.exists(segment_path):
+                        return True
         await asyncio.sleep(poll_interval)
     return False
 
