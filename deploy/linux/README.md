@@ -104,6 +104,38 @@ sudo systemctl start jellyball
 To roll back, stop the service, check out the previous tag, and restore the
 data folder copy. More in [`docs/UPGRADING.md`](../../docs/UPGRADING.md).
 
+## Backups and disaster recovery
+
+Everything Jellyball cannot rebuild lives in one directory:
+`/var/lib/jellyball` (or `$JELLYBALL_DATA_DIR` if you set one). That folder
+holds `sports_proxy.db` (channels, schedules, settings, provider history),
+`dashboard-password.txt`, `relay-signing.key`, your `.env`, and
+`jellyball.log`. Back up that single directory and you can rebuild from
+scratch; lose it and you start over.
+
+Back up while the service is stopped, or use SQLite's online backup against
+the running database:
+
+```bash
+# Option 1: stopped-service copy (simplest, always consistent)
+sudo systemctl stop jellyball
+sudo cp -a /var/lib/jellyball "/root/jellyball-backup-$(date +%F)"
+sudo systemctl start jellyball
+
+# Option 2: live backup without stopping (safe on a running database)
+sudo -u jellyball sqlite3 /var/lib/jellyball/sports_proxy.db \
+  ".backup '/root/jellyball-backup-$(date +%F)/sports_proxy.db'"
+sudo cp -a /var/lib/jellyball/dashboard-password.txt \
+  /var/lib/jellyball/relay-signing.key /var/lib/jellyball/.env \
+  "/root/jellyball-backup-$(date +%F)/"
+```
+
+Keep a few dated copies somewhere other than the same disk, and re-back-up
+after changing channels, providers, or alerting settings. To restore: stop
+the service, move the backup back into place with the `jellyball` user
+owning the files (`sudo chown -R jellyball:nogroup /var/lib/jellyball`),
+and start the service.
+
 ## Uninstall
 
 ```bash

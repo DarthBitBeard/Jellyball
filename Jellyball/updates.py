@@ -18,6 +18,11 @@ from version import __version__
 UPDATE_CHECK_URL = os.getenv(
     "UPDATE_CHECK_URL", "https://api.github.com/repos/DarthBitBeard/Jellyball/releases/latest"
 )
+# The URL above is env-overridable (tests, mirrors); this one is not. When the
+# two differ, the reported tag must match on both before we believe it, so a
+# DNS or config spoof of the check URL alone cannot plant a fake "update".
+CANONICAL_UPDATE_CHECK_URL = "https://api.github.com/repos/DarthBitBeard/Jellyball/releases/latest"
+RELEASE_TAG_URL_PREFIX = "https://github.com/DarthBitBeard/Jellyball/releases/tag/"
 UPDATE_CHECK_INTERVAL = 12 * 3600.0
 _UPDATE_STATE: Dict[str, object] = {"latest": "", "url": "", "checked_at": 0.0}
 
@@ -32,23 +37,53 @@ def _update_available() -> bool:
     return bool(latest) and _version_tuple(latest) > _version_tuple(__version__)
 
 
+async def _fetch_release_tag(client: httpx.AsyncClient, url: str) -> Tuple[str, str, bool]:
+    """Return (tag, html_url, is_final) for a GitHub Releases 'latest' response.
+
+    Raises on transport errors; returns ("", "", False) for non-200, drafts,
+    prereleases, or unparseable bodies so callers fail closed.
+    """
+    response = await client.get(
+        url,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": f"Jellyball/{__version__}"},
+    )
+    if response.status_code != 200:
+        return "", "", False
+    release = response.json()
+    if release.get("draft") or release.get("prerelease"):
+        return "", "", False
+    tag = str(release.get("tag_name") or "").lstrip("vV")
+    if not tag or not re.search(r"\d", tag):
+        return "", "", False
+    html_url = str(release.get("html_url") or "")
+    return tag, html_url, True
+
+
 async def check_for_update() -> None:
-    """One request to GitHub Releases (opt-in: Settings > Update check)."""
+    """Check GitHub Releases for a newer version (opt-in: Settings > Update check).
+
+    Display-only: the result feeds the dashboard banner, nothing is downloaded
+    or installed. When UPDATE_CHECK_URL is overridden, the reported tag is
+    cross-checked against the canonical API response and ignored on mismatch.
+    """
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            response = await client.get(
-                UPDATE_CHECK_URL,
-                headers={"Accept": "application/vnd.github+json", "User-Agent": f"Jellyball/{__version__}"},
-            )
-        if response.status_code != 200:
-            return
-        release = response.json()
-        tag = str(release.get("tag_name") or "").lstrip("vV")
-        html_url = str(release.get("html_url") or "")
-        if tag and not release.get("draft") and not release.get("prerelease"):
+            tag, html_url, is_final = await _fetch_release_tag(client, UPDATE_CHECK_URL)
+            if not is_final:
+                return
+            if UPDATE_CHECK_URL != CANONICAL_UPDATE_CHECK_URL:
+                canonical_tag, _, canonical_final = await _fetch_release_tag(
+                    client, CANONICAL_UPDATE_CHECK_URL
+                )
+                if not canonical_final or canonical_tag != tag:
+                    LOGGER.warning(
+                        "Update check: tag %r from %s does not match canonical %r; ignoring",
+                        tag, UPDATE_CHECK_URL, canonical_tag,
+                    )
+                    return
             _UPDATE_STATE.update({
                 "latest": tag,
-                "url": html_url if html_url.startswith("https://github.com/") else "",
+                "url": html_url if html_url.startswith(RELEASE_TAG_URL_PREFIX) else "",
                 "checked_at": time.time(),
             })
             if _update_available():
