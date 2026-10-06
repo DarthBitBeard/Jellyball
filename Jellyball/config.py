@@ -186,10 +186,9 @@ PORT = bounded_int(os.getenv("PORT", "8000"), 8000, 1, 65535)
 
 
 def _find_available_port(preferred_port: int, host: str = "127.0.0.1") -> int:
-    # Probe the same bind host the server will use: a port held on a LAN
-    # interface only reads as "free" on 127.0.0.1, which used to let two
-    # instances end up running on different interfaces.
-    bind_host = "0.0.0.0" if host in ("", "0.0.0.0") else host
+    # Never probe by binding to all interfaces; keep probing on loopback only.
+    # This avoids temporary wildcard binds (0.0.0.0 / "") during port checks.
+    bind_host = "127.0.0.1" if host in ("", "0.0.0.0") else host
     family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
     candidates = list(range(preferred_port, 65536)) + list(range(1, preferred_port))
     for candidate in candidates:
