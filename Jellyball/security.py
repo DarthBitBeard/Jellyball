@@ -179,8 +179,10 @@ def verify_dashboard_auth(request: Request = None, credentials: Optional[HTTPBas
 
     # compare_digest on str raises TypeError for non-ASCII input; compare bytes.
     is_user_ok = secrets.compare_digest(credentials.username.encode("utf-8"), DASHBOARD_USERNAME.encode("utf-8"))
-    cache_key = hashlib.sha256(
-        f"{credentials.username}\0{credentials.password}\0{DASHBOARD_PASSWORD}".encode("utf-8")
+    cache_key = hmac.new(
+        DASHBOARD_PASSWORD.encode("utf-8"),
+        f"{credentials.username}\0{credentials.password}".encode("utf-8"),
+        hashlib.sha256,
     ).hexdigest()
     verified_at = _VERIFIED_CREDENTIALS.get(cache_key)
     if verified_at is not None and now - verified_at < _VERIFIED_CREDENTIALS_TTL:
