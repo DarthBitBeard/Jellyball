@@ -589,6 +589,7 @@ async def _wait_for_first_segment(
 ) -> bool:
     playlist = out_dir / "index.m3u8"
     deadline = time.monotonic() + timeout
+    resolved_out_dir = out_dir.resolve()
     while time.monotonic() < deadline:
         if process.returncode is not None:
             return False
@@ -599,8 +600,15 @@ async def _wait_for_first_segment(
                 text = ""
             if "#EXTINF" in text:
                 first_segment = next((line for line in text.splitlines() if line.endswith(".ts")), None)
-                if first_segment and (out_dir / first_segment).exists():
-                    return True
+                if first_segment:
+                    candidate = out_dir / first_segment
+                    try:
+                        resolved_candidate = candidate.resolve()
+                        resolved_candidate.relative_to(resolved_out_dir)
+                    except (OSError, ValueError):
+                        resolved_candidate = None
+                    if resolved_candidate is not None and resolved_candidate.exists():
+                        return True
         await asyncio.sleep(poll_interval)
     return False
 
