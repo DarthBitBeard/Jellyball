@@ -107,6 +107,82 @@ class HttpSurfaceTests(unittest.TestCase):
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn(__version__, response.text)
 
+    def test_api_status_reports_now_next_programme_titles(self):
+        response = _request("GET", "/api/status", password="secret", auth=("admin", "secret"))
+        self.assertEqual(response.status_code, 200)
+        channels = response.json()["channels"]
+        self.assertTrue(channels)
+        for channel in channels:
+            self.assertIn("now_title", channel)
+            self.assertIn("next_title", channel)
+            self.assertIsInstance(channel["now_title"], str)
+            self.assertIsInstance(channel["next_title"], str)
+
+
+def _sched(hours_from: float, hours_to: float) -> dict:
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    fmt = "%Y%m%d%H%M%S +0000"
+    return {
+        "start_time": (now + timedelta(hours=hours_from)).strftime(fmt),
+        "stop_time": (now + timedelta(hours=hours_to)).strftime(fmt),
+    }
+
+
+class NowNextTests(unittest.TestCase):
+    """epg.now_next_for_channel() mirrors the guide title logic without
+    fetching: it only reads the already-cached TVGuide data."""
+
+    def test_standby_channel_reports_standby(self):
+        guide = epg.now_next_for_channel("test_team", {"name": "Test Team"})
+        self.assertEqual(guide, {"now": "Test Team Standby", "next": ""})
+
+    def test_upcoming_event_is_next(self):
+        data = {"name": "Test Team", **_sched(1, 3)}
+        guide = epg.now_next_for_channel("test_team", data)
+        self.assertEqual(guide, {"now": "Test Team Standby", "next": "Test Team Scheduled Event"})
+
+    def test_live_event_is_now(self):
+        data = {"name": "Test Team", **_sched(-1, 1)}
+        guide = epg.now_next_for_channel("test_team", data)
+        self.assertEqual(guide, {"now": "Test Team Scheduled Event", "next": "Test Team Standby"})
+
+    def test_past_event_falls_back_to_standby(self):
+        data = {"name": "Test Team", **_sched(-3, -1)}
+        guide = epg.now_next_for_channel("test_team", data)
+        self.assertEqual(guide, {"now": "Test Team Standby", "next": ""})
+
+    def test_off_season_reports_off_season(self):
+        data = {"name": "Test Team", "schedule_status": "off_season", "category": "nfl"}
+        guide = epg.now_next_for_channel("test_team", data)
+        self.assertTrue(guide["now"].startswith("Off-season"))
+        self.assertEqual(guide["next"], "")
+
+    def test_always_live_uses_cached_tvguide_programmes(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        epg._TVGUIDE_EPG_CACHE["test_live"] = [
+            {
+                "startTime": int((now - timedelta(minutes=30)).timestamp()),
+                "endTime": int((now + timedelta(minutes=30)).timestamp()),
+                "title": "Big Game Live",
+            },
+            {
+                "startTime": int((now + timedelta(minutes=30)).timestamp()),
+                "endTime": int((now + timedelta(minutes=90)).timestamp()),
+                "title": "Postgame Show",
+            },
+        ]
+        try:
+            guide = epg.now_next_for_channel("test_live", {"name": "Test Live", "always_live": True})
+            self.assertEqual(guide, {"now": "Big Game Live", "next": "Postgame Show"})
+        finally:
+            epg._TVGUIDE_EPG_CACHE.pop("test_live", None)
+
+    def test_always_live_without_cache_falls_back_to_live_label(self):
+        guide = epg.now_next_for_channel("no_cache", {"name": "No Cache", "always_live": True})
+        self.assertEqual(guide, {"now": "No Cache Live", "next": ""})
+
 
 if __name__ == "__main__":
     unittest.main()
