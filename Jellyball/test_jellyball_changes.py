@@ -206,7 +206,11 @@ class JellyballChangesTests(unittest.TestCase):
         # Providers without built-ins get an empty list.
         self.assertEqual(_provider_mirror_list("NoSuchProvider"), [])
         # Env-configured mirrors come first and duplicates collapse.
-        with patch.dict(scrapers_module.PROVIDER_MIRROR_DOMAINS, {"DaddyLive": ["https://dlhd.st", "https://custom.example"]}, clear=False):
+        with patch.dict(
+            scrapers_module.PROVIDER_MIRROR_DOMAINS,
+            {"DaddyLive": ["https://custom.example", "https://dlhd.st"]},
+            clear=False,
+        ):
             mirrors = _provider_mirror_list("DaddyLive")
             self.assertEqual(mirrors[0], "https://custom.example")
             self.assertEqual(mirrors.count("https://dlhd.st"), 1)
