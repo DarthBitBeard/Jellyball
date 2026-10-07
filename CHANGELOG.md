@@ -5,6 +5,14 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-10-07
+
+### Fixed
+
+- Fixed the ESPN channel sometimes tuning the Brazilian "ESPN 4" feed from the IPTV-Org playlist: bare "espn" searches no longer match numbered regional variants ("ESPN 3", "ESPN 4") or "ESPN Deportes".
+- DaddyLive domain failover now ships with built-in mirror domains (dlhd.st, dlhd.so, dlive.sx, daddylive.app), so a dead default domain is retried automatically instead of failing until mirrors are configured by hand. TheTVApp's default domain was updated to thetvapp.st (the old thetvapp67.com now redirects there), and repeated Cloudflare-bypass warnings are throttled to one per page every 15 minutes.
+- The dashboard tab bar now scales with the screen: tab buttons shrink at narrower widths, the active tab scrolls into view, and a fade edge hints when more tabs are a scroll away (e.g. the Logs tab).
+
 ## [2.2.0] - 2026-10-06
 
 ### Added

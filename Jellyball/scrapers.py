@@ -391,11 +391,17 @@ _BYPASS_WARNED_AT: Dict[str, float] = {}
 def _log_bypass_failure_throttled(provider_name: str, page_url: str, exc: BaseException) -> None:
     key = f"{provider_name}|{page_url}"
     now = time.monotonic()
-    if now - _BYPASS_WARNED_AT.get(key, 0.0) >= _BYPASS_WARN_COOLDOWN_SECONDS:
+    # Missing keys must warn: defaulting the last-warn time to 0.0 falsely
+    # throttles every first warning on hosts whose monotonic clock is still
+    # under the cooldown (fresh CI VMs, recently rebooted boxes).
+    last = _BYPASS_WARNED_AT.get(key)
+    if last is None or now - last >= _BYPASS_WARN_COOLDOWN_SECONDS:
         _BYPASS_WARNED_AT[key] = now
         _log_failure(f"{provider_name} Cloudflare bypass for {page_url}", exc)
     else:
         LOGGER.debug("%s Cloudflare bypass for %s failed again (throttled)", provider_name, page_url)
+
+
 # Mirror that probed healthy while the provider's breaker was open, awaiting
 # the operator's one-click Apply (cleared on apply, dismiss, or a successful
 # search through _provider_breaker_success).
