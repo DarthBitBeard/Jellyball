@@ -352,6 +352,50 @@ def _load_provider_mirror_domains() -> Dict[str, List[str]]:
 
 PROVIDER_MIRROR_DOMAINS: Dict[str, List[str]] = _load_provider_mirror_domains()
 PROVIDER_DOMAIN_AUTOSWITCH = os.getenv("PROVIDER_DOMAIN_AUTOSWITCH", "0") == "1"
+
+# --- Built-in provider mirror domains (2.2.1) ---------------------------------
+# Aggregator domains die regularly; the 2.2.0 failover only probed mirrors the
+# operator listed in PROVIDER_MIRROR_DOMAINS, so a dead default domain just
+# failed forever on a fresh install. These well-known alternates are probed too
+# (env-configured mirrors first), keeping the suggestion-only default and the
+# PROVIDER_DOMAIN_AUTOSWITCH=1 auto-apply behavior unchanged.
+BUILTIN_PROVIDER_MIRRORS: Dict[str, List[str]] = {
+    "DaddyLive": [
+        "https://dlhd.st",
+        "https://dlhd.so",
+        "https://dlive.sx",
+        "https://daddylive.app",
+    ],
+}
+
+
+def _provider_mirror_list(provider_name: str) -> List[str]:
+    """Env-configured mirrors first, then built-ins, deduplicated."""
+    seen: Set[str] = set()
+    ordered: List[str] = []
+    for mirror in PROVIDER_MIRROR_DOMAINS.get(provider_name, []) + BUILTIN_PROVIDER_MIRRORS.get(provider_name, []):
+        key = (mirror or "").rstrip("/").lower()
+        if key and key not in seen:
+            seen.add(key)
+            ordered.append(key)
+    return ordered
+
+
+# The Playwright Cloudflare-bypass warning fires per page per search; when a
+# provider's domain is down (DNS failure, Cloudflare block) it would spam every
+# refresh cycle. Warn once per page per cooldown, debug-log the repeats.
+_BYPASS_WARN_COOLDOWN_SECONDS = 900.0
+_BYPASS_WARNED_AT: Dict[str, float] = {}
+
+
+def _log_bypass_failure_throttled(provider_name: str, page_url: str, exc: BaseException) -> None:
+    key = f"{provider_name}|{page_url}"
+    now = time.monotonic()
+    if now - _BYPASS_WARNED_AT.get(key, 0.0) >= _BYPASS_WARN_COOLDOWN_SECONDS:
+        _BYPASS_WARNED_AT[key] = now
+        _log_failure(f"{provider_name} Cloudflare bypass for {page_url}", exc)
+    else:
+        LOGGER.debug("%s Cloudflare bypass for %s failed again (throttled)", provider_name, page_url)
 # Mirror that probed healthy while the provider's breaker was open, awaiting
 # the operator's one-click Apply (cleared on apply, dismiss, or a successful
 # search through _provider_breaker_success).
@@ -373,7 +417,7 @@ def _maybe_probe_provider_mirrors(provider_name: str) -> None:
     """After the breaker opens, probe the provider's configured mirrors once
     in the background. Guarded against duplicate probes and against providers
     with no mirrors configured or a suggestion already pending."""
-    if not PROVIDER_MIRROR_DOMAINS.get(provider_name):
+    if not _provider_mirror_list(provider_name):
         return
     if provider_name in _MIRROR_PROBE_INFLIGHT:
         return
@@ -390,7 +434,7 @@ async def _probe_provider_mirrors(provider_name: str) -> None:
             return
         current = (provider.base_url or "").rstrip("/")
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            for mirror in PROVIDER_MIRROR_DOMAINS.get(provider_name, []):
+            for mirror in _provider_mirror_list(provider_name):
                 if mirror == current:
                     continue
                 if not _validate_upstream_url(mirror):
@@ -528,7 +572,7 @@ class HtmlAggregatorScraper(BaseProvider):
                             pass
                     page_html = await page.content()
             except Exception as exc:
-                _log_failure(f"{self.name} Cloudflare bypass for {page_url}", exc)
+                _log_bypass_failure_throttled(self.name, page_url, exc)
         return page_html
 
     async def _fetch_index_page(self, client: httpx.AsyncClient, page_url: str, browser: Optional[Browser]) -> Optional[str]:
@@ -910,7 +954,7 @@ class TheTVAppScraper(HtmlAggregatorScraper):
     def __init__(self):
         super().__init__(
             "TheTVApp", 
-            os.getenv("AGGREGATOR_5_URL", "https://thetvapp67.com"), 
+            os.getenv("AGGREGATOR_5_URL", "https://thetvapp.st"), 
             ["/tv/"], 
             ["/tv/", "/watch/", "/channel/", "/sports-channels/"]
         )
@@ -1087,7 +1131,22 @@ _DISALLOWED_CHANNEL_SUBSTRINGS = {
     "cbs": ("sports", "golazo", "news"),
     "nbc": ("sports", "news", "universo"),
     "abc": ("news",),
+    "espn": ("deportes",),
 }
+
+
+def _espn_number_mismatch(term_fold: str, value: str) -> bool:
+    """True when the channel name carries an ESPN-family number the term didn't ask for.
+
+    The IPTV-Org playlist (and some aggregator listings) carries numbered regional
+    feeds like "ESPN 3"/"ESPN 4" that word-boundary matching would otherwise accept
+    for a bare "espn" search, letting the wrong feed win the candidate ranking.
+    """
+    m = re.search(r"(?<![a-z0-9])espn\s*([0-9]+)", value)
+    if not m:
+        return False
+    want = {"espn": None, "espn2": "2", "espnu": None}.get(term_fold)
+    return m.group(1) != want
 
 
 def _channel_term_matches(text: str, terms: List[str]) -> bool:
@@ -1100,6 +1159,10 @@ def _channel_term_matches(text: str, terms: List[str]) -> bool:
         if re.search(rf"(?<![a-z0-9]){re.escape(term_fold)}(?![a-z0-9])", value):
             # If searching for ESPN/ESPN2/ESPNU/FS1/FS2, do not falsely match ESPN+ or RedZone+
             if term_fold in {"espn", "espn2", "espnu"} and re.search(rf"(?<![a-z0-9]){re.escape(term_fold)}\s*\+", value):
+                continue
+            # Bare "espn" must not match numbered regional feeds ("ESPN 3", "ESPN 4");
+            # "espn2" must not match "ESPN 3", etc.
+            if term_fold in {"espn", "espn2", "espnu"} and _espn_number_mismatch(term_fold, value):
                 continue
             disallowed = _DISALLOWED_CHANNEL_SUBSTRINGS.get(term_fold)
             if disallowed and any(re.search(rf"(?<![a-z0-9]){re.escape(sub)}(?![a-z0-9])", value) for sub in disallowed):
