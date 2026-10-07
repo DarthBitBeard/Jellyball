@@ -1,0 +1,1 @@
+Fixed the ESPN channel sometimes tuning the Brazilian "ESPN 4" feed from the IPTV-Org playlist: bare "espn" searches no longer match numbered regional variants ("ESPN 3", "ESPN 4") or "ESPN Deportes".

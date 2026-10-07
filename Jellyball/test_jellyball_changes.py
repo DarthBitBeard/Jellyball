@@ -35,6 +35,10 @@ from scrapers import (
     _channel_term_matches,
     _is_non_english_channel,
     _stream_matches_requested_event,
+    _provider_mirror_list,
+    _log_bypass_failure_throttled,
+    _BYPASS_WARNED_AT,
+    BUILTIN_PROVIDER_MIRRORS,
 )
 from db import (
     _performance_stats_sync,
@@ -161,6 +165,17 @@ class JellyballChangesTests(unittest.TestCase):
         self.assertFalse(_channel_term_matches("ESPN2 USA", ["espn"]))
         self.assertTrue(_channel_term_matches("ESPN2 USA", ["espn2"]))
         self.assertFalse(_channel_term_matches("NESN USA", ["espn"]))
+        # Numbered regional feeds must not match the bare network (2.2.1: ESPN 4
+        # from the IPTV-Org playlist was winning the ESPN candidate ranking).
+        self.assertFalse(_channel_term_matches("ESPN 4 (1080p)", ["espn"]))
+        self.assertFalse(_channel_term_matches("ESPN 3 (1080p)", ["espn"]))
+        self.assertFalse(_channel_term_matches("ESPN 4 (1080p)", ["espn2"]))
+        self.assertFalse(_channel_term_matches("ESPN 3 (1080p)", ["espn2"]))
+        self.assertTrue(_channel_term_matches("ESPN (1080p)", ["espn"]))
+        self.assertTrue(_channel_term_matches("ESPN 2", ["espn2", "espn 2"]))
+        self.assertFalse(_channel_term_matches("ESPN Deportes HD (720p)", ["espn"]))
+        self.assertFalse(_channel_term_matches("ESPN 4 (1080p)", ["espnu", "espn u"]))
+        self.assertTrue(_channel_term_matches("ESPNU (720p)", ["espnu", "espn u"]))
         # Broadcast networks disambiguation
         self.assertTrue(_channel_term_matches("FOX USA", ["fox"]))
         self.assertFalse(_channel_term_matches("FOX Sports 1 USA", ["fox"]))
@@ -179,6 +194,33 @@ class JellyballChangesTests(unittest.TestCase):
         self.assertTrue(_channel_term_matches("CW USA", ["cw"]))
         self.assertTrue(_channel_term_matches("TBS USA", ["tbs"]))
         self.assertTrue(_channel_term_matches("TruTV USA", ["trutv"]))
+
+    def test_provider_mirror_list_prefers_env_then_builtins_deduped(self):
+        import scrapers as scrapers_module
+
+        mirrors = _provider_mirror_list("DaddyLive")
+        # Built-ins are present even with no env config.
+        for builtin in BUILTIN_PROVIDER_MIRRORS["DaddyLive"]:
+            self.assertIn(builtin, mirrors)
+        self.assertEqual(mirrors, sorted(set(mirrors), key=mirrors.index))
+        # Providers without built-ins get an empty list.
+        self.assertEqual(_provider_mirror_list("NoSuchProvider"), [])
+        # Env-configured mirrors come first and duplicates collapse.
+        with patch.dict(scrapers_module.PROVIDER_MIRROR_DOMAINS, {"DaddyLive": ["https://dlhd.st", "https://custom.example"]}, clear=False):
+            mirrors = _provider_mirror_list("DaddyLive")
+            self.assertEqual(mirrors[0], "https://custom.example")
+            self.assertEqual(mirrors.count("https://dlhd.st"), 1)
+
+    def test_bypass_failure_warning_is_throttled(self):
+        _BYPASS_WARNED_AT.clear()
+        exc = RuntimeError("net::ERR_NAME_NOT_RESOLVED")
+        with patch("scrapers._log_failure") as mock_log:
+            _log_bypass_failure_throttled("DaddyLive", "https://dlhd.pk/x.php", exc)
+            _log_bypass_failure_throttled("DaddyLive", "https://dlhd.pk/x.php", exc)
+            _log_bypass_failure_throttled("DaddyLive", "https://dlhd.pk/y.php", exc)
+            # Two distinct pages warned once each; the repeat was throttled.
+            self.assertEqual(mock_log.call_count, 2)
+        _BYPASS_WARNED_AT.clear()
 
     def test_always_live_filter_accepts_english_and_rejects_explicit_regions(self):
         self.assertFalse(_is_non_english_channel("ESPN USA"))
