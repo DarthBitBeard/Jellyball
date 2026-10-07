@@ -353,7 +353,7 @@ Webhook delivery retries up to twice (honoring `Retry-After`, capped at
 | `AGGREGATOR_2_URL` | `https://mybuffstreams.plus` | MyBuffStreams base URL | Domains |
 | `AGGREGATOR_3_URL` | `https://methstreams.click` | MethStreams base URL | Domains |
 | `AGGREGATOR_4_URL` | `https://thestreameast.top` | StreamEast base URL | Domains |
-| `AGGREGATOR_5_URL` | `https://thetvapp67.com` | TheTVApp base URL (24/7 linear channels) | Domains |
+| `AGGREGATOR_5_URL` | `https://thetvapp.st` | TheTVApp base URL (24/7 linear channels) | Domains |
 | `AGGREGATOR_6_URL` | `https://dlhd.pk` | DaddyLive base URL (24/7 linear channels) | Domains |
 | `AGGREGATOR_9_URL` | `https://footybite.im` | Footybite base URL | Domains |
 | `AGGREGATOR_10_URL` | `https://1stream.ws` | 1Stream base URL | Domains |

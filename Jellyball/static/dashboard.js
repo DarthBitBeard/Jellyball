@@ -130,6 +130,14 @@ function handleGlobalShortcuts(e) {
         if (tab && document.getElementById('btn-' + tab)) switchTab(tab);
     }
 }
+function updateTabsOverflow() {
+    // 2.2.1: hint (via the .has-overflow fade in dashboard.css) when the tab bar
+    // has more tabs to the right than fit on screen.
+    const nav = document.querySelector('.tabs-nav');
+    if (!nav) return;
+    const canScrollRight = nav.scrollWidth - nav.clientWidth - nav.scrollLeft > 4;
+    nav.classList.toggle('has-overflow', canScrollRight);
+}
 function switchTab(tabName) {
     document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
     document.querySelectorAll('.tab-btn').forEach(el => {
@@ -144,6 +152,9 @@ function switchTab(tabName) {
         btn.classList.add('active');
         btn.setAttribute('aria-selected', 'true');
         btn.setAttribute('tabindex', '0');
+        // 2.2.1: keep the active tab visible when the bar overflows.
+        try { btn.scrollIntoView({block: 'nearest', inline: 'nearest'}); } catch (e) {}
+        updateTabsOverflow();
     }
     if (tabName === 'logs') loadLogs();
     if (tabName === 'performance' && window.refreshPerformanceTab) window.refreshPerformanceTab(true);
@@ -506,6 +517,12 @@ window.addEventListener('DOMContentLoaded', () => {
     updateCatalogSelectionCount();
     pollChannelStatus();
     pollMultiviewStatus();
+
+    // 2.2.1: keep the tab-bar overflow hint accurate as the viewport changes.
+    updateTabsOverflow();
+    window.addEventListener('resize', updateTabsOverflow);
+    const tabsNav = document.querySelector('.tabs-nav');
+    if (tabsNav) tabsNav.addEventListener('scroll', updateTabsOverflow, {passive: true});
 
     const statusMessages = {
         'jellyfin_success': '✅ Jellyfin connection successful!',
