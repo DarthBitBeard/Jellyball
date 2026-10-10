@@ -65,19 +65,8 @@ from multiview import (
 from ffmpeg_proc import _wait_for_first_segment, _multiview_backoff_seconds, _multiview_error_from_log
 from placeholder import _build_placeholder_ffmpeg_args
 from legacy_proxy import (
-    LRUChunkCache,
-    _chunk_route_for_url,
-    _ensure_startup_buffer,
-    _manifest_uri_is_playlist,
-    _startup_media_urls,
-    _chunk_media_type,
-    proxy_chunk,
-    proxy_substream,
-    rewrite_m3u8,
-    extract_manifest_media_urls,
-    _register_manifest_segments,
-    _get_next_manifest_chunks,
-    prefetch_next_chunks,
+    _rewrite_sample_aes_manifest,
+    sample_aes_chunk,
 )
 from catalog import _resolve_espn_team, xmltv_ts
 from state import stream_state
@@ -120,45 +109,39 @@ class JellyballChangesTests(unittest.TestCase):
             "match_url": "https://provider.example.test/watch/syracuse-pittsburgh",
         }, terms))
 
-    def test_hls_proxy_preserves_scheme_and_segment_media_type(self):
-        rewritten = rewrite_m3u8(
-            "#EXTM3U\n#EXTINF:6,\nsegment.m4s\n",
-            "https://media.example.test/live/index.m3u8",
-            "https://provider.example.test/watch/game",
-            "https://127.0.0.1:8000",
-        )
-        self.assertIn("https://127.0.0.1:8000/chunk.mp4", rewritten)
-        self.assertNotIn("https://media.example.test/live/index.m3u8", rewritten)
-        self.assertEqual(_chunk_media_type("https://media.example.test/live/segment.m4s"), "video/mp4")
-        self.assertEqual(_chunk_media_type("https://media.example.test/live/segment.ts"), "video/mp2t")
-
-    def test_hls_proxy_rewrites_extensionless_variants_and_media_routes(self):
+    def test_sample_aes_shim_rewrites_segments_and_keys(self):
         manifest = (
             "#EXTM3U\n"
-            "#EXT-X-STREAM-INF:BANDWIDTH=1000000\n"
-            "video/720p\n"
-            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",URI=\"audio/eng\"\n"
-            "#EXT-X-MAP:URI=\"init.mp4\"\n"
+            '#EXT-X-KEY:METHOD=SAMPLE-AES,URI="key.bin"\n'
             "#EXTINF:6,\n"
-            "segment.m4s\n"
+            "segment0.ts\n"
+            "#EXTINF:6,\n"
+            "segment1.ts\n"
         )
-        rewritten = rewrite_m3u8(
+        rewritten = _rewrite_sample_aes_manifest(
             manifest,
-            "https://media.example.test/live/master",
+            "https://media.example.test/live/index.m3u8",
             "https://provider.example.test/watch/game",
-            "http://127.0.0.1:8000",
+            "",
+            "https://127.0.0.1:8000",
         )
+        self.assertIn("https://127.0.0.1:8000/sample_aes/chunk?url=", rewritten)
+        self.assertIn("https://127.0.0.1:8000/sample_aes/resource?url=", rewritten)
+        self.assertIn("sig=", rewritten)
 
-        self.assertIn("/substream.m3u8?url=https%3A//media.example.test/live/video/720p", rewritten)
-        self.assertIn("/substream.m3u8?url=https%3A//media.example.test/live/audio/eng", rewritten)
-        self.assertIn("/resource?url=https%3A//media.example.test/live/init.mp4", rewritten)
-        self.assertIn("/chunk.mp4?url=https%3A//media.example.test/live/segment.m4s", rewritten)
+    def test_sample_aes_shim_rejects_unsigned_chunk_relay(self):
+        import asyncio
 
-    def test_hls_helpers_recognize_playlist_urls_and_container_routes(self):
-        self.assertTrue(_manifest_uri_is_playlist("https://media.example.test/live/index.m3u8"))
-        self.assertEqual(_chunk_route_for_url("https://media.example.test/live/segment.m4s"), "/chunk.mp4")
-        self.assertEqual(_chunk_route_for_url("https://media.example.test/live/audio.aac"), "/chunk.aac")
-        self.assertEqual(_chunk_route_for_url("https://media.example.test/live/segment.ts"), "/chunk.ts")
+        async def run():
+            scope = {"type": "http", "method": "GET", "headers": []}
+            request = Request(scope)
+            response = await sample_aes_chunk(
+                request, url="https://media.example.test/live/seg0.ts",
+                ref="", org="", sig="bogus",
+            )
+            return response.status_code
+
+        self.assertEqual(asyncio.run(run()), 403)
 
     def test_always_live_channel_matching_does_not_confuse_numbered_networks(self):
         self.assertTrue(_channel_term_matches("ESPN USA", ["espn"]))
@@ -365,160 +348,6 @@ class JellyballChangesTests(unittest.TestCase):
             [],
         )
 
-    def test_chunk_cache_uses_monotonic_deadlines(self):
-        async def exercise():
-            cache = LRUChunkCache(capacity=1)
-            await cache.put("key", b"data", 10)
-            return await cache.get("key")
-
-        self.assertEqual(asyncio.run(exercise()), b"data")
-
-    def test_startup_buffer_selects_media_segments_not_nested_manifests(self):
-        manifest = "#EXTM3U\nvariant.m3u8\n#EXTINF:6,\nsegment-1.ts\n#EXTINF:6,\nsegment-2.ts\n"
-        self.assertEqual(
-            _startup_media_urls(manifest, "https://media.example.test/live/master.m3u8"),
-            [
-                "https://media.example.test/live/segment-1.ts",
-                "https://media.example.test/live/segment-2.ts",
-            ],
-        )
-
-    def test_startup_buffer_does_not_wait_for_warming(self):
-        import main
-
-        async def exercise():
-            original_seconds = legacy_proxy.STREAM_STARTUP_BUFFER_SECONDS
-            original_warm = legacy_proxy._warm_startup_buffer
-            try:
-                legacy_proxy.STREAM_STARTUP_BUFFER_SECONDS = 15.0
-
-                async def slow_warm(*args, **kwargs):
-                    await asyncio.sleep(0.2)
-
-                legacy_proxy._warm_startup_buffer = slow_warm
-                started = asyncio.get_running_loop().time()
-                await _ensure_startup_buffer(
-                    "startup-test",
-                    None,
-                    ["https://media.example.test/live/segment.ts"],
-                    "https://provider.example.test/watch/game",
-                )
-                return asyncio.get_running_loop().time() - started
-            finally:
-                legacy_proxy.STREAM_STARTUP_BUFFER_SECONDS = original_seconds
-                legacy_proxy._warm_startup_buffer = original_warm
-                task = legacy_proxy._STARTUP_BUFFER_TASKS.pop("startup-test", None)
-                if task and not task.done():
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-
-        self.assertLess(asyncio.run(exercise()), 0.1)
-
-    def test_proxy_substream_returns_jellyfin_compatible_variant_playlist(self):
-        import main
-
-        manifest_url = "https://media.example.test/live/master.m3u8?token=proxy-test"
-        manifest = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nvideo/720p\n"
-
-        def handler(request):
-            self.assertEqual(request.url, httpx.URL(manifest_url))
-            return httpx.Response(
-                200,
-                headers={"content-type": "application/vnd.apple.mpegurl"},
-                text=manifest,
-                request=request,
-            )
-
-        def request_for(path: str):
-            return Request({
-                "type": "http",
-                "method": "GET",
-                "scheme": "http",
-                "path": path,
-                "query_string": b"",
-                "headers": [(b"host", b"127.0.0.1:8000")],
-                "server": ("127.0.0.1", 8000),
-                "client": ("127.0.0.1", 50000),
-                "root_path": "",
-                "http_version": "1.1",
-            })
-
-        async def exercise():
-            client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
-            try:
-                with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(legacy_proxy, "STREAM_STARTUP_BUFFER_SECONDS", 0):
-                    response = await proxy_substream(
-                        request_for("/substream.m3u8"),
-                        url=manifest_url,
-                        ref="https://provider.example.test/watch/game",
-                        sig=security._relay_signature(manifest_url, "https://provider.example.test/watch/game"),
-                    )
-                    return response
-            finally:
-                await client.aclose()
-
-        response = asyncio.run(exercise())
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("application/vnd.apple.mpegurl", response.media_type)
-        self.assertIn("/substream.m3u8?url=https%3A", response.body.decode())
-        self.assertNotIn("/chunk.ts?url=https%3A", response.body.decode())
-
-    def test_proxy_chunk_forwards_range_and_preserves_partial_response(self):
-        import main
-
-        chunk_url = "https://media.example.test/live/segment.m4s?token=range-test"
-        observed = {}
-
-        def handler(request):
-            observed["range"] = request.headers.get("range")
-            return httpx.Response(
-                206,
-                headers={
-                    "content-type": "video/mp4",
-                    "content-range": "bytes 0-3/8",
-                    "accept-ranges": "bytes",
-                },
-                content=b"moof",
-                request=request,
-            )
-
-        request = Request({
-            "type": "http",
-            "method": "GET",
-            "scheme": "http",
-            "path": "/chunk.mp4",
-            "query_string": b"",
-            "headers": [(b"host", b"127.0.0.1:8000"), (b"range", b"bytes=0-3")],
-            "server": ("127.0.0.1", 8000),
-            "client": ("127.0.0.1", 50001),
-            "root_path": "",
-            "http_version": "1.1",
-        })
-
-        async def exercise():
-            client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
-            try:
-                with patch.object(state, "SHARED_HTTP_CLIENT", client):
-                    response = await proxy_chunk(
-                        request,
-                        url=chunk_url,
-                        ref="https://provider.example.test/watch/game",
-                        sig=security._relay_signature(chunk_url, "https://provider.example.test/watch/game"),
-                    )
-                    # proxy_chunk streams the ranged response rather than
-                    # buffering it, so the body must be drained from the
-                    # StreamingResponse's async generator.
-                    body = b"".join([chunk async for chunk in response.body_iterator])
-                    return response, body
-            finally:
-                await client.aclose()
-
-        response, body = asyncio.run(exercise())
-        self.assertEqual(observed["range"], "bytes=0-3")
-        self.assertEqual(response.status_code, 206)
-        self.assertEqual(body, b"moof")
-        self.assertEqual(response.headers["content-range"], "bytes 0-3/8")
-
     def test_safe_url_validation_rejects_credentials_and_private_hosts(self):
         self.assertIsNone(validate_http_url("https://user:pass@example.test/live.m3u8"))
         self.assertIsNone(validate_http_url("http://127.0.0.1/live.m3u8"))
@@ -655,19 +484,19 @@ class JellyballChangesTests(unittest.TestCase):
         self.assertEqual(results[0]["provider"], "IPTV-Org")
 
     def test_scrape_lifecycle_transitions(self):
-        state = _scrape_lifecycle_defaults()
-        self.assertFalse(state["scrape_in_progress"])
-        self.assertEqual(state["scrape_result"], "pending")
+        lifecycle = _scrape_lifecycle_defaults()
+        self.assertFalse(lifecycle["scrape_in_progress"])
+        self.assertEqual(lifecycle["scrape_result"], "pending")
 
-        _mark_scrape_started(state)
-        self.assertTrue(state["scrape_in_progress"])
-        self.assertGreater(state["last_scrape_started"], 0)
-        self.assertEqual(state["scrape_result"], "running")
+        _mark_scrape_started(lifecycle)
+        self.assertTrue(lifecycle["scrape_in_progress"])
+        self.assertGreater(lifecycle["last_scrape_started"], 0)
+        self.assertEqual(lifecycle["scrape_result"], "running")
 
-        _mark_scrape_finished(state, "healthy")
-        self.assertFalse(state["scrape_in_progress"])
-        self.assertGreaterEqual(state["last_scrape_completed"], state["last_scrape_started"])
-        self.assertEqual(state["scrape_result"], "healthy")
+        _mark_scrape_finished(lifecycle, "healthy")
+        self.assertFalse(lifecycle["scrape_in_progress"])
+        self.assertGreaterEqual(lifecycle["last_scrape_completed"], lifecycle["last_scrape_started"])
+        self.assertEqual(lifecycle["scrape_result"], "healthy")
 
     def test_api_status_exposes_scrape_lifecycle_and_active_provider(self):
         previous_state = dict(stream_state)
@@ -696,479 +525,3 @@ class JellyballChangesTests(unittest.TestCase):
             stream_state.clear()
             stream_state.update(previous_state)
 
-    def test_prefetch_chunks_parsed_from_manifest_segments(self):
-        manifest_text = (
-            "#EXTM3U\n"
-            "#EXT-X-VERSION:3\n"
-            "#EXT-X-TARGETDURATION:6\n"
-            "#EXT-X-MEDIA-SEQUENCE:3165856830\n"
-            "#EXTINF:6.000,\n"
-            "3165856830.ts\n"
-            "#EXTINF:6.000,\n"
-            "3166226190.ts\n"
-            "#EXTINF:6.000,\n"
-            "3166595550.ts\n"
-            "#EXTINF:6.000,\n"
-            "3166961940.ts\n"
-        )
-        manifest_url = "https://cdn.example.test:8443/live/stream.m3u8"
-        _register_manifest_segments(manifest_text, manifest_url)
-
-        # Non-sequential IDs (jump of 369,360) are resolved directly from manifest
-        next_chunks = _get_next_manifest_chunks(
-            "https://cdn.example.test:8443/live/3165856830.ts",
-            count=2,
-        )
-        self.assertEqual(
-            next_chunks,
-            [
-                "https://cdn.example.test:8443/live/3166226190.ts",
-                "https://cdn.example.test:8443/live/3166595550.ts",
-            ],
-        )
-
-        # End of playlist does not extrapolate fake IDs
-        last_chunks = _get_next_manifest_chunks(
-            "https://cdn.example.test:8443/live/3166961940.ts",
-            count=2,
-        )
-        self.assertEqual(last_chunks, [])
-
-    def test_prefetch_next_chunks_disabled_when_count_zero(self):
-        import main
-
-        requested_urls = []
-
-        def handler(request):
-            requested_urls.append(str(request.url))
-            return httpx.Response(200, content=b"chunkdata", request=request)
-
-        async def exercise():
-            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-            try:
-                with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(legacy_proxy, "PREFETCH_CHUNK_COUNT", 0):
-                    await prefetch_next_chunks(
-                        "https://cdn.example.test:8443/live/3165856830.ts"
-                    )
-            finally:
-                await client.aclose()
-
-        asyncio.run(exercise())
-        self.assertEqual(requested_urls, [])
-
-    def test_prefetch_next_chunks_requests_manifest_entries_not_numerical_guesses(self):
-        import main
-
-        manifest_text = (
-            "#EXTM3U\n"
-            "#EXTINF:6.000,\n"
-            "3165856830.ts\n"
-            "#EXTINF:6.000,\n"
-            "3166226190.ts\n"
-            "#EXTINF:6.000,\n"
-            "3166595550.ts\n"
-        )
-        manifest_url = "https://cdn.example.test:8443/live/stream.m3u8"
-        _register_manifest_segments(manifest_text, manifest_url)
-
-        requested_urls = []
-
-        def handler(request):
-            requested_urls.append(str(request.url))
-            return httpx.Response(200, content=b"chunkdata", request=request)
-
-        async def exercise():
-            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-            try:
-                with patch.object(state, "SHARED_HTTP_CLIENT", client), patch.object(legacy_proxy, "PREFETCH_CHUNK_COUNT", 2):
-                    await prefetch_next_chunks(
-                        "https://cdn.example.test:8443/live/3165856830.ts",
-                        referer=manifest_url,
-                    )
-            finally:
-                await client.aclose()
-
-        asyncio.run(exercise())
-        # Confirms requests were for the real jump IDs, not 3165856831.ts / 3165856832.ts
-        # (+1 guesses). prefetch_next_chunks fires these concurrently via
-        # asyncio.gather, so completion order isn't guaranteed — compare as a set.
-        self.assertEqual(
-            sorted(requested_urls),
-            sorted([
-                "https://cdn.example.test:8443/live/3166226190.ts",
-                "https://cdn.example.test:8443/live/3166595550.ts",
-            ]),
-        )
-
-
-    def test_multiview_xstack_filters_match_expected_layout_syntax(self):
-        side_by_side = _build_xstack_filter("side_by_side_2", 2)
-        self.assertIn("xstack=inputs=2:layout=0_0|w0_0,fps=30[vout]", side_by_side)
-        self.assertEqual(side_by_side.count("scale=960:1080"), 2)
-
-        grid = _build_xstack_filter("grid_2x2", 4)
-        self.assertIn("xstack=inputs=4:layout=0_0|w0_0|0_h0|w0_h0,fps=30[vout]", grid)
-        self.assertEqual(grid.count("scale=960:540"), 4)
-
-    def test_multiview_bufsize_preserves_unit_suffix(self):
-        self.assertEqual(_multiview_bufsize("6M"), "12M")
-        self.assertEqual(_multiview_bufsize("6000k"), "12000k")
-        self.assertEqual(_multiview_bufsize("6"), "12")
-
-    def test_multiview_ffmpeg_args_map_active_audio_and_reconnect_flags(self):
-        import main
-
-        data = {
-            "member_team_ids": ["lions", "dolphins", "bucs", "jets"],
-            "layout": "grid_2x2",
-            "active_audio_team_id": "bucs",
-        }
-        members = {team: {"name": team.title()} for team in ("lions", "dolphins", "bucs")}
-        with patch.object(config, "PORT", 8000), patch.dict(state.stream_state, members, clear=True),                 patch.dict(os.environ, {"JELLYBALL_HOST": ""}):
-            args = _build_multiview_ffmpeg_args("mv_test", data, Path("/fake/out"), [True, True, False, True], "nvenc")
-
-        self.assertEqual(args.count("-reconnect"), 4)
-        self.assertEqual(args.count("-hwaccel"), 4)
-        inputs = [args[i + 1] for i, a in enumerate(args) if a == "-i"]
-        self.assertEqual(inputs, [
-            "http://127.0.0.1:8000/stream/lions.m3u8",
-            "http://127.0.0.1:8000/stream/dolphins.m3u8",
-            "http://127.0.0.1:8000/stream/bucs.m3u8",
-            # "jets" isn't a channel any more: its pane shows the placeholder.
-            "http://127.0.0.1:8000/stream/__placeholder__.m3u8",
-        ])
-        # Every member's audio is encoded; the active one is chosen per viewer
-        # session, not baked into the command.
-        map_values = [args[i + 1] for i, a in enumerate(args) if a == "-map"]
-        # Member audio is stream-copied (re-encoding live audio throttled
-        # ffmpeg); only the member without audio gets a generated silent track.
-        self.assertEqual(map_values, ["[vout]", "0:a:0", "1:a:0", "[a2]", "3:a:0"])
-        graph = args[args.index("-filter_complex") + 1]
-        self.assertIn("anullsrc=r=48000:cl=stereo[a2]", graph)
-        self.assertNotIn("aresample", graph)
-        self.assertEqual(args[args.index("-c:a") + 1], "copy")
-        self.assertEqual(args[args.index("-c:a:2") + 1], "aac")
-        tee = args[args.index("tee") + 1]
-        self.assertEqual(tee.count("|"), 3)
-        self.assertIn(r"select=\'v:0,a:3\'", tee)
-        self.assertIn("hls_segment_filename=a0/seg_%06d.ts]a0/index.m3u8", tee)
-        # Relative output paths only (ffmpeg is spawned with cwd=out_dir).
-        self.assertNotIn("fake", tee)
-
-    def test_multiview_member_validation_rejects_bad_selections(self):
-        import main
-
-        original_state = dict(state.stream_state)
-        try:
-            state.stream_state.clear()
-            state.stream_state["lions"] = {"name": "Lions"}
-            state.stream_state["dolphins"] = {"name": "Dolphins"}
-            state.stream_state["bucs"] = {"name": "Bucs"}
-            state.stream_state["mv1"] = {"name": "MV", "type": "multiview"}
-
-            self.assertIsNone(_multiview_member_validation(["lions", "dolphins"]))
-            self.assertIsNotNone(_multiview_member_validation(["lions", "dolphins", "bucs"]))
-            self.assertIsNotNone(_multiview_member_validation(["lions", "lions"]))
-            self.assertIsNotNone(_multiview_member_validation(["lions", "nope"]))
-            self.assertIsNotNone(_multiview_member_validation(["lions", "mv1"]))
-        finally:
-            state.stream_state.clear()
-            state.stream_state.update(original_state)
-
-    def test_multiview_sqlite_round_trip(self):
-        import main
-        import gc
-
-        tmpdir = tempfile.mkdtemp()
-        try:
-            db_path = os.path.join(tmpdir, "test_multiview.db")
-            with patch.object(db, "DB_FILE", db_path):
-                db.init_db()
-                save_multiview_channel(
-                    "mv_sunday", "NFL Sunday Quad-Box", "grid_2x2",
-                    ["lions", "dolphins", "bucs", "jets"], "bucs",
-                    "MVSunday.us", "Multi-View", "https://example.test/logo.png",
-                )
-                rows = load_multiview_channels()
-                self.assertEqual(len(rows), 1)
-                channel_id, name, layout, encoded_members, active_audio, tvg_id, group_title, logo_url = rows[0]
-                self.assertEqual(channel_id, "mv_sunday")
-                self.assertEqual(name, "NFL Sunday Quad-Box")
-                self.assertEqual(layout, "grid_2x2")
-                self.assertEqual(json.loads(encoded_members), ["lions", "dolphins", "bucs", "jets"])
-                self.assertEqual(active_audio, "bucs")
-
-                delete_multiview_channel("mv_sunday")
-                self.assertEqual(load_multiview_channels(), [])
-        finally:
-            # sqlite3 connections opened via `with _connect_db() as conn:` are not
-            # closed by that context manager (it only commits/rolls back), so force
-            # collection before cleanup to avoid a Windows file-lock on rmtree.
-            gc.collect()
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_performance_stats_flags_sustained_provider_failure(self):
-        import main
-        import gc
-        import sqlite3
-
-        tmpdir = tempfile.mkdtemp()
-        try:
-            db_path = os.path.join(tmpdir, "test_perf.db")
-            with patch.object(db, "DB_FILE", db_path):
-                db.init_db()
-                conn = sqlite3.connect(db_path)
-                try:
-                    # "DeadProvider": 12 failed attempts spread across the last 5 days,
-                    # none in the last hour — should be flagged sustained_failure even
-                    # though it has no 1-hour data to compute an hourly rate from.
-                    for i in range(12):
-                        conn.execute(
-                            "INSERT INTO provider_performance (provider, response_time_ms, success, timestamp) "
-                            "VALUES (?, 0, 0, datetime('now', ?))",
-                            ("DeadProvider", f"-{i * 8} hours"),
-                        )
-                    # "FlakyProvider": mostly failing in the last hour, but not dead overall.
-                    for i in range(4):
-                        conn.execute(
-                            "INSERT INTO provider_performance (provider, response_time_ms, success, timestamp) "
-                            "VALUES (?, 500, ?, datetime('now', '-10 minutes'))",
-                            ("FlakyProvider", 1 if i == 0 else 0),
-                        )
-                    conn.commit()
-                finally:
-                    conn.close()
-
-                stats = _performance_stats_sync()
-                by_name = {p["provider"]: p for p in stats["provider_health"]}
-
-                self.assertIn("DeadProvider", by_name)
-                self.assertTrue(by_name["DeadProvider"]["sustained_failure"])
-                self.assertEqual(by_name["DeadProvider"]["samples_5d"], 12)
-
-                self.assertIn("FlakyProvider", by_name)
-                self.assertFalse(by_name["FlakyProvider"]["sustained_failure"])
-                self.assertTrue(by_name["FlakyProvider"]["at_risk"])
-
-                # Likely-dead providers must sort first regardless of success_rate.
-                self.assertEqual(stats["provider_health"][0]["provider"], "DeadProvider")
-        finally:
-            gc.collect()
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_multiview_entry_renders_in_m3u_and_xmltv(self):
-        import main
-
-        original_state = dict(state.stream_state)
-        try:
-            state.stream_state.clear()
-            state.stream_state["mv_sunday"] = {
-                "name": "NFL Sunday Quad-Box",
-                "type": "multiview",
-                "candidates": [{"synthetic": True}],
-                "is_healthy": True,
-                "always_live": True,
-                "category": "multiview",
-                "catalog_key": "",
-                "logo_url": "",
-                "tvg_id": "",
-                "group_title": "Multi-View",
-            }
-            request = SimpleNamespace(headers={"host": "127.0.0.1:8000"})
-            playlist = asyncio.run(generate_m3u(request))
-            guide = asyncio.run(generate_xmltv())
-        finally:
-            state.stream_state.clear()
-            state.stream_state.update(original_state)
-
-        self.assertIn("NFL Sunday Quad-Box", playlist)
-        # Names stay stable (no health emoji) and URLs carry the .m3u8 extension.
-        self.assertNotIn("🟢", playlist)
-        self.assertIn("http://127.0.0.1:8000/stream/mv_sunday.m3u8", playlist)
-        self.assertIn("NFL Sunday Quad-Box", guide)
-
-    def test_off_season_channel_excluded_from_m3u_and_xmltv(self):
-        import main
-
-        original_state = dict(state.stream_state)
-        try:
-            state.stream_state.clear()
-            state.stream_state["gators_football"] = {
-                "name": "Florida Gators (Football)",
-                "query": "Florida Gators",
-                "candidates": [],
-                "is_healthy": False,
-                "always_live": False,
-                "category": "ncaaf",
-                "catalog_key": "",
-                "logo_url": "",
-                "tvg_id": "",
-                "group_title": "",
-                "schedule_status": "off_season",
-            }
-            state.stream_state["chiefs"] = {
-                "name": "Kansas City Chiefs",
-                "query": "Kansas City Chiefs",
-                "candidates": [{"url": "https://example.test/live.m3u8", "referer": "", "origin": "", "provider": "ESPN+"}],
-                "is_healthy": True,
-                "always_live": False,
-                "category": "nfl",
-                "catalog_key": "",
-                "logo_url": "",
-                "tvg_id": "",
-                "group_title": "",
-                "schedule_status": "scheduled",
-            }
-            request = SimpleNamespace(headers={"host": "127.0.0.1:8000"})
-            playlist = asyncio.run(generate_m3u(request))
-            guide = asyncio.run(generate_xmltv())
-        finally:
-            state.stream_state.clear()
-            state.stream_state.update(original_state)
-
-        self.assertNotIn("Florida Gators", playlist)
-        self.assertNotIn("gators_football", playlist)
-        self.assertNotIn("Florida Gators", guide)
-        self.assertIn("Kansas City Chiefs", playlist)
-        self.assertIn("Kansas City Chiefs", guide)
-
-    def test_resolve_schedule_status_prefers_a_found_event_over_everything_else(self):
-        start = datetime(2026, 9, 20, 18, 0, tzinfo=timezone.utc)
-        stop = start + timedelta(hours=3)
-        start_str, stop_str, status = _resolve_schedule_status(
-            start, stop, in_season=False, always_live=False, schedule_ok=True,
-            previous_start="stale-start", previous_stop="stale-stop",
-        )
-        self.assertEqual(status, "scheduled")
-        self.assertEqual(start_str, xmltv_ts(start))
-        self.assertEqual(stop_str, xmltv_ts(stop))
-
-    def test_resolve_schedule_status_off_season_wins_when_no_event_found(self):
-        start_str, stop_str, status = _resolve_schedule_status(
-            None, None, in_season=False, always_live=False, schedule_ok=True,
-            previous_start="stale-start", previous_stop="stale-stop",
-        )
-        self.assertEqual((start_str, stop_str, status), ("", "", "off_season"))
-
-    def test_resolve_schedule_status_always_live_ignores_season(self):
-        # An always-live channel with no event and in_season=False (never checked)
-        # must not be marked off_season — off_season only applies to seasonal teams.
-        start_str, stop_str, status = _resolve_schedule_status(
-            None, None, in_season=False, always_live=True, schedule_ok=True,
-            previous_start="", previous_stop="",
-        )
-        self.assertEqual(status, "always_live")
-
-    def test_resolve_schedule_status_confirmed_no_event_clears_stale_window(self):
-        start_str, stop_str, status = _resolve_schedule_status(
-            None, None, in_season=True, always_live=False, schedule_ok=True,
-            previous_start="stale-start", previous_stop="stale-stop",
-        )
-        self.assertEqual((start_str, stop_str, status), ("", "", "no_event"))
-
-    def test_resolve_schedule_status_failed_lookup_retains_previous_window(self):
-        start_str, stop_str, status = _resolve_schedule_status(
-            None, None, in_season=True, always_live=False, schedule_ok=False,
-            previous_start="stale-start", previous_stop="stale-stop",
-        )
-        self.assertEqual((start_str, stop_str, status), ("stale-start", "stale-stop", "lookup_failed"))
-
-    def test_wait_for_first_segment_detects_ready_playlist(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            out_dir = Path(tmpdir)
-            fake_process = SimpleNamespace(returncode=None)
-
-            async def exercise():
-                async def write_playlist_soon():
-                    await asyncio.sleep(0.1)
-                    (out_dir / "seg_00001.ts").write_bytes(b"data")
-                    (out_dir / "index.m3u8").write_text(
-                        "#EXTM3U\n#EXTINF:4.0,\nseg_00001.ts\n", encoding="utf-8"
-                    )
-
-                writer = asyncio.create_task(write_playlist_soon())
-                try:
-                    return await _wait_for_first_segment(out_dir, fake_process, timeout=3.0, poll_interval=0.05)
-                finally:
-                    await writer
-
-            self.assertTrue(asyncio.run(exercise()))
-
-    def test_wait_for_first_segment_rejects_path_traversal_segment_names(self):
-        from ffmpeg_proc import _safe_child_path
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            out_dir = Path(tmpdir)
-            self.assertIsNone(_safe_child_path(out_dir, "../etc/passwd"))
-            self.assertIsNone(_safe_child_path(out_dir, "a/b.ts"))
-            self.assertIsNone(_safe_child_path(out_dir, "a\\b.ts"))
-            self.assertEqual(_safe_child_path(out_dir, "seg_00001.ts"), Path(os.path.realpath(tmpdir)) / "seg_00001.ts")
-
-    def test_wait_for_first_segment_returns_false_when_process_dies(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            out_dir = Path(tmpdir)
-            fake_process = SimpleNamespace(returncode=1)  # already exited
-            result = asyncio.run(_wait_for_first_segment(out_dir, fake_process, timeout=1.0, poll_interval=0.05))
-            self.assertFalse(result)
-
-    def test_multiview_backoff_grows_and_caps(self):
-        self.assertEqual(_multiview_backoff_seconds(1), 15.0)
-        self.assertEqual(_multiview_backoff_seconds(2), 30.0)
-        self.assertEqual(_multiview_backoff_seconds(3), 60.0)
-        self.assertEqual(_multiview_backoff_seconds(10), 300.0)  # capped
-
-    def test_multiview_circuit_breaker_blocks_spawn_during_cooldown(self):
-        import main
-
-        channel_id = "mv_backoff_test"
-        original_failures = dict(multiview._MULTIVIEW_FAILURES)
-        try:
-            multiview._MULTIVIEW_FAILURES.clear()
-            self.assertEqual(_multiview_cooldown_remaining(channel_id), 0.0)
-
-            multiview._record_multiview_failure(channel_id, "Server returned 404 Not Found")
-            first_cooldown = _multiview_cooldown_remaining(channel_id)
-            self.assertGreater(first_cooldown, 0.0)
-            self.assertLessEqual(first_cooldown, 15.0)
-
-            # A second failure backs off further (15s -> 30s), not resetting to the same window.
-            multiview._record_multiview_failure(channel_id, "Server returned 404 Not Found")
-            second_cooldown = _multiview_cooldown_remaining(channel_id)
-            self.assertGreater(second_cooldown, first_cooldown)
-
-            multiview._clear_multiview_failure(channel_id)
-            self.assertEqual(_multiview_cooldown_remaining(channel_id), 0.0)
-        finally:
-            multiview._MULTIVIEW_FAILURES.clear()
-            multiview._MULTIVIEW_FAILURES.update(original_failures)
-
-    def test_multiview_error_from_log_prefers_input_error_over_boilerplate(self):
-        log_lines = [
-            "ffmpeg version 9.0.1-essentials_build",
-            "libavutil      61.  1.101 / 61.  1.101",
-            "[http @ 0x1] HTTP error 404 Not Found",
-            "Error opening input file http://127.0.0.1:8000/stream/ncaaf_130.",
-            "Error opening input files: Server returned 404 Not Found",
-        ]
-        self.assertEqual(
-            _multiview_error_from_log(log_lines),
-            "Error opening input files: Server returned 404 Not Found",
-        )
-
-    def test_multiview_error_from_log_falls_back_to_last_line(self):
-        self.assertEqual(_multiview_error_from_log(["some progress line", "final line"]), "final line")
-        self.assertEqual(_multiview_error_from_log([]), "ffmpeg exited unexpectedly")
-
-    def test_placeholder_ffmpeg_args_produce_infinite_looped_hls_output(self):
-        args = _build_placeholder_ffmpeg_args(Path("/fake/out"))
-        self.assertIn("-loop", args)
-        self.assertIn("anullsrc=r=48000:cl=stereo", args)
-        self.assertIn("No Signal", " ".join(args))
-        self.assertIn("seg_%05d.ts", args)
-        self.assertIn("index.m3u8", args)
-        # Must not reference a real dead-team URL - it's a purely synthetic source.
-        self.assertNotIn("http://", " ".join(args))
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -428,9 +428,10 @@ class RelaySigningTests(unittest.TestCase):
     def test_rewritten_urls_carry_valid_signatures(self):
         import urllib.parse
 
-        manifest = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nseg1.m4s\n"
-        rewritten = legacy_proxy.rewrite_m3u8(manifest, "https://cdn.example.test/live/index.m3u8",
-                                      "https://site.example.test/", "http://127.0.0.1:8000")
+        manifest = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nseg1.ts\n"
+        rewritten = legacy_proxy._rewrite_sample_aes_manifest(
+            manifest, "https://cdn.example.test/live/index.m3u8",
+            "https://site.example.test/", "", "http://127.0.0.1:8000")
         uri = [line for line in rewritten.splitlines() if line and not line.startswith("#")][0]
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(uri).query)
         self.assertTrue(security._relay_signature_ok(
@@ -440,9 +441,9 @@ class RelaySigningTests(unittest.TestCase):
         async def exercise():
             async with _client() as client:
                 return [
-                    await client.get("/chunk.ts", params={"url": "https://example.com/a.ts"}),
-                    await client.get("/resource", params={"url": "https://example.com/key"}),
-                    await client.get("/substream.m3u8", params={"url": "https://example.com/a.m3u8", "sig": "0" * 32}),
+                    await client.get("/sample_aes/chunk", params={"url": "https://example.com/a.ts"}),
+                    await client.get("/sample_aes/resource", params={"url": "https://example.com/key"}),
+                    await client.get("/sample_aes/chunk", params={"url": "https://example.com/a.ts", "sig": "0" * 32}),
                 ]
 
         for response in asyncio.run(exercise()):

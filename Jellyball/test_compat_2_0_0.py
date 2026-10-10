@@ -221,9 +221,8 @@ PUBLIC_ROUTES_2_0_0 = {
     ("GET", "/multiview/{channel_id}/audio/{audio_index}.m3u8"),
     ("HEAD", "/multiview/{channel_id}/audio/{audio_index}.m3u8"),
     ("GET", "/multiview/{channel_id}/audio/{audio_index}/seg/{seq}.ts"),
-    # Signed relay for sources the session engine cannot take.
-    ("GET", "/substream.m3u8"), ("GET", "/resource"), ("GET", "/chunk"),
-    ("GET", "/chunk.ts"), ("GET", "/chunk.mp4"), ("GET", "/chunk.aac"), ("GET", "/chunk.vtt"),
+    # Signed relay for SAMPLE-AES sources (3.0: the old passthrough routes are gone).
+    ("GET", "/sample_aes/chunk"), ("GET", "/sample_aes/resource"),
     # Machine-readable endpoints documented in the README.
     ("GET", "/healthz"), ("GET", "/metrics"), ("GET", "/api/status"), ("GET", "/api/sessions"),
     ("GET", "/api/ffmpeg-status"), ("GET", "/api/version"), ("GET", "/api/logs"),
