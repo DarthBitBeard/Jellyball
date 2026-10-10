@@ -104,50 +104,19 @@ class SessionWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.normalizer.preferred_audio_language, "fra")
 
 
-class LegacyFallbackCountTests(unittest.IsolatedAsyncioTestCase):
+class RemuxEventTests(unittest.TestCase):
     def setUp(self):
-        self.harness = Harness()
-        self.recorded = []
+        engine_stats.reset()
+        self.addCleanup(engine_stats.reset)
 
-    def session(self):
-        hooks = self.harness.hooks()
-        hooks.on_legacy_fallback = lambda cid, kind, key: self.recorded.append((cid, kind, key))
-        return ChannelSession("chan1", hooks, fast_config())
-
-    async def _poll(self, text, **kw):
-        base = "http://upstream"
-        self.harness.source = SourceSpec(key=("primary",), url=f"{base}/media.m3u8", label="primary")
-        self.harness.set_playlist(f"{base}/media.m3u8", text)
-        session = self.session()
-        await session._poll_once()
-        return session
-
-    async def test_fmp4_is_counted(self):
-        session = await self._poll(playlist_text("http://upstream", [0, 1, 2], has_map=True))
-        self.assertEqual(session.state, "legacy")
-        self.assertEqual(self.recorded, [("chan1", "fmp4", ("primary",))])
-
-    async def test_sample_aes_is_counted_separately(self):
-        await self._poll(playlist_text("http://upstream", [0, 1, 2], sample_aes=True))
-        self.assertEqual([r[1] for r in self.recorded], ["sample_aes"])
-
-    async def test_demuxed_audio_is_counted(self):
-        base = "http://upstream"
-        self.harness.source = SourceSpec(key=("primary",), url=f"{base}/media.m3u8", label="primary")
-        self.harness.set_playlist(
-            f"{base}/media.m3u8",
-            '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="en",URI="audio.m3u8"\n'
-            '#EXT-X-STREAM-INF:BANDWIDTH=3000000,AUDIO="a"\nvariant.m3u8\n',
-        )
-        session = self.session()
-        await session._poll_once()
-        self.assertEqual(session.state, "legacy")
-        self.assertEqual([r[1] for r in self.recorded], ["demuxed_audio"])
-
-    async def test_not_counted_when_another_source_takes_over(self):
-        self.harness.incompatible_result = True  # a compatible standby exists
-        await self._poll(playlist_text("http://upstream", [0, 1, 2], has_map=True))
-        self.assertEqual(self.recorded, [])
+    def test_remux_events_counted_by_event_and_provider(self):
+        engine_stats.record_remux_event("started", "Alpha")
+        engine_stats.record_remux_event("started", "alpha")
+        engine_stats.record_remux_event("failed", "")
+        rows = engine_stats.remux_counts()
+        self.assertEqual(rows[0], {"event": "started", "provider": "alpha", "count": 2})
+        self.assertIn({"event": "failed", "provider": "unknown", "count": 1}, rows)
+        self.assertEqual(engine_stats.remux_totals()["started"], 2)
 
 
 class CounterTests(unittest.TestCase):
@@ -155,16 +124,16 @@ class CounterTests(unittest.TestCase):
         engine_stats.reset()
         self.addCleanup(engine_stats.reset)
 
-    def test_counts_by_reason_and_provider(self):
-        engine_stats.record_legacy_fallback("fmp4", "Alpha")
-        engine_stats.record_legacy_fallback("fmp4", "alpha")
-        engine_stats.record_legacy_fallback("demuxed_audio", "")
-        engine_stats.record_legacy_fallback("something-new", "beta")
-        rows = engine_stats.legacy_fallback_counts()
-        self.assertEqual(rows[0], {"reason": "fmp4", "provider": "alpha", "count": 2})
-        self.assertIn({"reason": "demuxed_audio", "provider": "unknown", "count": 1}, rows)
-        self.assertIn({"reason": "other", "provider": "beta", "count": 1}, rows)
-        self.assertEqual(engine_stats.legacy_fallback_totals()["fmp4"], 2)
+    def test_counts_by_event_and_provider(self):
+        engine_stats.record_remux_event("started", "Alpha")
+        engine_stats.record_remux_event("started", "alpha")
+        engine_stats.record_remux_event("failed", "")
+        engine_stats.record_remux_event("something-new", "beta")
+        rows = engine_stats.remux_counts()
+        self.assertEqual(rows[0], {"event": "started", "provider": "alpha", "count": 2})
+        self.assertIn({"event": "failed", "provider": "unknown", "count": 1}, rows)
+        self.assertIn({"event": "other", "provider": "beta", "count": 1}, rows)
+        self.assertEqual(engine_stats.remux_totals()["started"], 2)
 
 
 def _request(method, path, **kw):
@@ -183,16 +152,16 @@ class HttpSurfaceTests(unittest.TestCase):
         engine_stats.reset()
         self.addCleanup(engine_stats.reset)
 
-    def test_metrics_expose_fallbacks_by_reason_and_provider(self):
-        engine_stats.record_legacy_fallback("fmp4", "alpha")
-        engine_stats.record_legacy_fallback("fmp4", "alpha")
+    def test_metrics_expose_remux_by_event_and_provider(self):
+        engine_stats.record_remux_event("started", "alpha")
+        engine_stats.record_remux_event("started", "alpha")
         body = _request("GET", "/metrics").text
-        self.assertIn('jellyball_legacy_fallbacks_total{reason="fmp4",provider="alpha"} 2', body)
+        self.assertIn('jellyball_remux_total{event="started",provider="alpha"} 2', body)
 
     def test_engine_status_endpoint(self):
-        engine_stats.record_legacy_fallback("sample_aes", "beta")
+        engine_stats.record_remux_event("started", "beta")
         data = _request("GET", "/api/engine/status").json()
-        self.assertEqual(data["legacy_fallbacks"], [{"reason": "sample_aes", "provider": "beta", "count": 1}])
+        self.assertEqual(data["remux"], [{"event": "started", "provider": "beta", "count": 1}])
         self.assertIn("breakers", data)
 
     def test_audio_language_post_saves_and_redirects(self):
@@ -209,7 +178,7 @@ class HttpSurfaceTests(unittest.TestCase):
         self.assertEqual(fake.values[engine_settings.AUDIO_LANGUAGE_KEY], "deu")
 
     def test_cards_render_on_the_dashboard_with_their_script(self):
-        engine_stats.record_legacy_fallback("fmp4", "gamma")
+        engine_stats.record_remux_event("started", "gamma")
         html = _get_dashboard("/").text
         self.assertIn("engine-live-sessions", html)
         self.assertIn("Preferred Audio Language", html)

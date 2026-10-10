@@ -24,18 +24,6 @@ class ReliabilityHardeningTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         clear_dns_cache()
 
-    async def test_cache_expiry_is_removed_during_put(self):
-        # Drive time.monotonic() explicitly: Windows timer resolution (~15ms)
-        # can make a 1ms TTL + 10ms sleep leave the entry still "fresh".
-        cache = legacy_proxy.LRUChunkCache(capacity=4, max_bytes=1024)
-        clock = {"t": 1000.0}
-        with patch.object(legacy_proxy.time, "monotonic", side_effect=lambda: clock["t"]):
-            await cache.put("expired", b"old", 1.0)  # expires at 1001
-            clock["t"] = 1002.0
-            await cache.put("new", b"new", 10)
-            self.assertIsNone(await cache.get("expired"))
-            self.assertEqual(await cache.get("new"), b"new")
-
     async def test_dns_validation_rejects_loopback(self):
         self.assertIsNone(await validate_http_url_async("http://127.0.0.1:8000/stream"))
         self.assertIsNone(await validate_http_url_async("http://localhost:8000/stream"))
@@ -135,12 +123,6 @@ class ReliabilityHardeningTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.02)
             self.assertFalse(scrapers._provider_breaker_open(provider))
             scrapers._provider_breaker_success(provider)
-
-    async def test_startup_buffer_task_reference_is_removed(self):
-        task = asyncio.create_task(asyncio.sleep(0))
-        legacy_proxy._STARTUP_BUFFER_TASKS["test-key"] = task
-        legacy_proxy._remove_startup_buffer_task(task)
-        self.assertNotIn("test-key", legacy_proxy._STARTUP_BUFFER_TASKS)
 
     async def test_metric_writer_is_bounded(self):
         writer = db.MetricBatchWriter(max_queue=1, batch_size=2, flush_seconds=0.01)

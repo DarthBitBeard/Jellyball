@@ -21,6 +21,7 @@ import provider_settings
 import provider_telemetry
 import provider_tools
 import scrapers
+from plugins import get_plugin_errors, get_plugin_records
 from config import _log_failure
 from dashboard_cards import Card, register_card
 from security import verify_dashboard_auth
@@ -45,10 +46,26 @@ def _find_provider(name: str):
     raise HTTPException(status_code=404, detail="Unknown provider")
 
 
+def _plugin_info_map() -> dict:
+    return {
+        record.name: {
+            "version": record.version,
+            "api_version": record.api_version,
+            "origin": record.origin,
+            "builtin": record.builtin,
+            "linear": record.linear,
+            "permissions": list(record.permissions),
+        }
+        for record in get_plugin_records()
+    }
+
+
 def provider_rows(db_stats: dict) -> list:
-    """One row per provider: settings, breaker state, last run and persisted stats."""
+    """One row per provider: settings, breaker state, last run, persisted stats,
+    and plugin metadata (3.0.0)."""
     breakers = scrapers.provider_breaker_snapshot()
     base_priority = scrapers._provider_priority
+    plugin_info = _plugin_info_map()
     rows = []
     for index, provider in enumerate(scrapers.ACTIVE_PROVIDERS):
         name = provider.name
@@ -69,6 +86,7 @@ def provider_rows(db_stats: dict) -> list:
             "last_outcome": last.get("outcome"),
             "last_error_class": last.get("error_class"),
             "outcomes_24h": stats.get("outcomes_24h", {}),
+            "plugin": plugin_info.get(name, {}),
         })
     return rows
 
@@ -155,9 +173,25 @@ async def run_selftest_now(auth: bool = Depends(verify_dashboard_auth)):
     return summary
 
 
+@router.post("/api/providers/reload", response_class=JSONResponse)
+async def reload_providers(auth: bool = Depends(verify_dashboard_auth)):
+    """Reload provider plugins (picks up third_party/ changes) and rebuild the
+    engine's provider lists. Per-plugin failures are isolated and reported."""
+    from plugins import reload_plugins
+
+    records = reload_plugins()
+    scrapers._rebuild_provider_lists(records)
+    errors = get_plugin_errors()
+    return {
+        "reloaded": len(records),
+        "providers": [r.name for r in records],
+        "errors": errors,
+    }
+
+
 async def _provider_card_context(request: Request) -> dict:
     stats = await asyncio.to_thread(provider_telemetry.provider_stats_sync)
-    return {"providers": provider_rows(stats)}
+    return {"providers": provider_rows(stats), "plugin_errors": get_plugin_errors()}
 
 
 register_card(Card(

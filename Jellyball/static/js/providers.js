@@ -8,6 +8,7 @@
     const esc = (value) => (typeof escapeHtml === 'function' ? escapeHtml(value) : String(value));
     const testResults = {};
     let rows = [];
+    let pluginErrors = [];
 
     function relativeTime(value) {
         if (!value) return 'never';
@@ -32,6 +33,21 @@
         const klass = test.error_class ? ' (' + esc(test.error_class) + ')' : '';
         const events = isNil(test.index_events) ? 'index unknown' : esc(test.index_events) + ' events listed';
         return `<div class="hint-text">Test: ${esc(test.outcome)}${klass}, ${events}, ${esc(test.matches)} matched, ${esc(test.streams)} stream(s), ${esc(test.response_time_ms)} ms</div>`;
+    }
+
+    function pluginLine(p) {
+        const info = p.plugin || {};
+        if (!info.version) return '';
+        const origin = info.builtin ? 'built-in' : 'third-party';
+        const perms = (info.permissions || []).join(', ');
+        return `<div class="hint-text">Plugin v${esc(info.version)} (API ${esc(info.api_version)}, ${origin}${perms ? ', permissions: ' + esc(perms) : ''})</div>`;
+    }
+
+    function pluginErrorsHtml(errors) {
+        if (!errors || !errors.length) return '';
+        return errors.map((e) =>
+            `<div style="color: var(--danger-text);">Plugin failed to load: <strong>${esc(e.plugin || e.manifest || '?')}</strong> (${esc(e.origin || '')}): ${esc(e.error || '')}</div>`
+        ).join('');
     }
 
     function rowHtml(p) {
@@ -62,6 +78,7 @@
                 </span>
             </div>
             <div class="hint-text">Last success: ${relativeTime(p.last_success)} &middot; index events: ${events} &middot; last search: ${last} &middot; ${breaker}</div>
+            ${pluginLine(p)}
             ${suggestion}
             ${testLine(testResults[p.name])}
         </div>`;
@@ -71,6 +88,27 @@
         // Don't clobber a priority field the operator is typing in.
         if (list.contains(document.activeElement) && document.activeElement.dataset.role === 'priority') return;
         list.innerHTML = rows.length ? rows.map(rowHtml).join('') : '<p style="color: var(--text-muted);">No providers.</p>';
+        const errorsBox = document.getElementById('provider-plugin-errors');
+        if (errorsBox) errorsBox.innerHTML = pluginErrorsHtml(pluginErrors);
+    }
+
+    async function reloadPlugins() {
+        const result = document.getElementById('provider-reload-result');
+        if (result) result.textContent = 'Reloading...';
+        try {
+            const resp = await fetch('/api/providers/reload', { method: 'POST' });
+            const data = resp.ok ? await resp.json() : null;
+            if (data) {
+                pluginErrors = data.errors || [];
+                if (result) result.textContent = `Reloaded ${data.reloaded} plugin(s)`;
+                if (typeof showToast === 'function') showToast(`Reloaded ${data.reloaded} plugin(s)`, 2500, false);
+            } else if (result) {
+                result.textContent = 'Reload failed';
+            }
+        } catch (e) {
+            if (result) result.textContent = 'Reload failed';
+        }
+        refresh();
     }
 
     async function refresh() {
@@ -172,6 +210,9 @@
     });
 
     try { rows = JSON.parse(card.dataset.initial || '[]'); } catch (e) { rows = []; }
+    try { pluginErrors = JSON.parse(card.dataset.pluginErrors || '[]'); } catch (e) { pluginErrors = []; }
+    const reloadBtn = document.getElementById('provider-reload-plugins');
+    if (reloadBtn) reloadBtn.addEventListener('click', reloadPlugins);
     render();
     setInterval(() => { if (paneActive()) refresh(); }, 10000);
     if (paneActive()) refresh();

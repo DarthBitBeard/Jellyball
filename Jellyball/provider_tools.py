@@ -15,6 +15,7 @@ import provider_telemetry as telemetry
 import state
 from config import _log_failure
 from network_safety import bounded_int
+from plugins import permitted_browser
 from stream_extractor import verify_stream_live
 
 DRY_RUN_TIMEOUT = 90.0
@@ -60,7 +61,7 @@ async def dry_run(provider, terms: List[str], browser=None, timeout: float = DRY
         timed_out = False
         try:
             streams = await asyncio.wait_for(
-                provider.search(terms, browser=browser, http_client=client), timeout=timeout
+                provider.search(terms, browser=permitted_browser(provider, browser), http_client=client), timeout=timeout
             )
         except asyncio.TimeoutError:
             timed_out = True

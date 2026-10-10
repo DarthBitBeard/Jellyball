@@ -12,7 +12,6 @@ from typing import Dict, List, Tuple
 
 from db import get_setting
 import scrapers
-import legacy_proxy
 import sessions
 from sessions import SESSIONS
 import multiview
@@ -90,18 +89,12 @@ TUNABLES: List[Tunable] = [
             5, 600, "STARTUP_PLACEHOLDER_SECONDS"),
     Tunable("MULTIVIEW_IDLE_TIMEOUT_SECONDS", "Stop an unwatched Multi-View after (s)", "Multi-View", float, 30, 3600,
             "MULTIVIEW_IDLE_TIMEOUT_SECONDS"),
-    Tunable("STREAM_STARTUP_BUFFER_SECONDS", "Warm-up cache time (s)", "Legacy proxy (fMP4 / separate-audio sources)",
-            float, 0, 120, "STREAM_STARTUP_BUFFER_SECONDS", db_key="startup_buffer_seconds"),
-    Tunable("PREFETCH_CHUNK_COUNT", "Read-ahead chunks", "Legacy proxy (fMP4 / separate-audio sources)", int, 0, 32,
-            "PREFETCH_CHUNK_COUNT", db_key="prefetch_chunk_count"),
-    Tunable("STREAM_CHUNK_CACHE_TTL", "Chunk cache TTL (s)", "Legacy proxy (fMP4 / separate-audio sources)", float,
-            1, 600, "STREAM_CHUNK_CACHE_TTL", db_key="stream_chunk_cache_ttl"),
 ]
 _TUNABLES_BY_NAME = {t.name: t for t in TUNABLES}
 # A non-session Tunable.target is a global of the module whose code reads it.
 # It must be rebound on that module - a `from x import NAME` copy elsewhere
 # would not see the change - so these are the modules that own the targets.
-_TUNABLE_TARGET_MODULES = [scrapers, legacy_proxy, sessions, multiview, failover]
+_TUNABLE_TARGET_MODULES = [scrapers, sessions, multiview, failover]
 
 
 def _tunable_module(tunable: Tunable):
