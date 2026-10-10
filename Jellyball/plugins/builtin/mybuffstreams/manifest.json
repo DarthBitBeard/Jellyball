@@ -1,0 +1,14 @@
+{
+    "name": "MyBuffStreams",
+    "version": "3.0.0",
+    "api_version": 1,
+    "entry": "provider.py:MyBuffStreamsScraper",
+    "author": "Jellyball",
+    "description": "Built-in MyBuffStreams provider.",
+    "builtin": true,
+    "linear": false,
+    "permissions": [
+        "network",
+        "browser"
+    ]
+}

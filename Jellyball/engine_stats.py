@@ -1,25 +1,24 @@
-"""Counters for streaming-engine decisions: why and for which provider a channel
-session handed a source to the legacy passthrough proxy.
+"""Counters for streaming-engine decisions: remux ingest events (3.0 replaced the
+legacy passthrough proxy with per-source ffmpeg remuxing), cold-start races,
+placeholder fallbacks, and tune-in latency.
 
-These numbers are what decides whether an ffmpeg remux path for fMP4 /
-demuxed-audio sources (E4b) is worth enabling by default. In-memory, reset on
-restart, like the failover counters; exposed on /metrics and the dashboard.
+In-memory, reset on restart, like the failover counters; exposed on /metrics
+and the dashboard.
 """
 
 import threading
 from typing import Any, Dict, List, Tuple
 
-# kind -> label shown in the dashboard
-LEGACY_REASONS: Dict[str, str] = {
-    "fmp4": "fMP4 / CMAF segments",
-    "sample_aes": "SAMPLE-AES encryption",
-    "demuxed_audio": "Separate audio rendition",
-    "not_ts": "Segments are not MPEG-TS",
+# event -> label shown in the dashboard
+REMUX_EVENTS: Dict[str, str] = {
+    "started": "Remux sessions started",
+    "transcode": "Fell back to -c:a aac transcode",
+    "failed": "Remux failed",
 }
 UNKNOWN_PROVIDER = "unknown"
 
 _LOCK = threading.Lock()
-_LEGACY_FALLBACKS: Dict[Tuple[str, str], int] = {}
+_REMUX_EVENTS: Dict[Tuple[str, str], int] = {}
 # Cold-start candidate races: total runs vs runs that picked a healthy source.
 _COLD_RACES: Dict[str, int] = {"total": 0, "won": 0}
 # No-Signal placeholder starts (cold starts with no healthy candidate, and
@@ -29,31 +28,31 @@ _PLACEHOLDER_FALLBACKS = 0
 _TUNE_IN_MS: Dict[str, float] = {"count": 0, "total": 0.0, "max": 0.0}
 
 
-def record_legacy_fallback(kind: str, provider: str) -> None:
-    key = (kind if kind in LEGACY_REASONS else "other", (provider or UNKNOWN_PROVIDER).strip().lower() or UNKNOWN_PROVIDER)
+def record_remux_event(event: str, provider: str) -> None:
+    key = (event if event in REMUX_EVENTS else "other", (provider or UNKNOWN_PROVIDER).strip().lower() or UNKNOWN_PROVIDER)
     with _LOCK:
-        _LEGACY_FALLBACKS[key] = _LEGACY_FALLBACKS.get(key, 0) + 1
+        _REMUX_EVENTS[key] = _REMUX_EVENTS.get(key, 0) + 1
 
 
-def legacy_fallback_counts() -> List[Dict[str, Any]]:
-    """[{reason, provider, count}] sorted by count (desc), then reason/provider."""
+def remux_counts() -> List[Dict[str, Any]]:
+    """[{event, provider, count}] sorted by count (desc), then event/provider."""
     with _LOCK:
-        items = list(_LEGACY_FALLBACKS.items())
-    rows: List[Dict[str, Any]] = [{"reason": reason, "provider": provider, "count": count} for (reason, provider), count in items]
-    rows.sort(key=lambda row: (-row["count"], row["reason"], row["provider"]))
+        items = list(_REMUX_EVENTS.items())
+    rows: List[Dict[str, Any]] = [{"event": event, "provider": provider, "count": count} for (event, provider), count in items]
+    rows.sort(key=lambda row: (-row["count"], row["event"], row["provider"]))
     return rows
 
 
-def legacy_fallback_totals() -> Dict[str, int]:
+def remux_totals() -> Dict[str, int]:
     totals: Dict[str, int] = {}
-    for row in legacy_fallback_counts():
-        totals[row["reason"]] = totals.get(row["reason"], 0) + row["count"]
+    for row in remux_counts():
+        totals[row["event"]] = totals.get(row["event"], 0) + row["count"]
     return totals
 
 
 def reset() -> None:
     with _LOCK:
-        _LEGACY_FALLBACKS.clear()
+        _REMUX_EVENTS.clear()
         _COLD_RACES["total"] = 0
         _COLD_RACES["won"] = 0
         global _PLACEHOLDER_FALLBACKS
