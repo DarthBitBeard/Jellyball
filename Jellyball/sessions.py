@@ -22,7 +22,7 @@ from db import _METRIC_WRITER
 import engine_settings
 import engine_stats
 from upstream import _fetch_upstream_body, _hls_response, HLS_MEDIA_TYPE
-from legacy_proxy import _legacy_proxy_stream, set_legacy_failure_hook
+from legacy_proxy import _sample_aes_proxy_stream
 import ffmpeg_proc
 import placeholder
 from placeholder import _ensure_placeholder_running, _placeholder_cooldown_remaining
@@ -209,23 +209,11 @@ def _on_session_failure(channel_id: str, source_key: tuple, reason: str) -> None
     )
 
 
-def _on_legacy_proxy_failure(team_id: str, reason: str) -> None:
-    """Legacy passthrough playback hit a dead upstream (manifest 502s, chunk
-    failures, stalls). Resolve the active candidate and feed it through the
-    normal session failure path so failover happens in seconds instead of
-    waiting for the 30s probe cycle."""
-    data = stream_state.get(team_id)
-    candidates = (data or {}).get("candidates") or []
-    if not candidates:
-        return
-    active_index = (data or {}).get("active_index", 0)
-    candidate = candidates[min(active_index, len(candidates) - 1)]
-    _on_session_failure(team_id, candidate_source_key(candidate), reason)
-
-
 def _on_session_incompatible(channel_id: str, source_key: tuple, reason: str) -> bool:
-    """Returns True when a compatible standby exists (the session keeps going
-    and picks it up), False to let a cold-starting session use the legacy proxy."""
+    """Returns True when another standby exists (the session keeps going and
+    picks it up), False to let a cold-starting session park in the SAMPLE-AES
+    shim. In 3.0 every source is session-playable (fMP4 via remux), so this is
+    only reached for SAMPLE-AES cold starts and not_ts garbage."""
     # Late import: multiview and failover import this module, so they are reached at call time.
     from multiview import _multiview_view_for_session
     from failover import _pick_next_candidate, request_failover
@@ -239,12 +227,8 @@ def _on_session_incompatible(channel_id: str, source_key: tuple, reason: str) ->
         and candidate_source_key(candidates[active_index]) == tuple(source_key)
         and _pick_next_candidate(candidates, active_index) is not None
     )
-    if has_alternative:
-        # Mark it now so the next resolve can't hand the session the same source.
-        candidates[active_index]["session_compatible"] = False
-        candidates[active_index]["incompatible_at"] = time.time()
     _spawn_background_task(
-        request_failover(channel_id, source_key, reason, incompatible=True),
+        request_failover(channel_id, source_key, reason),
         f"session incompatible failover {channel_id}",
     )
     return has_alternative
@@ -261,16 +245,6 @@ def _on_session_media_info(channel_id: str, source_key: tuple, has_audio: bool, 
             break
 
 
-def _on_session_legacy_fallback(channel_id: str, kind: str, source_key: tuple) -> None:
-    data = stream_state.get(channel_id) or {}
-    provider = ""
-    for candidate in data.get("candidates") or []:
-        if candidate_source_key(candidate) == tuple(source_key):
-            provider = str(candidate.get("provider") or "")
-            break
-    engine_stats.record_legacy_fallback(kind, provider)
-
-
 SESSIONS = SessionRegistry(
     SessionHooks(
         fetch=lambda url, headers, max_bytes, timeout: _session_fetch(url, headers, max_bytes, timeout),
@@ -280,7 +254,6 @@ SESSIONS = SessionRegistry(
         report_incompatible=lambda channel_id, key, reason: _on_session_incompatible(channel_id, key, reason),
         on_media_info=lambda channel_id, key, has_audio, sig: _on_session_media_info(channel_id, key, has_audio, sig),
         preferred_audio_language=engine_settings.preferred_audio_language,
-        on_legacy_fallback=lambda channel_id, kind, key: _on_session_legacy_fallback(channel_id, kind, key),
     ),
     SessionConfig(
         idle_timeout=SESSION_IDLE_SECONDS,
@@ -305,11 +278,6 @@ def _start_on_placeholder(channel_id: str) -> bool:
     _request_placeholder_start()
     SESSIONS.poke(channel_id)
     return True
-
-
-# Legacy passthrough playback failures drive the same failover machinery as
-# session playback (see legacy_proxy.set_legacy_failure_hook).
-set_legacy_failure_hook(_on_legacy_proxy_failure)
 
 
 def _is_raceable_channel(session_id: str) -> bool:
@@ -398,7 +366,7 @@ async def _race_cold_candidates(channel_id: str, limit: int = 3, timeout: float 
 
 async def _serve_session_playlist(session_id: str, segment_prefix: str, legacy=None) -> Response:
     session = SESSIONS.get(session_id)
-    cold = not session.is_running and not session.window and session.state != "legacy"
+    cold = not session.is_running and not session.window and session.state != "sample_aes"
     if cold and _is_raceable_channel(session_id):
         # Fix 1: race the top candidates for a healthy one before the
         # session's serial poll begins, so one dead first candidate can't eat
@@ -419,10 +387,10 @@ async def _serve_session_playlist(session_id: str, segment_prefix: str, legacy=N
             # becomes ready.
             _start_on_placeholder(session_id)
     session.touch()
-    if session.state == "legacy" and legacy is not None:
+    if session.state == "sample_aes" and legacy is not None:
         return await legacy()
     await session.wait_ready(STREAM_STARTUP_TIMEOUT)
-    if session.state == "legacy" and legacy is not None:
+    if session.state == "sample_aes" and legacy is not None:
         return await legacy()
     if not session.window and _start_on_placeholder(session_id):
         await session.wait_ready(10.0)
@@ -470,7 +438,7 @@ async def _serve_channel_playlist(team_id: str, request: Request) -> Response:
         _touch_multiview_viewer(team_id)
     _maybe_record_playback_event(team_id)
 
-    async def legacy():
-        return await _legacy_proxy_stream(team_id, request)
+    async def sample_aes():
+        return await _sample_aes_proxy_stream(team_id, request)
 
-    return await _serve_session_playlist(team_id, f"{team_id}/seg/", legacy=None if data.get("type") == "multiview" else legacy)
+    return await _serve_session_playlist(team_id, f"{team_id}/seg/", legacy=None if data.get("type") == "multiview" else sample_aes)
