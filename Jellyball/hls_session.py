@@ -34,10 +34,13 @@ import urllib.parse
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, Deque, Dict, List, Optional, Tuple
+from typing import Awaitable, Callable, Deque, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from ts_normalize import TsNormalizer, find_ts_start
 import engine_stats
+
+if TYPE_CHECKING:
+    from remux_ingest import RemuxSession
 
 LOGGER = logging.getLogger("jellyball.session")
 
@@ -159,6 +162,8 @@ class Variant:
 class MasterPlaylist:
     variants: List[Variant]
     audio_groups_with_uri: set
+    # GROUP-ID -> rendition playlist URI (for demuxed-audio remuxing).
+    audio_group_uris: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -196,7 +201,6 @@ class SessionConfig:
     bandwidth_cap: int = 0  # 0 = pick the highest-bandwidth variant
     max_catchup_segments: int = 8
     download_concurrency: int = 3
-    legacy_retry_seconds: float = 300.0
     non_ts_threshold: int = 3  # consecutive non-TS segments before a source is incompatible
 
 
@@ -213,10 +217,6 @@ class SessionHooks:
     # The audio language to prefer (ISO 639-2) or None for the first audio
     # stream. Read at every source switch, so a change applies to the next one.
     preferred_audio_language: Optional[Callable[[], Optional[str]]] = None
-    # (channel_id, kind, source_key) when a cold-starting session gives up and
-    # hands the channel to the legacy proxy. kind: fmp4 | sample_aes |
-    # demuxed_audio | not_ts. Counted by engine_stats.
-    on_legacy_fallback: Optional[Callable[[str, str, Tuple], None]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +249,7 @@ def is_master_playlist(text: str) -> bool:
 def parse_master_playlist(text: str, base_url: str) -> MasterPlaylist:
     variants: List[Variant] = []
     audio_groups_with_uri = set()
+    audio_group_uris: Dict[str, str] = {}
     pending: Optional[Dict[str, str]] = None
     for raw in text.splitlines():
         line = raw.strip()
@@ -259,7 +260,10 @@ def parse_master_playlist(text: str, base_url: str) -> MasterPlaylist:
         elif line.startswith("#EXT-X-MEDIA:"):
             attrs = _attributes(line)
             if attrs.get("TYPE", "").upper() == "AUDIO" and attrs.get("URI"):
-                audio_groups_with_uri.add(attrs.get("GROUP-ID", ""))
+                group_id = attrs.get("GROUP-ID", "")
+                audio_groups_with_uri.add(group_id)
+                if group_id and group_id not in audio_group_uris:
+                    audio_group_uris[group_id] = urllib.parse.urljoin(base_url, attrs["URI"])
         elif line.startswith("#"):
             continue
         elif pending is not None:
@@ -275,7 +279,7 @@ def parse_master_playlist(text: str, base_url: str) -> MasterPlaylist:
                 audio_group=pending.get("AUDIO", ""),
             ))
             pending = None
-    return MasterPlaylist(variants, audio_groups_with_uri)
+    return MasterPlaylist(variants, audio_groups_with_uri, audio_group_uris)
 
 
 _VIDEO_CODEC_PREFIXES = ("avc", "hvc", "hev", "vp0", "vp9", "av01", "mp4v")
@@ -438,9 +442,11 @@ class ChannelSession:
         self.pending_discontinuity = False
         self.normalizer = TsNormalizer()
         self._sync_audio_preference()
-        self.state = "idle"  # idle | starting | live | legacy
-        self.legacy_reason = ""
-        self.legacy_since = 0.0
+        self.state = "idle"  # idle | starting | live | sample_aes
+        self.sample_aes_reason = ""
+        self.sample_aes_since = 0.0
+        self._remux: Optional["RemuxSession"] = None
+        self._remux_source_key: Optional[Tuple] = None
         self.last_access = time.monotonic()
         # When the last segment was published (drives is_flowing and the
         # failover catch-up gap). The stale timer has its own start so reporting
@@ -482,12 +488,11 @@ class ChannelSession:
         self.ensure_running()
 
     def ensure_running(self) -> None:
-        if self.state == "legacy":
-            if time.monotonic() - self.legacy_since < self.cfg.legacy_retry_seconds:
-                return
-            self.state = "idle"
-            self.legacy_reason = ""
-            self._ready.clear()
+        if self.state == "sample_aes":
+            # Parked in the SAMPLE-AES shim: the engine can never play this
+            # source, so there is nothing to retry. Failover calls
+            # reset_sample_aes() when a new candidate arrives.
+            return
         if self._task is None or self._task.done():
             self._stopped = False
             if not self.window:
@@ -497,21 +502,21 @@ class ChannelSession:
             self.tune_in_latency_ms = None
             self._task = asyncio.create_task(self._run(), name=f"hls session {self.channel_id}")
 
-    def reset_legacy(self) -> None:
-        """Leave the legacy passthrough so the next poll uses the session engine.
+    def reset_sample_aes(self) -> None:
+        """Leave the SAMPLE-AES shim so the next poll uses the session engine.
 
         Called when failover moved the active candidate while this session was
-        parked in legacy state: the new candidate is session-compatible, so
-        serving it through the legacy passthrough for the rest of
-        legacy_retry_seconds would waste the normalizing engine (and its real
-        playback failover). Safe to call when not in legacy state.
+        parked in the shim: the new candidate may be playable, so serving the
+        old encrypted source through the shim any longer would waste the
+        normalizing engine (and its real playback failover). Safe to call when
+        not in the shim state.
         """
-        if self.state != "legacy":
+        if self.state != "sample_aes":
             return
-        LOGGER.info("Channel session leaving legacy proxy after failover channel=%s", self.channel_id)
+        LOGGER.info("Channel session leaving SAMPLE-AES shim after failover channel=%s", self.channel_id)
         self.state = "idle"
-        self.legacy_reason = ""
-        self.legacy_since = 0.0
+        self.sample_aes_reason = ""
+        self.sample_aes_since = 0.0
         self._ready.clear()
         self.ensure_running()
 
@@ -624,7 +629,7 @@ class ChannelSession:
             "media_sequence": self.window[0].seq if self.window else None,
             "discontinuity_sequence": self.discontinuity_seq,
             "has_audio": self.has_audio,
-            "legacy_reason": self.legacy_reason,
+            "sample_aes_reason": self.sample_aes_reason,
             "memory_mb": round((self._window_bytes + self._grace_bytes) / (1024 * 1024), 1),
             **self.stats,
         }
@@ -665,7 +670,7 @@ class ChannelSession:
                     pass
                 self._wake.clear()
         finally:
-            if self.state != "legacy":
+            if self.state != "sample_aes":
                 self._release_memory()
                 self.state = "idle"
 
@@ -710,6 +715,8 @@ class ChannelSession:
         return max(1.0, min(self.target_duration / 2.0, 4.0))
 
     def _release_memory(self) -> None:
+        # A stopped session owns no remux.
+        self._request_remux_stop()
         # Segments that carried a discontinuity tag leave the playlist here.
         self.discontinuity_seq += sum(1 for s in self.window if s.discontinuity)
         self.window.clear()
@@ -732,7 +739,13 @@ class ChannelSession:
             self._resolved_once = False
             return
         self._resolved_once = True
-        if self.source is None or spec.key != self.source.key:
+        if self._remux is not None and spec.key == self._remux_source_key:
+            # A remux is serving this source: keep the local spec. The
+            # resolver only knows the upstream URL; swapping back would kill
+            # the remux and immediately restart it. Health is checked in
+            # _load_media_playlist.
+            pass
+        elif self.source is None or spec.key != self.source.key:
             self._switch_source(spec)
         elif spec != self.source:
             # Same stream, new token/headers (or another Multi-View audio output
@@ -747,8 +760,16 @@ class ChannelSession:
             self._note_failure("playlist unavailable")
             self._check_stale()
             return
-        if playlist.has_map or playlist.sample_aes:
-            self._incompatible("fMP4 or SAMPLE-AES source", "sample_aes" if playlist.sample_aes else "fmp4")
+        if playlist.sample_aes:
+            # ffmpeg cannot decrypt SAMPLE-AES: park in the minimal shim.
+            self._incompatible("SAMPLE-AES encrypted source", "sample_aes")
+            return
+        if playlist.has_map:
+            # fMP4/CMAF: remux to local TS instead of failing over. The remux
+            # startup happens in _load_media_playlist, so reaching here with
+            # has_map means the remux could not start (already reported).
+            self._note_failure("fMP4 remux unavailable")
+            self._check_stale()
             return
         self.consecutive_failures = 0
 
@@ -821,6 +842,9 @@ class ChannelSession:
         return count
 
     def _switch_source(self, spec: SourceSpec) -> None:
+        # A real source change ends any remux: it was serving the old one.
+        # (The remux-keep fast path in _poll_once never reaches here.)
+        self._request_remux_stop()
         if self.source is not None:
             self.stats["source_switches"] += 1
             LOGGER.info(
@@ -853,6 +877,11 @@ class ChannelSession:
         if source is None:
             return None
         if source.local:
+            if self._remux is not None and not self._remux.healthy():
+                LOGGER.warning("Remux unhealthy, failing over channel=%s", self.channel_id)
+                await self._stop_remux()
+                self._report_failure("remux unhealthy")
+                return None
             text = await asyncio.to_thread(_read_text_file, source.url, self.cfg.max_playlist_bytes)
             if text is None:
                 return None
@@ -867,13 +896,16 @@ class ChannelSession:
                 self.media_url = None  # variant token expired: re-resolve the master next poll
             return None
         text = result.body.decode("utf-8", errors="replace")
+        audio_url = ""
+        variant_url = result.url
         if is_master_playlist(text):
-            variant, demuxed = choose_variant(parse_master_playlist(text, result.url), self.cfg.bandwidth_cap)
+            master = parse_master_playlist(text, result.url)
+            variant, demuxed = choose_variant(master, self.cfg.bandwidth_cap)
             if variant is None:
                 return None
-            if demuxed:
-                self._incompatible("separate audio rendition", "demuxed_audio")
-                return None
+            if demuxed and variant.audio_group:
+                audio_url = master.audio_group_uris.get(variant.audio_group, "")
+            variant_url = variant.uri
             self.media_url = variant.uri
             result = await self.hooks.fetch(variant.uri, headers, self.cfg.max_playlist_bytes, self.cfg.playlist_timeout)
             if result is None or result.status != 200:
@@ -884,7 +916,84 @@ class ChannelSession:
                 return None
         elif self.media_url is None:
             self.media_url = result.url
-        return parse_media_playlist(text, result.url)
+        playlist = parse_media_playlist(text, result.url)
+        if playlist.has_map or audio_url:
+            # fMP4/CMAF segments or a demuxed audio rendition: remux to local
+            # TS HLS instead of the old passthrough proxy. On success the
+            # source becomes local and we read the remuxed playlist below.
+            if await self._start_remux(variant_url, audio_url, headers):
+                return await self._load_media_playlist()
+            return None
+        return playlist
+
+    async def _start_remux(self, variant_url: str, audio_url: str, headers: Dict[str, str]) -> bool:
+        """Start an ffmpeg remux of the variant to local HLS.
+
+        On success the session source becomes the local playlist and the
+        normal poll loop continues unchanged. Returns False when the remux
+        could not start (failure already reported for failover).
+        """
+        import ffmpeg_proc
+        from remux_ingest import RemuxSession, RemuxSpec
+
+        if not ffmpeg_proc.FFMPEG_AVAILABLE:
+            # Unplayable without ffmpeg: fail over to another source if one
+            # exists, otherwise the normal stale/failure machinery takes over.
+            LOGGER.warning("Cannot remux fMP4 source: ffmpeg unavailable channel=%s", self.channel_id)
+            if self.source is not None and self._report_incompatible(self.source.key, "fMP4 source but ffmpeg is unavailable"):
+                self.source = None  # re-resolve the (new) active source next poll
+            else:
+                self._note_failure("fMP4 source but ffmpeg is unavailable")
+            return False
+        await self._stop_remux()
+        source = self.source
+        spec = RemuxSpec(
+            url=variant_url,
+            audio_url=audio_url,
+            referer=source.referer if source else "",
+            origin=source.origin if source else "",
+            cookies=source.cookies if source else "",
+            user_agent=headers.get("User-Agent", ""),
+        )
+        remux = RemuxSession()
+        try:
+            local_path = await remux.start(spec)
+        except RuntimeError as exc:
+            LOGGER.warning("Remux failed to start channel=%s (%s)", self.channel_id, exc)
+            self._report_failure(f"remux failed: {exc}")
+            return False
+        self._remux = remux
+        self._remux_source_key = source.key if source else None
+        self.source = SourceSpec(
+            key=source.key if source else ("remux",),
+            url=local_path,
+            local=True,
+            label=((source.label if source else "") + " (remux)").strip(),
+            referer=source.referer if source else "",
+            origin=source.origin if source else "",
+            cookies=source.cookies if source else "",
+        )
+        self.media_url = None
+        self.last_useq = None
+        # A fresh playlist means a new timestamp epoch, like a source switch.
+        self.normalizer.start_new_epoch()
+        self.pending_discontinuity = bool(self.window)
+        LOGGER.info("Channel session started remux ingest channel=%s", self.channel_id)
+        return True
+
+    async def _stop_remux(self) -> None:
+        remux, self._remux = self._remux, None
+        self._remux_source_key = None
+        if remux is not None:
+            await remux.stop()
+
+    def _request_remux_stop(self) -> None:
+        """Stop the remux from a sync context (fire-and-forget)."""
+        if self._remux is None:
+            return
+        from state import _spawn_background_task
+
+        _spawn_background_task(self._stop_remux(), f"stop remux {self.channel_id}")
 
     def _segment_deadline(self, segment: UpstreamSegment) -> float:
         return max(self.cfg.segment_deadline_min, self.cfg.segment_deadline_factor * max(segment.duration, 0.0))
@@ -1118,21 +1227,27 @@ class ChannelSession:
             LOGGER.exception("report_failure hook failed channel=%s", self.channel_id)
 
     def _incompatible(self, reason: str, kind: str = "") -> None:
+        """Handle a source the normalizing engine cannot play.
+
+        fMP4 and demuxed audio never reach here (they go through the remux
+        ingest). SAMPLE-AES cannot be remuxed, so a cold session parks in the
+        minimal shim; anything else (notably not_ts: garbage segments) goes
+        through the normal failover path.
+        """
         if self.source is None:
             return
         key = self.source.key
-        if not self.window:
-            # Nothing served yet. Prefer another, compatible source; only use
-            # the legacy passthrough proxy when there is none.
+        if kind == "sample_aes" and not self.window:
+            # Nothing served yet. Prefer another source when one exists; only
+            # park in the SAMPLE-AES shim when there is none.
             if self._report_incompatible(key, reason):
-                LOGGER.info("Channel session skipping incompatible source channel=%s reason=%s", self.channel_id, reason)
+                LOGGER.info("Channel session skipping SAMPLE-AES source channel=%s reason=%s", self.channel_id, reason)
                 self.source = None  # re-resolve the (new) active source next poll
                 return
-            LOGGER.info("Channel session using legacy proxy channel=%s reason=%s", self.channel_id, reason)
-            self.state = "legacy"
-            self.legacy_reason = reason
-            self.legacy_since = time.monotonic()
-            self._record_legacy_fallback(kind or "unknown", key)
+            LOGGER.info("Channel session using SAMPLE-AES shim channel=%s reason=%s", self.channel_id, reason)
+            self.state = "sample_aes"
+            self.sample_aes_reason = reason
+            self.sample_aes_since = time.monotonic()
             self._stopped = True
             self._ready.set()
             return
@@ -1140,14 +1255,6 @@ class ChannelSession:
             return
         LOGGER.warning("Channel session source incompatible channel=%s reason=%s", self.channel_id, reason)
         self._report_incompatible(key, reason)
-
-    def _record_legacy_fallback(self, kind: str, key: Tuple) -> None:
-        if self.hooks.on_legacy_fallback is None:
-            return
-        try:
-            self.hooks.on_legacy_fallback(self.channel_id, kind, key)
-        except Exception:
-            LOGGER.exception("on_legacy_fallback hook failed channel=%s", self.channel_id)
 
     def _report_incompatible(self, key: Tuple, reason: str) -> bool:
         try:
@@ -1217,4 +1324,4 @@ class SessionRegistry:
         await asyncio.gather(*(s.close() for s in sessions), return_exceptions=True)
 
     def snapshot(self) -> Dict[str, dict]:
-        return {cid: s.snapshot() for cid, s in self.sessions.items() if s.is_running or s.state == "legacy"}
+        return {cid: s.snapshot() for cid, s in self.sessions.items() if s.is_running or s.state == "sample_aes"}
