@@ -59,7 +59,6 @@ from catalog import _special_channel_for, _sport_labeled_name, resolve_espn_logo
 from updates import update_check_loop
 import provider_tools
 import legacy_proxy
-from legacy_proxy import _STARTUP_BUFFER_TASKS, PREFETCH_CONCURRENCY
 from ffmpeg_proc import _check_ffmpeg_available, _child_process_creationflags, run_roots
 import placeholder
 from placeholder import _stop_placeholder_process
@@ -121,12 +120,33 @@ def _install_loop_exception_filter() -> None:
     loop.set_exception_handler(handler)
 
 
+# Env knobs the 3.0 remux workstream removed. Still set in the environment:
+# they are now ignored, so warn once at startup instead of silently dropping.
+_REMOVED_ENV_KNOBS = (
+    "STREAM_CHUNK_CACHE_TTL", "STREAM_CHUNK_CACHE_CAPACITY", "STREAM_CHUNK_CACHE_MAX_BYTES",
+    "STREAM_STARTUP_BUFFER_SECONDS",
+    "PREFETCH_CHUNK_COUNT", "PREFETCH_CONCURRENCY",
+    "MAX_MANIFEST_BYTES", "MAX_RESOURCE_BYTES", "MAX_CACHEABLE_CHUNK_BYTES",
+    "LEGACY_RETRY_SECONDS", "INCOMPATIBLE_RETRY_SECONDS",
+)
+
+
+def _warn_removed_env_knobs() -> None:
+    stale = [name for name in _REMOVED_ENV_KNOBS if os.getenv(name)]
+    if stale:
+        LOGGER.warning(
+            "Ignoring removed env knobs (3.0 legacy proxy retired): %s",
+            ", ".join(sorted(stale)),
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
     _install_loop_exception_filter()
     init_db()
     _METRIC_WRITER.start()
+    _warn_removed_env_knobs()
     # Before wiping the run dirs: their pid files identify ffmpeg left running
     # by a crashed previous instance (and those would keep the files locked).
     _kill_orphaned_ffmpeg()
@@ -142,8 +162,6 @@ async def lifespan(app: FastAPI):
     _TEAM_SCRAPE_TASKS.clear()
     _SCRAPE_IN_FLIGHT.clear()
     _TEAM_STATE_LOCKS.clear()
-    _STARTUP_BUFFER_TASKS.clear()
-    legacy_proxy._PREFETCH_SEMAPHORE = asyncio.Semaphore(PREFETCH_CONCURRENCY)
     try:
         scrapers.PLAYWRIGHT_CLIENT = await async_playwright().start()
         scrapers.SHARED_BROWSER = await scrapers.PLAYWRIGHT_CLIENT.chromium.launch(headless=True)
@@ -271,7 +289,6 @@ async def lifespan(app: FastAPI):
     await _cancel_background_tasks()
     await _METRIC_WRITER.stop()
     close_all_db_connections()
-    _STARTUP_BUFFER_TASKS.clear()
     for run_root in run_roots():
         shutil.rmtree(run_root.path, ignore_errors=True)
         
@@ -299,7 +316,6 @@ async def lifespan(app: FastAPI):
         state.MEDIA_HTTP_CLIENT = None
     scrapers.SHARED_BROWSER = None
     scrapers.PLAYWRIGHT_CLIENT = None
-    legacy_proxy._PREFETCH_SEMAPHORE = None
     stream_state.clear()
 
 def _is_expected_slow_request(scope) -> bool:
