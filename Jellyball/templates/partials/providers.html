@@ -1,7 +1,12 @@
-<div class="card" id="provider-status-card" data-initial="{{ (ctx.providers or [])|tojson|forceescape }}">
+<div class="card" id="provider-status-card" data-initial="{{ (ctx.providers or [])|tojson|forceescape }}" data-plugin-errors="{{ (ctx.plugin_errors or [])|tojson|forceescape }}">
     <h3>🛰️ Provider Status</h3>
-    <p class="hint-text">Each provider's last success, how many events its index page listed (zero on every search means the site has likely changed or gone), and its circuit breaker. Test runs one search without touching these numbers. Enable and priority apply to the next search (a lower priority number ranks first).</p>
+    <p class="hint-text">Each provider's last success, how many events its index page listed (zero on every search means the site has likely changed or gone), and its circuit breaker. Test runs one search without touching these numbers. Enable and priority apply to the next search (a lower priority number ranks first). Plugins are listed with their version and origin; third-party plugins load from the plugins/third_party/ directory.</p>
     {% if ctx.error %}<p style="color: var(--danger-text);">Could not load provider status: {{ ctx.error }}</p>{% endif %}
+    <div style="margin-bottom: 0.75rem;">
+        <button type="button" class="btn-secondary" id="provider-reload-plugins">Reload plugins</button>
+        <span class="hint-text" id="provider-reload-result" style="margin-left: 0.5rem;"></span>
+    </div>
+    <div id="provider-plugin-errors" style="display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 0.75rem;"></div>
     <div id="provider-status-list" style="display: flex; flex-direction: column; gap: 0.75rem;">
         <p style="color: var(--text-muted);">Loading...</p>
     </div>

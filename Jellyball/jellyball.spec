@@ -145,6 +145,7 @@ hiddenimports = [
     "alerts",
     "updates",
     "legacy_proxy",
+    "remux_ingest",
     "upstream",
     "ffmpeg_proc",
     "placeholder",

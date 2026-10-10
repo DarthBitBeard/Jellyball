@@ -143,7 +143,7 @@ def _mark_scrape_finished(data: dict, result: str, error: str = "") -> None:
 
 
 _CANDIDATE_HEALTH_FIELDS = (
-    "last_health_check", "last_health_ok", "consecutive_failures", "session_compatible", "incompatible_at",
+    "last_health_check", "last_health_ok", "consecutive_failures",
     "probe_state", "has_audio", "codec_signature",
 )
 
@@ -174,7 +174,10 @@ def _merge_stream_candidates(
             active_key = candidate_source_key(active)
             for candidate in fresh:
                 if candidate.get("url") and candidate_source_key(candidate) == active_key:
-                    for field in ("url", "referer", "origin"):
+                    # Refreshed, never preserved: quality is re-probed every
+                    # scrape, so the active candidate picks up fresh data here
+                    # instead of trusting the previous scrape's numbers.
+                    for field in ("url", "referer", "origin", "quality"):
                         if candidate.get(field):
                             active[field] = candidate[field]
                     break
@@ -439,8 +442,6 @@ WINDOW_CLOSE_GRACE_SECONDS = _positive_env_number("WINDOW_CLOSE_GRACE_SECONDS", 
 # A channel's only source stalls: retry it this many times before No Signal.
 SELF_RETRY_LIMIT = bounded_int(os.getenv("SELF_RETRY_LIMIT", "2"), 2, 0, 10)
 SELF_RETRY_WINDOW = _positive_env_number("SELF_RETRY_WINDOW", 120.0)
-# Session-incompatible sources (fMP4, separate audio) get another chance later.
-INCOMPATIBLE_RETRY_SECONDS = _positive_env_number("INCOMPATIBLE_RETRY_SECONDS", 3600.0)
 FAILOVER_ALERT_COOLDOWN = _positive_env_number("FAILOVER_ALERT_COOLDOWN", 300.0)
 TOKEN_REFRESH_COOLDOWN = _positive_env_number("TOKEN_REFRESH_COOLDOWN", 120.0)
 # Failover candidate tiers: known-good within this long; failed longer ago than
@@ -463,12 +464,6 @@ def _candidate_tier(candidate: dict, now: float) -> int:
     return 3
 
 
-def _candidate_session_compatible(candidate: dict, now: float) -> bool:
-    if candidate.get("session_compatible", True) is not False:
-        return True
-    return now - float(candidate.get("incompatible_at") or 0.0) > INCOMPATIBLE_RETRY_SECONDS
-
-
 def _best_candidate_index(candidates: List[dict]) -> int:
     """Where a (re)built candidate list should start: the best-health usable
     source, list order breaking ties (the list is already ranked by quality)."""
@@ -477,11 +472,7 @@ def _best_candidate_index(candidates: List[dict]) -> int:
     now = time.time()
     ranked = sorted(
         range(len(candidates)),
-        key=lambda i: (
-            0 if _candidate_session_compatible(candidates[i], now) else 1,
-            _candidate_tier(candidates[i], now),
-            i,
-        ),
+        key=lambda i: (_candidate_tier(candidates[i], now), i),
     )
     return ranked[0]
 
@@ -510,10 +501,7 @@ def _pick_next_candidate(
         codec_penalty = 0 if prefer_signature is None or signature in (None, prefer_signature) else 1
         return tier, codec_penalty, order.index(index)
 
-    eligible = [
-        index for index in order
-        if _candidate_session_compatible(candidates[index], now) and rank(index)[0] < 3
-    ]
+    eligible = [index for index in order if rank(index)[0] < 3]
     return min(eligible, key=rank) if eligible else None
 
 
@@ -535,7 +523,7 @@ def _candidates_likely_share_tokens(candidates: List[dict]) -> bool:
     return len(hosts) <= 1 or len(providers) <= 1
 
 
-async def request_failover(team_id: str, source_key: tuple, reason: str, incompatible: bool = False,
+async def request_failover(team_id: str, source_key: tuple, reason: str,
                            force_failover: bool = False) -> bool:
     """Single failover entry point for channel sessions (real playback) and
     health probes (unwatched channels). A no-op if the active candidate already
@@ -543,12 +531,12 @@ async def request_failover(team_id: str, source_key: tuple, reason: str, incompa
 
     Serialized with scrape-driven candidate merges via `_team_state_lock`."""
     async with _team_state_lock(team_id):
-        return await _request_failover_unlocked(team_id, source_key, reason, incompatible=incompatible,
+        return await _request_failover_unlocked(team_id, source_key, reason,
                                                 force_failover=force_failover)
 
 
 async def _request_failover_unlocked(
-    team_id: str, source_key: tuple, reason: str, incompatible: bool = False,
+    team_id: str, source_key: tuple, reason: str,
     force_failover: bool = False,
 ) -> bool:
     data = stream_state.get(team_id)
@@ -564,9 +552,6 @@ async def _request_failover_unlocked(
     active = candidates[active_index]
     active["last_health_ok"] = False
     active["last_health_check"] = time.time()
-    if incompatible:
-        active["session_compatible"] = False
-        active["incompatible_at"] = time.time()
     team_name = data.get("name", team_id)
     if reason == "playlist forbidden":
         refreshed = _request_token_refresh(team_id, data)
@@ -580,7 +565,7 @@ async def _request_failover_unlocked(
         # as a backstop.
     next_index = _pick_next_candidate(candidates, active_index, active.get("codec_signature"))
     if next_index is None:
-        if not incompatible and _allow_self_retry(data):
+        if _allow_self_retry(data):
             # The only (usable) source stalled. A stall is often brief, so give
             # it another stale window instead of going straight to No Signal.
             LOGGER.info("Retrying the same source team=%s reason=%s", team_id, reason)
@@ -602,13 +587,12 @@ async def _request_failover_unlocked(
     new_provider = candidates[next_index].get("provider", "Unknown")
     old_provider = active.get("provider", "Unknown")
     SESSIONS.poke(team_id)
-    # The session may be parked in the legacy passthrough (its old source was
-    # incompatible). The new candidate passed the session-compatibility filter
-    # in _pick_next_candidate, so hand it to the normalizing engine instead of
-    # leaving the passthrough serving it for the rest of the retry window.
+    # The session may be parked in the SAMPLE-AES shim. The new candidate
+    # may be playable, so hand it to the normalizing engine instead of leaving
+    # the shim serving the old encrypted source.
     session = SESSIONS.peek(team_id)
     if session is not None:
-        session.reset_legacy()
+        session.reset_sample_aes()
     LOGGER.info(
         "Failover team=%s from=%s to=%s reason=%s",
         team_id, old_provider, new_provider, reason,
@@ -689,7 +673,7 @@ async def _probe_exhausted_candidates(team_id: str, data: dict) -> None:
             return
         now = time.time()
         for index, candidate in enumerate(data["candidates"]):
-            if candidate.get("last_health_ok") is True and _candidate_session_compatible(candidate, now):
+            if candidate.get("last_health_ok") is True:
                 data["active_index"] = index
                 data["exhausted"] = False
                 data["is_healthy"] = True

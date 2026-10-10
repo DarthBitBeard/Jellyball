@@ -41,101 +41,31 @@ def _candidate(provider, url):
     return {"provider": provider, "url": url, "referer": "", "origin": ""}
 
 
-class LegacyFailureReportingTest(unittest.TestCase):
-    def setUp(self):
-        legacy_proxy._LEGACY_UPSTREAM_FAILURES.clear()
-        legacy_proxy._LEGACY_FAILURE_THROTTLE.clear()
-        legacy_proxy._MANIFEST_TEAM.clear()
-        legacy_proxy.set_legacy_failure_hook(None)
-        engine_stats.reset()
-
-    def tearDown(self):
-        legacy_proxy.set_legacy_failure_hook(None)
-        legacy_proxy._LEGACY_UPSTREAM_FAILURES.clear()
-        legacy_proxy._LEGACY_FAILURE_THROTTLE.clear()
-
-    def test_manifest_failures_report_after_threshold(self):
-        calls = []
-        legacy_proxy.set_legacy_failure_hook(lambda team_id, reason: calls.append((team_id, reason)))
-        legacy_proxy._legacy_upstream_failed("t1", "http://x/m.m3u8", "legacy manifest unreachable", 2)
-        self.assertEqual(calls, [])  # first failure: below threshold
-        legacy_proxy._legacy_upstream_failed("t1", "http://x/m.m3u8", "legacy manifest unreachable", 2)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0], "t1")
-
-    def test_success_resets_consecutive_count(self):
-        calls = []
-        legacy_proxy.set_legacy_failure_hook(lambda team_id, reason: calls.append(reason))
-        legacy_proxy._legacy_upstream_failed("t1", "http://x/m.m3u8", "x", 2)
-        legacy_proxy._legacy_upstream_ok("t1", "http://x/m.m3u8")
-        legacy_proxy._legacy_upstream_failed("t1", "http://x/m.m3u8", "x", 2)
-        self.assertEqual(calls, [])  # counter was reset by the success
-
-    def test_reports_throttled_per_source(self):
-        calls = []
-        legacy_proxy.set_legacy_failure_hook(lambda team_id, reason: calls.append(reason))
-        for _ in range(4):  # two threshold crossings back to back
-            legacy_proxy._legacy_upstream_failed("t1", "http://x/m.m3u8", "x", 2)
-        self.assertEqual(len(calls), 1)  # second report inside the 30s throttle window
-
-    def test_chunk_attribution_via_manifest_team(self):
-        legacy_proxy._note_manifest_team("http://x/m.m3u8", "team-9")
-        legacy_proxy._SEGMENT_TO_MANIFEST["http://x/seg1.ts"] = "http://x/m.m3u8"
-        try:
-            team_id, manifest_url = legacy_proxy._manifest_team_for_chunk("http://x/seg1.ts")
-        finally:
-            legacy_proxy._SEGMENT_TO_MANIFEST.pop("http://x/seg1.ts", None)
-        self.assertEqual((team_id, manifest_url), ("team-9", "http://x/m.m3u8"))
-
-    def test_on_legacy_proxy_failure_resolves_active_candidate(self):
-        reported = []
-        data = {
-            "candidates": [_candidate("A", "http://a/x.m3u8"), _candidate("B", "http://b/x.m3u8")],
-            "active_index": 1,
-        }
-        with patch.dict(sessions.stream_state, {"team-1": data}), \
-             patch.object(sessions, "_on_session_failure",
-                          side_effect=lambda cid, key, reason: reported.append((cid, key, reason))):
-            sessions._on_legacy_proxy_failure("team-1", "legacy manifest unreachable")
-        self.assertEqual(len(reported), 1)
-        cid, key, reason = reported[0]
-        self.assertEqual(cid, "team-1")
-        self.assertEqual(reason, "legacy manifest unreachable")
-        # Key matches the ACTIVE (index 1) candidate, so request_failover accepts it.
-        self.assertEqual(key, sessions.candidate_source_key(data["candidates"][1]))
-
-    def test_on_legacy_proxy_failure_no_candidates_is_noop(self):
-        with patch.dict(sessions.stream_state, {"team-1": {"candidates": []}}), \
-             patch.object(sessions, "_on_session_failure") as failure:
-            sessions._on_legacy_proxy_failure("team-1", "x")
-        failure.assert_not_called()
-
-
-class ResetLegacyTest(unittest.TestCase):
-    def test_reset_legacy_restarts_engine(self):
+class ResetSampleAesTest(unittest.TestCase):
+    def test_reset_sample_aes_restarts_engine(self):
         session = ChannelSession("team-1", _quiet_hooks(), SessionConfig())
-        session.state = "legacy"
-        session.legacy_reason = "fmp4"
-        session.legacy_since = time.monotonic()
+        session.state = "sample_aes"
+        session.sample_aes_reason = "SAMPLE-AES"
+        session.sample_aes_since = time.monotonic()
         session._ready.set()
         with patch.object(session, "ensure_running") as ensure:
-            session.reset_legacy()
+            session.reset_sample_aes()
         self.assertEqual(session.state, "idle")
-        self.assertEqual(session.legacy_reason, "")
+        self.assertEqual(session.sample_aes_reason, "")
         self.assertFalse(session._ready.is_set())
         ensure.assert_called_once_with()
 
-    def test_reset_legacy_noop_when_not_legacy(self):
+    def test_reset_sample_aes_noop_when_not_parked(self):
         session = ChannelSession("team-1", _quiet_hooks(), SessionConfig())
         session.state = "live"
         with patch.object(session, "ensure_running") as ensure:
-            session.reset_legacy()
+            session.reset_sample_aes()
         self.assertEqual(session.state, "live")
         ensure.assert_not_called()
 
-    def test_failover_calls_reset_legacy_on_session(self):
+    def test_failover_calls_reset_sample_aes_on_session(self):
         session = MagicMock()
-        session.state = "legacy"
+        session.state = "sample_aes"
         data = {
             "type": "team",
             "name": "Team",
@@ -155,7 +85,7 @@ class ResetLegacyTest(unittest.TestCase):
             asyncio.run(
                 failover._request_failover_unlocked("team-1", key, "playlist stale")
             )
-        session.reset_legacy.assert_called_once_with()
+        session.reset_sample_aes.assert_called_once_with()
 
 
 class ColdStartGuardTest(unittest.TestCase):

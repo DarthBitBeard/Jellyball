@@ -28,7 +28,6 @@ from catalog import _season_resume_label, get_catalog_entries, is_stream_window_
 from alerts import request_jellyfin_guide_refresh_if_changed
 from jellyfin_client import load_status as load_jellyfin_status
 from updates import _update_available, _UPDATE_STATE
-from legacy_proxy import CHUNK_CACHE
 import engine_stats
 import epg
 import ffmpeg_proc
@@ -160,6 +159,17 @@ async def api_status(auth: bool = Depends(verify_dashboard_auth)):
         active = candidates[active_index] if 0 <= active_index < len(candidates) else None
         session = SESSIONS.peek(team_id)
         guide = epg.now_next_for_channel(team_id, data)
+        # Per-candidate quality for the 5s snapshot patcher, so it can render
+        # the same quality badges the server-side channel cards show.
+        candidate_entries = [
+            {
+                "provider": cand.get("provider"),
+                "match_title": cand.get("match_title"),
+                "quality": dict(cand.get("quality") or {}) or None,
+                "active": idx == active_index,
+            }
+            for idx, cand in enumerate(candidates)
+        ]
         channels.append({
             "team_id": team_id,
             "name": data.get("name", team_id),
@@ -171,6 +181,7 @@ async def api_status(auth: bool = Depends(verify_dashboard_auth)):
             "exhausted": bool(data.get("exhausted")),
             "failover_count": int(data.get("failover_count", 0)),
             "candidate_count": len(candidates),
+            "candidates": candidate_entries,
             "active_provider": active.get("provider") if active else None,
             "stream_window_active": is_stream_window_active(data),
             "start_time": data.get("start_time", ""),
@@ -307,12 +318,12 @@ async def prometheus_metrics(auth: bool = Depends(verify_dashboard_auth)):
             f'{1 if info.get("open") else 0}'
         )
     lines += [
-        "# HELP jellyball_legacy_fallbacks_total Sessions handed to the legacy proxy, by reason and provider.",
-        "# TYPE jellyball_legacy_fallbacks_total counter",
+        "# HELP jellyball_remux_total Remux ingest events (3.0: fMP4/demuxed sources via ffmpeg), by event and provider.",
+        "# TYPE jellyball_remux_total counter",
     ]
-    for row in engine_stats.legacy_fallback_counts():
+    for row in engine_stats.remux_counts():
         lines.append(
-            f'jellyball_legacy_fallbacks_total{{reason="{_prometheus_label(row["reason"])}",'
+            f'jellyball_remux_total{{event="{_prometheus_label(row["event"])}",'
             f'provider="{_prometheus_label(row["provider"])}"}} {row["count"]}'
         )
     lines += [
@@ -496,11 +507,9 @@ async def get_advanced_settings(auth: bool = Depends(verify_dashboard_auth)):
 
 @router.get("/api/cache-metrics", response_class=JSONResponse)
 async def get_cache_metrics(auth: bool = Depends(verify_dashboard_auth)):
-    try:
-        return await CHUNK_CACHE.stats()
-    except Exception as exc:
-        _log_failure("get cache metrics", exc)
-        return {"hit_rate": 0, "total_hits": 0, "total_misses": 0}
+    # 3.0 removed the legacy chunk cache; keep the endpoint shape for old
+    # dashboard builds, reporting the remux counters instead.
+    return {"remux": engine_stats.remux_counts(), "hit_rate": 0, "total_hits": 0, "total_misses": 0}
 
 
 @router.get("/api/performance-stats", response_class=JSONResponse)

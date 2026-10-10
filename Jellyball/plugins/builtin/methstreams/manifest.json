@@ -1,0 +1,14 @@
+{
+    "name": "MethStreams",
+    "version": "3.0.0",
+    "api_version": 1,
+    "entry": "provider.py:MethStreamsScraper",
+    "author": "Jellyball",
+    "description": "Built-in MethStreams provider.",
+    "builtin": true,
+    "linear": false,
+    "permissions": [
+        "network",
+        "browser"
+    ]
+}

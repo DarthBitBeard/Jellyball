@@ -1,0 +1,14 @@
+{
+    "name": "DaddyLive",
+    "version": "3.0.0",
+    "api_version": 1,
+    "entry": "provider.py:DaddyLiveScraper",
+    "author": "Jellyball",
+    "description": "Built-in DaddyLive provider.",
+    "builtin": true,
+    "linear": true,
+    "permissions": [
+        "network",
+        "browser"
+    ]
+}

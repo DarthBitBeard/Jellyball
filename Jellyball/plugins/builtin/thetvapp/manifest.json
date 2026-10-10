@@ -1,0 +1,14 @@
+{
+    "name": "TheTVApp",
+    "version": "3.0.0",
+    "api_version": 1,
+    "entry": "provider.py:TheTVAppScraper",
+    "author": "Jellyball",
+    "description": "Built-in TheTVApp provider.",
+    "builtin": true,
+    "linear": true,
+    "permissions": [
+        "network",
+        "browser"
+    ]
+}

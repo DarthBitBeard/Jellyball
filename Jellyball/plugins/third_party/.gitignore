@@ -1,0 +1,6 @@
+# Third-party provider plugins live here (each in its own directory with a
+# manifest.json). They are never committed: installing a plugin is an explicit
+# operator act, like a browser extension. See ../README.md.
+*
+!.gitignore
+!README.md
