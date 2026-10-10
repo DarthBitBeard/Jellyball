@@ -4,8 +4,8 @@ Multi-View per-member audio playlists.
 
 from fastapi import APIRouter, HTTPException, Request
 
+from config import LOGGER
 from state import stream_state
-from legacy_proxy import _legacy_proxy_stream
 from sessions import _serve_channel_playlist, _serve_session_segment
 from multiview import _multiview_audio_view, _serve_multiview_audio_playlist, _touch_multiview_viewer
 
@@ -50,7 +50,14 @@ async def stream_segment(team_id: str, seq: int):
 @router.api_route("/stream/{team_id}", methods=["GET", "HEAD"])
 async def proxy_stream(team_id: str, request: Request, provider: str = ""):
     """Extensionless alias kept for existing Jellyfin tuner configs. `?provider=`
-    pins one provider for debugging via the legacy passthrough proxy."""
+    pins one provider's candidate for debugging (served through the normal
+    session engine, not a passthrough)."""
     if provider and request.method == "GET" and team_id in stream_state:
-        return await _legacy_proxy_stream(team_id, request, provider)
+        data = stream_state.get(team_id) or {}
+        candidates = data.get("candidates") or []
+        for idx, candidate in enumerate(candidates):
+            if str(candidate.get("provider", "")).lower() == provider.lower():
+                data["active_index"] = idx
+                LOGGER.info("Pinned channel=%s to provider=%s candidate", team_id, provider)
+                break
     return await _serve_channel_playlist(team_id, request)

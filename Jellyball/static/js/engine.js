@@ -70,13 +70,13 @@
     }
 
     function renderLegacy(status) {
-        const body = document.getElementById('engine-legacy-body');
+        const body = document.getElementById('engine-remux-body');
         if (!body || !status) return;
-        const reasons = status.legacy_reasons || {};
-        const rows = status.legacy_fallbacks || [];
+        const events = status.remux_events || {};
+        const rows = status.remux || [];
         body.innerHTML = rows.length ? rows.map(r =>
-            '<tr><td style="padding: 0.4rem;">' + esc(reasons[r.reason] || r.reason) + '</td><td style="padding: 0.4rem;">' + esc(r.provider) + '</td><td style="padding: 0.4rem;">' + esc(r.count) + '</td></tr>'
-        ).join('') : '<tr><td colspan="3" style="padding: 0.5rem; color: var(--text-muted);">No fallbacks since start.</td></tr>';
+            '<tr><td style="padding: 0.4rem;">' + esc(events[r.event] || r.event) + '</td><td style="padding: 0.4rem;">' + esc(r.provider) + '</td><td style="padding: 0.4rem;">' + esc(r.count) + '</td></tr>'
+        ).join('') : '<tr><td colspan="3" style="padding: 0.5rem; color: var(--text-muted);">No remux activity since start.</td></tr>';
     }
 
     async function refresh() {

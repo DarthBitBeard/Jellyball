@@ -1,0 +1,25 @@
+<div class="card" id="engine-remux-stats">
+    <h3>Remux Ingest</h3>
+    <p class="hint-text">fMP4 and separate-audio sources are remuxed through ffmpeg into local TS HLS, by event and provider, since the last restart.</p>
+    {% if ctx.error %}
+    <p style="color: var(--danger);">{{ ctx.error }}</p>
+    {% endif %}
+    <div style="overflow-x: auto;">
+        <table style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr style="text-align: left; color: var(--text-muted); font-size: 0.85rem;">
+                    <th style="padding: 0.4rem;">Event</th>
+                    <th style="padding: 0.4rem;">Provider</th>
+                    <th style="padding: 0.4rem;">Count</th>
+                </tr>
+            </thead>
+            <tbody id="engine-remux-body">
+                {% for row in ctx.rows or [] %}
+                <tr><td style="padding: 0.4rem;">{{ (ctx.events or {}).get(row.event, row.event) }}</td><td style="padding: 0.4rem;">{{ row.provider }}</td><td style="padding: 0.4rem;">{{ row.count }}</td></tr>
+                {% else %}
+                <tr><td colspan="3" style="padding: 0.5rem; color: var(--text-muted);">No remux activity since start.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>

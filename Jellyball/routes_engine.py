@@ -26,12 +26,12 @@ router = APIRouter()
 
 @router.get("/api/engine/status")
 async def api_engine_status(auth: bool = Depends(verify_dashboard_auth)):
-    """Provider breaker state and legacy-fallback counts for the Live Sessions
-    and Legacy Fallbacks dashboard cards (per-session numbers: /api/sessions)."""
+    """Provider breaker state and remux counts for the Live Sessions and
+    Remux Ingest dashboard cards (per-session numbers: /api/sessions)."""
     return {
         "breakers": provider_breaker_snapshot(),
-        "legacy_fallbacks": engine_stats.legacy_fallback_counts(),
-        "legacy_reasons": engine_stats.LEGACY_REASONS,
+        "remux": engine_stats.remux_counts(),
+        "remux_events": engine_stats.REMUX_EVENTS,
     }
 
 
@@ -49,8 +49,8 @@ async def _audio_language_context(request: Request) -> dict:
     return {"current": current or "", "languages": engine_settings.AUDIO_LANGUAGES}
 
 
-async def _legacy_context(request: Request) -> dict:
-    return {"rows": engine_stats.legacy_fallback_counts(), "reasons": engine_stats.LEGACY_REASONS}
+async def _remux_context(request: Request) -> dict:
+    return {"rows": engine_stats.remux_counts(), "events": engine_stats.REMUX_EVENTS}
 
 
 register_card(Card(
@@ -58,8 +58,8 @@ register_card(Card(
     scripts=("/static/js/engine.js",), order=20,
 ))
 register_card(Card(
-    tab="performance", name="engine_legacy_fallbacks", template="partials/engine_legacy_fallbacks.html",
-    context=_legacy_context, scripts=("/static/js/engine.js",), order=21,
+    tab="performance", name="engine_remux_stats", template="partials/engine_remux_stats.html",
+    context=_remux_context, scripts=("/static/js/engine.js",), order=21,
 ))
 register_card(Card(
     tab="playback", name="engine_audio_language", template="partials/engine_audio_language.html",

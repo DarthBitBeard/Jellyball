@@ -1,0 +1,14 @@
+{
+    "name": "StreamEast",
+    "version": "3.0.0",
+    "api_version": 1,
+    "entry": "provider.py:StreamEastScraper",
+    "author": "Jellyball",
+    "description": "Built-in StreamEast provider.",
+    "builtin": true,
+    "linear": false,
+    "permissions": [
+        "network",
+        "browser"
+    ]
+}

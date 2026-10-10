@@ -37,14 +37,9 @@ PUBLIC_BY_DESIGN = {
     "/multiview/{channel_id}/audio/{audio_index}.m3u8",
     "/multiview/{channel_id}/audio-{audio_index}/seg/{seq}.ts",
     "/multiview/{channel_id}/audio/{audio_index}/seg/{seq}.ts",
-    # The loopback relay used by the stream sessions: protected by a signed URL, not a password.
-    "/chunk",
-    "/chunk.aac",
-    "/chunk.mp4",
-    "/chunk.ts",
-    "/chunk.vtt",
-    "/resource",
-    "/substream.m3u8",
+    # The SAMPLE-AES shim relay: protected by a signed URL, not a password.
+    "/sample_aes/chunk",
+    "/sample_aes/resource",
 }
 
 

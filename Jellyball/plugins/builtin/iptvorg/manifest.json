@@ -1,0 +1,14 @@
+{
+    "name": "IPTV-Org",
+    "version": "3.0.0",
+    "api_version": 1,
+    "entry": "provider.py:IptvOrgScraper",
+    "author": "Jellyball",
+    "description": "Built-in IPTV-Org provider.",
+    "builtin": true,
+    "linear": true,
+    "permissions": [
+        "network",
+        "browser"
+    ]
+}

@@ -1,0 +1,14 @@
+{
+    "name": "iSportSurge",
+    "version": "3.0.0",
+    "api_version": 1,
+    "entry": "provider.py:ISportSurgeScraper",
+    "author": "Jellyball",
+    "description": "Built-in iSportSurge provider.",
+    "builtin": true,
+    "linear": false,
+    "permissions": [
+        "network",
+        "browser"
+    ]
+}

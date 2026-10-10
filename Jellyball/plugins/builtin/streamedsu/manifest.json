@@ -1,0 +1,14 @@
+{
+    "name": "Streamed",
+    "version": "3.0.0",
+    "api_version": 1,
+    "entry": "provider.py:StreamedSuScraper",
+    "author": "Jellyball",
+    "description": "Built-in Streamed provider.",
+    "builtin": true,
+    "linear": false,
+    "permissions": [
+        "network",
+        "browser"
+    ]
+}

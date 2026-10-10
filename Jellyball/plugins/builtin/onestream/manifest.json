@@ -1,0 +1,14 @@
+{
+    "name": "1Stream",
+    "version": "3.0.0",
+    "api_version": 1,
+    "entry": "provider.py:OneStreamScraper",
+    "author": "Jellyball",
+    "description": "Built-in 1Stream provider.",
+    "builtin": true,
+    "linear": false,
+    "permissions": [
+        "network",
+        "browser"
+    ]
+}
