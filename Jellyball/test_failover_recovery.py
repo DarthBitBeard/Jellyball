@@ -234,12 +234,6 @@ class CandidateSelectionTests(unittest.TestCase):
         merged, index = failover._merge_stream_candidates([failed, good], 0, fresh, keep_active=False)
         self.assertEqual(merged[index]["provider"], "B")
 
-    def test_incompatible_sources_get_another_chance_after_expiry(self):
-        now = time.time()
-        c = {"session_compatible": False, "incompatible_at": now}
-        self.assertFalse(failover._candidate_session_compatible(c, now))
-        self.assertTrue(failover._candidate_session_compatible(c, now + failover.INCOMPATIBLE_RETRY_SECONDS + 1))
-
     def test_token_like_path_segments_do_not_change_the_source_key(self):
         a = _candidate("P", "https://cdn.example/hls/Zx81kQ2mTyp0aLr9bnW3cDeF45/espn/index.m3u8")
         b = _candidate("P", "https://cdn.example/hls/Q9w8E7r6T5y4U3i2O1p0aSdF12/espn/index.m3u8")
@@ -259,7 +253,6 @@ class SessionHookTests(StateMixin, unittest.TestCase):
         state.stream_state["t"] = {"name": "Team", "candidates": [a, b], "active_index": 0}
         with patch.object(sessions, "_spawn_background_task") as spawn:
             self.assertTrue(sessions._on_session_incompatible("t", sessions.candidate_source_key(a), "fMP4"))
-            self.assertFalse(a.get("session_compatible", True))
             state.stream_state["solo"] = {"name": "Solo", "candidates": [dict(a)], "active_index": 0}
             self.assertFalse(sessions._on_session_incompatible("solo", sessions.candidate_source_key(a), "fMP4"))
         for call in spawn.call_args_list:

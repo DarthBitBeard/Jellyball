@@ -131,8 +131,8 @@ def _bootstrap_runtime_files() -> None:
             "# STREAM_PROVIDER_PRIORITY=iSportSurge,MyBuffStreams\n"
             "# ACTIVE_HEALTH_INTERVAL=3\n"
             "# STANDBY_HEALTH_INTERVAL=45\n"
-            "# PREFETCH_CHUNK_COUNT=5\n"
-            "# STREAM_STARTUP_BUFFER_SECONDS=15\n"
+            "# (3.0 removed the legacy proxy: PREFETCH_CHUNK_COUNT and\n"
+            "# STREAM_STARTUP_BUFFER_SECONDS are ignored if set.)\n"
         )
         try:
             USER_ENV_FILE.write_text(template, encoding="utf-8")
