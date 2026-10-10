@@ -689,27 +689,41 @@ class ChannelSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.media_url, variant_url)
         self.assertEqual(len(session.window), 3)
 
-    async def test_fmp4_source_before_any_segment_goes_legacy(self):
+    async def test_fmp4_source_without_ffmpeg_reports_incompatible(self):
         base = "http://upstream"
         self.harness.source = SourceSpec(key=("primary",), url=f"{base}/media.m3u8", label="primary")
         self.harness.set_playlist(f"{base}/media.m3u8", playlist_text(base, list(range(3)), has_map=True))
 
         session = self.make_session()
-        await session._poll_once()
+        import ffmpeg_proc
+        old_available = ffmpeg_proc.FFMPEG_AVAILABLE
+        ffmpeg_proc.FFMPEG_AVAILABLE = False
+        try:
+            await session._poll_once()
+        finally:
+            ffmpeg_proc.FFMPEG_AVAILABLE = old_available
 
-        # No other compatible source (hook returned None): legacy passthrough.
-        self.assertEqual(session.state, "legacy")
+        # No ffmpeg and no standby (hook returned None): failure reported,
+        # session keeps the source and retries via the normal failure path.
+        self.assertNotEqual(session.state, "sample_aes")
         self.assertEqual(len(self.harness.incompatibles), 1)
+        self.assertIsNotNone(session.source)
 
-    async def test_fmp4_cold_start_tries_another_source_before_legacy(self):
+    async def test_fmp4_cold_start_tries_another_source_when_no_ffmpeg(self):
         base = "http://upstream"
         self.harness.source = SourceSpec(key=("primary",), url=f"{base}/media.m3u8", label="primary")
         self.harness.set_playlist(f"{base}/media.m3u8", playlist_text(base, list(range(3)), has_map=True))
         self.harness.incompatible_result = True  # main found a compatible standby
 
         session = self.make_session()
-        await session._poll_once()
-        self.assertNotEqual(session.state, "legacy")
+        import ffmpeg_proc
+        old_available = ffmpeg_proc.FFMPEG_AVAILABLE
+        ffmpeg_proc.FFMPEG_AVAILABLE = False
+        try:
+            await session._poll_once()
+        finally:
+            ffmpeg_proc.FFMPEG_AVAILABLE = old_available
+        self.assertNotEqual(session.state, "sample_aes")
         self.assertIsNone(session.source)
 
         self.harness.source = SourceSpec(key=("backup",), url="http://backup/media.m3u8", label="backup")
