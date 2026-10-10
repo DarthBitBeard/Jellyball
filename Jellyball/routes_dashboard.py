@@ -65,6 +65,7 @@ from multiview import (
     MULTIVIEW_LAYOUTS,
 )
 from failover import _scrape_lifecycle_defaults, _session_on_placeholder, trigger_scrape
+from stream_extractor import quality_badge
 from channels import _add_manual_team, _remove_channel, _set_catalog_entry_enabled
 from tunables import _advanced_settings_html, _apply_tunable, _coerce_tunable, _TUNABLE_DEFAULTS, TUNABLES
 from version import __version__
@@ -79,6 +80,16 @@ def _require_safe_channel_id(channel_id: str) -> str:
     if not _MULTIVIEW_CHANNEL_ID_RE.fullmatch(channel_id or ""):
         raise HTTPException(status_code=400, detail="Invalid channel id")
     return channel_id
+
+
+def _candidate_option_label(cand: dict, idx: int, active_index: int) -> dict:
+    """Dropdown label for one stream candidate, with quality badge when known."""
+    is_active = "★ " if idx == active_index else ""
+    prov = cand.get('provider', 'Unknown')
+    title_trunc = cand.get("match_title", "Stream")[:25]
+    badge = quality_badge(cand)
+    quality_suffix = f" · {badge}" if badge else ""
+    return {"idx": idx, "label": f"{is_active}{prov} - {title_trunc}{quality_suffix}"}
 
 
 # Dashboard templates/static assets. Resolved with _resource_path so both the
@@ -206,12 +217,10 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
             status_text = "Searching / Re-evaluating"
         candidates_list = data.get('candidates', [])
 
-        candidates_options = []
-        for idx, cand in enumerate(candidates_list):
-            is_active = "★ " if idx == data.get('active_index', 0) else ""
-            prov = cand.get('provider', 'Unknown')
-            title_trunc = cand.get("match_title", "Stream")[:25]
-            candidates_options.append({"idx": idx, "label": f"{is_active}{prov} - {title_trunc}"})
+        candidates_options = [
+            _candidate_option_label(cand, idx, data.get('active_index', 0))
+            for idx, cand in enumerate(candidates_list)
+        ]
 
         channel_badge = "Always live" if data.get("always_live") else (
             str(data.get("category") or "manual").upper()
@@ -535,7 +544,6 @@ async def override_stream(team_id: str, candidate_index: int = Form(...), auth: 
             stream_state[team_id]["self_retries"] = 0
             candidate = stream_state[team_id]["candidates"][candidate_index]
             candidate["consecutive_failures"] = 0
-            candidate.pop("session_compatible", None)
             SESSIONS.poke(team_id)
             
             team_name = stream_state[team_id]["name"]
