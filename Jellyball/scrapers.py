@@ -44,29 +44,11 @@ _provider_priority = {
     if name.strip()
 }
 
-class BaseProvider:
-    name = "Base"
-    base_url = ""
-    categories: List[str] = []
 
-    def get_scan_urls(self) -> List[str]:
-        if not self.base_url:
-            return []
-        urls = [self.base_url.rstrip("/")]
-        base_url = self.base_url.rstrip("/") + "/"
-        for cat in self.categories:
-            url = urllib.parse.urljoin(base_url, str(cat).lstrip("/"))
-            if url not in urls:
-                urls.append(url)
-        return urls
-
-    async def search(
-        self,
-        query_or_terms,
-        browser: Optional[Browser] = None,
-        http_client: Optional[httpx.AsyncClient] = None
-    ) -> List[dict]:
-        return []
+# --- Provider classes (3.0.0) --------------------------------------------------
+# The provider classes moved to plugins/builtin/ (one module per provider)
+# and the SDK base classes moved to plugins/sdk.py. Aliases are defined at
+# the end of this module, after the plugin loader runs.
 
 
 def _is_playlist_request_url(value: str) -> bool:
@@ -96,13 +78,17 @@ async def _verify_provider_streams(streams: List[dict], http_client: Optional[ht
         async def verify_one(stream: dict) -> Optional[dict]:
             try:
                 async with verify_semaphore:
+                    enrich: dict = {}
                     is_live = await verify_stream_live(
                         client,
                         stream["url"],
                         stream.get("referer", ""),
                         timeout=8.0,
                         origin=stream.get("origin", ""),
+                        enrich=enrich,
                     )
+                    if is_live and enrich:
+                        stream["quality"] = enrich
             except Exception as exc:
                 _log_failure("verify provider stream", exc)
                 is_live = False
@@ -489,355 +475,6 @@ async def _on_working_mirror(provider: "HtmlAggregatorScraper", mirror: str) -> 
         )
 
 
-class HtmlAggregatorScraper(BaseProvider):
-    """Configurable adapter for aggregators that expose linked event pages."""
-
-    def __init__(self, name: str, base_url: str, categories: Optional[List[str]] = None, event_path_hints: Optional[List[str]] = None):
-        self.name = name.strip() or "Aggregator"
-        self._default_base_url = (base_url or "").strip().rstrip("/")
-        self.categories = list(categories or [])
-        self.event_path_hints = tuple(hint.lower() for hint in (event_path_hints or []) if hint)
-
-    @property
-    def base_url(self) -> str:
-        """The provider's current base URL: a DB override (set via the
-        dashboard's Provider Domains card / POST /settings/providers) if one
-        is active, otherwise the env-var default this scraper was constructed
-        with. Read fresh on every access from a module-level dict that's kept
-        in sync at startup and on save -- never a DB read at search time."""
-        return _PROVIDER_BASE_URL_OVERRIDES.get(self.name) or self._default_base_url
-
-    @base_url.setter
-    def base_url(self, value: str) -> None:
-        self._default_base_url = (value or "").strip().rstrip("/")
-
-    @staticmethod
-    def _anchor_context(anchor) -> str:
-        parts = [
-            anchor.get_text(" ", strip=True),
-            str(anchor.get("title") or ""),
-            str(anchor.get("aria-label") or ""),
-        ]
-        parent = anchor.parent
-        if parent is not None:
-            parts.append(parent.get_text(" ", strip=True))
-        return " ".join(part for part in parts if part)[:600]
-
-    def _is_event_link(self, href: str, page_url: str) -> bool:
-        if not href or href.startswith(("#", "javascript:", "mailto:")):
-            return False
-        candidate = urllib.parse.urljoin(page_url, href)
-        if not _validate_upstream_url(candidate):
-            return False
-        base_host = urllib.parse.urlparse(self.base_url).netloc.lower()
-        if urllib.parse.urlparse(candidate).netloc.lower() != base_host:
-            return False
-        if candidate.rstrip("/") == page_url.rstrip("/"):
-            return False
-        if self.event_path_hints and not any(hint in candidate.lower() for hint in self.event_path_hints):
-            return False
-        return True
-
-    async def _fetch_html(
-        self,
-        client: httpx.AsyncClient,
-        page_url: str,
-        browser: Optional[Browser],
-        *,
-        settle_seconds: float = 0,
-        goto_timeout: int = 35000,
-        networkidle_timeout: int = 8000,
-    ) -> Optional[str]:
-        """Fetch one page: fast HTTP first, falling back to a Playwright-
-        rendered page when the site is behind a Cloudflare check (or otherwise
-        returns nothing usable over plain HTTP). Shared by every
-        HtmlAggregatorScraper subclass so this HTTP->Playwright fallback isn't
-        reimplemented per provider.
-
-        `settle_seconds`, when set, waits a fixed amount of time after
-        navigation instead of waiting for the network to go idle -- some sites
-        (e.g. DaddyLive's channel directory) never reach a quiet "networkidle"
-        state.
-        """
-        page_html = await fetch_bounded_text(
-            client,
-            page_url,
-            headers={"User-Agent": DEFAULT_USER_AGENT, "Referer": self.base_url},
-            timeout=8.0,
-        )
-        if not page_html and browser and browser.is_connected():
-            try:
-                async with playwright_page(browser, user_agent=DEFAULT_USER_AGENT) as page:
-                    await page.goto(page_url, wait_until="domcontentloaded", timeout=goto_timeout)
-                    if settle_seconds:
-                        await asyncio.sleep(settle_seconds)
-                    else:
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=networkidle_timeout)
-                        except Exception:
-                            pass
-                    page_html = await page.content()
-            except Exception as exc:
-                _log_bypass_failure_throttled(self.name, page_url, exc)
-        return page_html
-
-    async def _fetch_index_page(self, client: httpx.AsyncClient, page_url: str, browser: Optional[Browser]) -> Optional[str]:
-        """Fetch one index/category page: fast HTTP first, falling back to a
-        Playwright-rendered page when the site is behind a Cloudflare check."""
-        return await self._fetch_html(client, page_url, browser)
-
-    def _parse_matches_from_html(
-        self,
-        page_html: str,
-        page_url: str,
-        search_terms: List[str],
-        matches: List[tuple[str, int, str]],
-        seen_matches: Set[str],
-    ) -> None:
-        """Pure CPU work (BeautifulSoup parse + per-anchor fuzzy matching),
-        split out so it can run in a worker thread via asyncio.to_thread instead
-        of blocking the shared event loop that also serves live video segments.
-        Mutates `matches`/`seen_matches` in place to preserve the original
-        cross-page, cumulative MAX_PROVIDER_EVENTS cutoff.
-        """
-        soup = make_soup(page_html)
-        listed: Set[str] = set()
-        try:
-            self._parse_anchors(soup, page_url, search_terms, matches, seen_matches, listed)
-        finally:
-            telemetry.report_index_events(len(listed))
-
-    def _parse_anchors(self, soup, page_url, search_terms, matches, seen_matches, listed: Set[str]) -> None:
-        for anchor in soup.find_all("a", href=True):
-            href = str(anchor.get("href") or "")
-            if not self._is_event_link(href, page_url):
-                continue
-            match_url = urllib.parse.urljoin(page_url, href)
-            listed.add(match_url)
-            if match_url in seen_matches:
-                continue
-            title = str(anchor.get("title") or "")
-            raw_text = anchor.get_text(" ", strip=True)
-            direct_text = " ".join(
-                part for part in (raw_text, title, str(anchor.get("aria-label") or ""), href) if part
-            )
-            matched, score, _ = match_team(
-                search_terms,
-                direct_text,
-                href=href,
-                title=title,
-            )
-            if not matched:
-                # Some providers put the team names in the card rather
-                # than the anchor. Only accept that fallback for a
-                # high-confidence full identity, not a generic nickname.
-                candidate_text = self._anchor_context(anchor) or href
-                context_matched, context_score, _ = match_team(search_terms, candidate_text, href=href, title=title)
-                if context_matched and context_score >= 110:
-                    matched, score = context_matched, context_score
-            if matched:
-                seen_matches.add(match_url)
-                matches.append((match_url, score, raw_text or title or match_url))
-                if len(matches) >= MAX_PROVIDER_EVENTS:
-                    return
-
-    async def _find_matches_using(
-        self,
-        client: httpx.AsyncClient,
-        search_terms: List[str],
-        browser: Optional[Browser],
-        *,
-        fetch_page,
-        parse_matches,
-        catch_page_errors: bool = True,
-    ) -> List[tuple[str, int, str]]:
-        """Shared skeleton behind `_find_matches`: fetch (through the shared
-        TTL cache) and parse each of this provider's scan URLs, stopping once
-        MAX_PROVIDER_EVENTS matches have accumulated. `fetch_page` and
-        `parse_matches` let each subclass keep its own fetch-fallback timing
-        and anchor-parsing rules while sharing this loop. `catch_page_errors`
-        preserves each subclass's original error-handling: some log and move
-        on to the next scan URL, others let the exception propagate."""
-        matches: List[tuple[str, int, str]] = []
-        seen_matches: Set[str] = set()
-
-        async def process(page_url: str) -> None:
-            page_html = await _get_cached_index_html(page_url, lambda pu=page_url: fetch_page(client, pu, browser))
-            if not page_html:
-                telemetry.report_page_error("no_content")
-                return
-            await asyncio.to_thread(parse_matches, page_html, page_url, search_terms, matches, seen_matches)
-
-        for page_url in self.get_scan_urls():
-            if catch_page_errors:
-                try:
-                    await process(page_url)
-                except Exception as exc:
-                    _log_failure(f"scan provider={self.name} page", exc)
-                    telemetry.report_page_error(exc)
-            else:
-                await process(page_url)
-            if len(matches) >= MAX_PROVIDER_EVENTS:
-                break
-        telemetry.report_matches(len(matches))
-        return matches
-
-    async def _find_matches(self, client: httpx.AsyncClient, search_terms: List[str], browser: Optional[Browser] = None) -> List[tuple[str, int, str]]:
-        return await self._find_matches_using(
-            client,
-            search_terms,
-            browser,
-            fetch_page=self._fetch_index_page,
-            parse_matches=self._parse_matches_from_html,
-            catch_page_errors=True,
-        )
-
-    async def search(
-        self,
-        query_or_terms,
-        browser: Optional[Browser] = None,
-        http_client: Optional[httpx.AsyncClient] = None,
-    ) -> List[dict]:
-        if not self.base_url or not _validate_upstream_url(self.base_url):
-            return []
-        search_terms = (
-            get_team_search_terms(query_or_terms, query_or_terms)
-            if isinstance(query_or_terms, str)
-            else list(query_or_terms or [])
-        )
-        owns_client = http_client is None
-        client = http_client or httpx.AsyncClient(follow_redirects=True, timeout=12.0)
-        try:
-            # Pass the browser object explicitly to the updated _find_matches method
-            matched_events = await self._find_matches(client, search_terms, browser=browser)
-            event_semaphore = asyncio.Semaphore(PROVIDER_EVENT_CONCURRENCY)
-
-            async def inspect_event(event: tuple[str, int, str]) -> List[dict]:
-                match_url, score, match_title = event
-                async with event_semaphore:
-                    async def inspect() -> List[dict]:
-                        event_streams = await fetch_streams_from_page(
-                            client, match_url, self.name, score, match_title
-                        )
-                        for stream in event_streams:
-                            stream.setdefault("match_url", match_url)
-                        if not event_streams and browser and browser.is_connected():
-                            event_streams = await playwright_intercept_streams(
-                                browser, match_url, self.name, score, match_title, http_client=client
-                            )
-                            for stream in event_streams:
-                                stream.setdefault("match_url", match_url)
-                        return event_streams
-
-                    try:
-                        return await asyncio.wait_for(inspect(), timeout=PROVIDER_EVENT_TIMEOUT)
-                    except asyncio.TimeoutError:
-                        LOGGER.warning("Provider event timed out provider=%s url_host=%s", self.name, urllib.parse.urlparse(match_url).netloc)
-                        return []
-                    except Exception as exc:
-                        _log_failure(f"inspect provider={self.name} event", exc)
-                        return []
-
-            results = await asyncio.wait_for(
-                asyncio.gather(
-                    *(inspect_event(event) for event in matched_events),
-                    return_exceptions=True,
-                ),
-                timeout=PROVIDER_SEARCH_TIMEOUT,
-            )
-            return [stream for result in results if isinstance(result, list) for stream in result]
-        except asyncio.TimeoutError:
-            LOGGER.warning("Provider search timed out provider=%s", self.name)
-            return []
-        finally:
-            if owns_client:
-                await client.aclose()
-
-
-# --- Hybrid fast-HTTP and Playwright scrapers ---
-class ISportSurgeScraper(HtmlAggregatorScraper):
-    def __init__(self):
-        super().__init__(
-            "iSportSurge",
-            os.getenv("AGGREGATOR_1_URL", "https://isportsurge.ws"),
-            [
-                "/cfb/livestreams2", "/nfl/livestreams3", "/mlb/livestreams2",
-                "/nba/livestreams3", "/nhl/livestreams3", "/soccer/livestreams",
-            ],
-            ["/watch/", "/event/", "/title-game/"],
-        )
-
-class MyBuffStreamsScraper(HtmlAggregatorScraper):
-    def __init__(self):
-        super().__init__(
-            "MyBuffStreams",
-            os.getenv("AGGREGATOR_2_URL", "https://mybuffstreams.plus"),
-            [
-                "/cfbstreams2", "/nflstreams2", "/mlb-live-streams",
-                "/nbastreams2", "/nhlstreams2", "/soccer-live-streams",
-            ],
-            ["/cfb/", "/mlb/", "/nfl/", "/nba/", "/nhl/", "/title-game/", "/watch/", "/soccer/"],
-        )
-
-
-class MethStreamsScraper(HtmlAggregatorScraper):
-    def __init__(self):
-        super().__init__(
-            "MethStreams",
-            os.getenv("AGGREGATOR_3_URL", "https://methstreams.click"),
-            [],
-            ["/game/", "/match/", "/live/"],
-        )
-
-
-class StreamEastScraper(HtmlAggregatorScraper):
-    def __init__(self):
-        super().__init__(
-            "StreamEast",
-            os.getenv("AGGREGATOR_4_URL", "https://thestreameast.top"),
-            [],
-            ["/stream/", "/match/", "/live/"],
-        )
-class FootybiteScraper(HtmlAggregatorScraper):
-    def __init__(self):
-        super().__init__(
-            "Footybite",
-            os.getenv("AGGREGATOR_9_URL", "https://footybite.im"),
-            [],
-            ["/watch/", "/stream/", "/live/", "/match/"],
-        )
-
-
-class OneStreamScraper(HtmlAggregatorScraper):
-    def __init__(self):
-        super().__init__(
-            "1Stream",
-            os.getenv("AGGREGATOR_10_URL", "https://1stream.ws"),
-            [],
-            ["/match/", "/stream/", "/live/"],
-        )
-
-
-class StreamedSuScraper(HtmlAggregatorScraper):
-    def __init__(self):
-        super().__init__(
-            "Streamed",
-            os.getenv("AGGREGATOR_11_URL", "https://streamed.su"),
-            ["/category/football", "/category/american-football", "/category/basketball", "/category/baseball", "/category/hockey"],
-            ["/watch/", "/live/"],
-        )
-
-
-class TopStreamsScraper(HtmlAggregatorScraper):
-    def __init__(self):
-        super().__init__(
-            "TopStreams",
-            os.getenv("AGGREGATOR_12_URL", "https://topstreams.info"),
-            ["/nfl", "/nba", "/nhl", "/mlb", "/soccer"],
-            ["/watch/", "/match/", "/live/"],
-        )
-
-
 _M3U_ATTR_RE = re.compile(r'([a-zA-Z0-9_-]+)="([^"]*)"')
 
 
@@ -867,220 +504,6 @@ def _parse_m3u_playlist(text: str) -> List[dict]:
             entries.append(pending)
             pending = None
     return entries
-
-
-IPTV_ORG_PLAYLIST_URL_DEFAULT = "https://iptv-org.github.io/iptv/categories/sports.m3u"
-IPTV_ORG_REFRESH_SECONDS = bounded_float(os.getenv("IPTV_ORG_REFRESH_SECONDS", "21600"), 21600.0, 300.0, 86400.0)
-_IPTV_ORG_CACHE: List[dict] = []
-_IPTV_ORG_CACHE_LOADED_AT = 0.0
-_IPTV_ORG_LOCK = asyncio.Lock()
-
-
-class IptvOrgScraper(BaseProvider):
-    """Curated, static free-to-air playlist (iptv-org) used as a structurally
-    independent backup for always-live special channels: a plain cached HTTP
-    fetch with no scraping and no Cloudflare exposure, so it survives failure
-    modes (anti-bot changes, mass site outages) that could take out every
-    HTML-scraping provider in ACTIVE_PROVIDERS at once. Only useful for 24/7
-    linear channels (ESPN, FS1, NFL Network, ...) — it carries no per-game team
-    broadcasts, so it belongs in LINEAR_PROVIDERS, not the general team search."""
-
-    name = "IPTV-Org"
-
-    def __init__(self):
-        self.base_url = os.getenv("IPTV_ORG_PLAYLIST_URL", IPTV_ORG_PLAYLIST_URL_DEFAULT)
-
-    async def _get_entries(self, http_client: Optional[httpx.AsyncClient]) -> List[dict]:
-        global _IPTV_ORG_CACHE, _IPTV_ORG_CACHE_LOADED_AT
-        now = time.monotonic()
-        if _IPTV_ORG_CACHE and now - _IPTV_ORG_CACHE_LOADED_AT < IPTV_ORG_REFRESH_SECONDS:
-            return _IPTV_ORG_CACHE
-
-        async with _IPTV_ORG_LOCK:
-            now = time.monotonic()
-            if _IPTV_ORG_CACHE and now - _IPTV_ORG_CACHE_LOADED_AT < IPTV_ORG_REFRESH_SECONDS:
-                return _IPTV_ORG_CACHE
-
-            url = _validate_upstream_url(self.base_url)
-            if not url:
-                return _IPTV_ORG_CACHE
-
-            owns_client = http_client is None
-            client = http_client or httpx.AsyncClient(timeout=15.0, follow_redirects=False)
-            try:
-                resp = await safe_get(client, url, headers={"User-Agent": DEFAULT_USER_AGENT})
-                if resp is not None and resp.status_code == 200:
-                    _IPTV_ORG_CACHE = _parse_m3u_playlist(resp.text)
-                    _IPTV_ORG_CACHE_LOADED_AT = now
-            except Exception as exc:
-                _log_failure("fetch iptv-org playlist", exc)
-            finally:
-                if owns_client:
-                    await client.aclose()
-            return _IPTV_ORG_CACHE
-
-    async def search(self, query_or_terms, browser: Optional[Browser] = None, http_client: Optional[httpx.AsyncClient] = None) -> List[dict]:
-        search_terms = list(query_or_terms) if isinstance(query_or_terms, list) else [str(query_or_terms)]
-        entries = await self._get_entries(http_client)
-        if not entries:
-            telemetry.report_page_error("no_content")
-            return []
-        telemetry.report_index_events(len(entries))
-
-        candidates = []
-        for entry in entries:
-            name_text = f"{entry.get('tvg_name', '')} {entry.get('display_name', '')}"
-            if not _channel_term_matches(name_text, search_terms):
-                continue
-            url = _validate_upstream_url(entry.get("url", ""))
-            if not url:
-                continue
-            candidates.append({
-                "url": url,
-                "referer": "",
-                "origin": "",
-                "provider": self.name,
-                # match_team() scores a confident exact-word match 95-100 (110 only for
-                # multi-word phrases); _channel_term_matches() above is at least that
-                # precise — it's a word-boundary match against curated official channel
-                # names with explicit ESPN/ESPN2/ESPN+ disambiguation, not noisy fuzzy
-                # anchor text — so this shouldn't be scored as a weaker match than that.
-                "match_score": 100,
-                "match_title": entry.get("tvg_name") or entry.get("display_name") or "",
-                "discovery_method": "http",
-            })
-
-        telemetry.report_matches(len(candidates))
-        if not candidates:
-            return []
-        return await _verify_provider_streams(candidates, http_client)
-
-
-class TheTVAppScraper(HtmlAggregatorScraper):
-    def __init__(self):
-        super().__init__(
-            "TheTVApp", 
-            os.getenv("AGGREGATOR_5_URL", "https://thetvapp.st"), 
-            ["/tv/"], 
-            ["/tv/", "/watch/", "/channel/", "/sports-channels/"]
-        )
-
-    def _find_best_channel_match(
-        self, html_text: str, raw_terms_lower: List[str], search_terms: List[str]
-    ) -> tuple[Optional[str], int, str]:
-        """Pure CPU work (BeautifulSoup parse + per-anchor fuzzy matching over
-        every listed channel), split out so it can run via asyncio.to_thread
-        instead of blocking the shared event loop."""
-        soup = make_soup(html_text)
-        best_url, best_score, best_title = None, 0, ""
-        listed = 0
-
-        for anchor in soup.find_all("a", href=True):
-            href = str(anchor.get("href") or "")
-            if self._is_event_link(href, self.base_url + "/tv/"):
-                listed += 1
-            text = self._anchor_context(anchor) or anchor.get_text(" ", strip=True)
-            text_lower = text.lower()
-
-            # Direct linear network match override (e.g., ESPN, RedZone, FS1)
-            matched = False
-            score = 0
-            for rt in raw_terms_lower:
-                if _channel_term_matches(text_lower, [rt]) or _channel_term_matches(href, [rt]):
-                    matched = True
-                    score = 120
-                    break
-
-            # Fallback to standard team matcher if direct string isn't found
-            if not matched:
-                matched, score, _ = match_team(search_terms, text, href=href)
-
-            if matched and not _is_non_english_channel(text):
-                # Prefer the most specific matching channel when a page
-                # contains both a base network and numbered variants.
-                specificity = max(
-                    (len(str(term).split()) * 10 + len(str(term)) for term in raw_terms_lower if _channel_term_matches(text, [term])),
-                    default=0,
-                )
-                ranked_score = score + specificity
-            else:
-                ranked_score = 0
-
-            if ranked_score > best_score:
-                best_url = urllib.parse.urljoin(self.base_url, href)
-                best_score = ranked_score
-                best_title = text
-
-        telemetry.report_index_events(listed)
-        telemetry.report_matches(1 if best_url else 0)
-        return best_url, best_score, best_title
-
-    async def search(self, query_or_terms, browser: Optional[Browser] = None, http_client: Optional[httpx.AsyncClient] = None) -> List[dict]:
-        if not browser or not browser.is_connected():
-            return []
-
-        search_terms = get_team_search_terms(query_or_terms, query_or_terms) if isinstance(query_or_terms, str) else list(query_or_terms or [])
-        raw_terms_lower = [t.lower() for t in (query_or_terms if isinstance(query_or_terms, list) else [query_or_terms])]
-        streams = []
-
-        try:
-            async with playwright_page(browser, user_agent=DEFAULT_USER_AGENT) as page:
-                target_url = f"{self.base_url}/tv/"
-                try:
-                    await page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=8000)
-                    except Exception:
-                        pass
-                except Exception as exc:
-                    _log_failure("TheTVApp channel list load", exc)
-                    telemetry.report_page_error(exc)
-
-                html = await page.content()
-                if "just a moment" in html.lower() or "cf-browser-verification" in html.lower():
-                    telemetry.report_page_error("blocked")
-                    return []
-
-                best_url, best_score, best_title = await asyncio.to_thread(
-                    self._find_best_channel_match, html, raw_terms_lower, search_terms
-                )
-
-                if best_url:
-                    def handle_request(request):
-                        req_url = request.url
-                        if _is_playlist_request_url(req_url) and validate_http_url(req_url):
-                            streams.append({
-                                "url": req_url,
-                                "referer": request.headers.get("referer", best_url),
-                                "origin": request.headers.get("origin", ""),
-                                "provider": self.name,
-                                "match_score": best_score,
-                                "match_title": best_title,
-                                "discovery_method": "playwright"
-                            })
-
-                    page.on("request", handle_request)
-
-                    try:
-                        await page.goto(best_url, wait_until="domcontentloaded", timeout=25000)
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=8000)
-                        except Exception:
-                            pass
-                        await page.mouse.click(400, 300)
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=5000)
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
-        except Exception as exc:
-            _log_failure("TheTVApp custom extraction", exc)
-            telemetry.report_page_error(exc)
-
-        seen = set()
-        deduped = [s for s in streams if s["url"] not in seen and not seen.add(s["url"])]
-        return await _verify_provider_streams(deduped[:MAX_STREAM_CANDIDATES], http_client)
 
 
 # Region tags that mark a DaddyLive channel listing as non-English. English
@@ -1176,190 +599,6 @@ def _channel_term_matches(text: str, terms: List[str]) -> bool:
             return True
     return False
 
-
-class DaddyLiveScraper(HtmlAggregatorScraper):
-    def __init__(self):
-        super().__init__("DaddyLive", os.getenv("AGGREGATOR_6_URL", "https://dlhd.pk"), ["/24-7-channels.php"], ["watch.php"])
-
-    async def _fetch_directory_page(self, client: httpx.AsyncClient, page_url: str, browser: Optional[Browser]) -> Optional[str]:
-        """DaddyLive's directory never reaches Playwright's "networkidle"
-        state, so this waits a fixed 2s after navigation instead (via the
-        shared `_fetch_html` HTTP->Playwright fallback)."""
-        return await self._fetch_html(client, page_url, browser, settle_seconds=2, goto_timeout=25000)
-
-    def _parse_channel_matches_from_html(
-        self,
-        page_html: str,
-        page_url: str,
-        search_terms: List[str],
-        matches: List[tuple[str, int, str]],
-        seen_matches: Set[str],
-    ) -> None:
-        """Pure CPU work (BeautifulSoup parse + per-card channel-term matching),
-        split out so it can run via asyncio.to_thread instead of blocking the
-        shared event loop. Mutates `matches`/`seen_matches` in place to preserve
-        the original cross-page, cumulative MAX_PROVIDER_EVENTS cutoff."""
-        soup = make_soup(page_html)
-        listed: Set[str] = set()
-        try:
-            self._parse_channel_anchors(soup, page_url, search_terms, matches, seen_matches, listed)
-        finally:
-            telemetry.report_index_events(len(listed))
-
-    def _parse_channel_anchors(self, soup, page_url, search_terms, matches, seen_matches, listed: Set[str]) -> None:
-        for anchor in soup.find_all("a", href=True):
-            href = str(anchor.get("href") or "")
-            if not self._is_event_link(href, page_url):
-                continue
-            match_url = urllib.parse.urljoin(page_url, href)
-            listed.add(match_url)
-            if match_url in seen_matches:
-                continue
-            title = str(anchor.get("title") or anchor.get("data-title") or "")
-            raw_text = anchor.get_text(" ", strip=True)
-            card_text = " ".join(part for part in (raw_text, title, str(anchor.get("aria-label") or "")) if part)
-            if _is_non_english_channel(card_text):
-                continue
-            matched = _channel_term_matches(card_text, search_terms) or _channel_term_matches(href, search_terms)
-            score = max(
-                (len(str(term).split()) * 10 + len(str(term)) for term in search_terms if _channel_term_matches(card_text, [term])),
-                default=0,
-            )
-            if matched:
-                seen_matches.add(match_url)
-                matches.append((match_url, score, raw_text or title or match_url))
-                if len(matches) >= MAX_PROVIDER_EVENTS:
-                    return
-
-    async def _find_matches(self, client: httpx.AsyncClient, search_terms: List[str], browser: Optional[Browser] = None) -> List[tuple[str, int, str]]:
-        """Match individual directory cards without inheriting the grid's text."""
-        return await self._find_matches_using(
-            client,
-            search_terms,
-            browser,
-            fetch_page=self._fetch_directory_page,
-            parse_matches=self._parse_channel_matches_from_html,
-            catch_page_errors=False,
-        )
-
-    async def _extract_player_streams(self, browser: Browser, watch_url: str, score: int, match_title: str) -> List[dict]:
-        """Follow the embedded player iframe chain and capture the real HLS manifest.
-
-        DaddyLive watch pages embed the actual player one or two iframes deep
-        (watch.php -> dlive.sx/stream/stream-<id>.php -> <player-host>). Listening
-        for playlist requests across every frame in the page reliably surfaces the
-        genuine manifest, which is requested from the player iframe's origin.
-        """
-        streams: List[dict] = []
-        if not browser or not browser.is_connected():
-            return streams
-
-        try:
-            async with playwright_page(browser, user_agent=DEFAULT_USER_AGENT) as page:
-                def on_request(request) -> None:
-                    if not _is_playlist_request_url(request.url):
-                        return
-                    url = request.url
-                    if any(s["url"] == url for s in streams):
-                        return
-                    try:
-                        frame_url = request.frame.url if request.frame else ""
-                    except Exception:
-                        frame_url = ""
-                    referer = request.headers.get("referer") or frame_url or watch_url
-                    streams.append({
-                        "url": url,
-                        "provider": self.name,
-                        "match_score": score,
-                        "match_title": match_title,
-                        "referer": referer,
-                        "origin": request.headers.get("origin", ""),
-                        "discovery_method": "playwright",
-                    })
-
-                page.on("request", on_request)
-                try:
-                    await page.goto(watch_url, wait_until="domcontentloaded", timeout=30000)
-                except Exception as exc:
-                    _log_failure("DaddyLive watch page load", exc)
-
-                # Let nested iframes attach, then nudge the player to start.
-                await asyncio.sleep(5)
-                for frame in list(page.frames):
-                    try:
-                        await frame.mouse.click(400, 300)
-                    except Exception:
-                        pass
-                try:
-                    await page.mouse.click(400, 300)
-                except Exception:
-                    pass
-                await asyncio.sleep(5)
-        except Exception as exc:
-            _log_failure("DaddyLive player extraction", exc)
-
-        seen = set()
-        return [s for s in streams if s["url"] not in seen and not seen.add(s["url"])]
-
-    async def search(self, query_or_terms, browser: Optional[Browser] = None, http_client: Optional[httpx.AsyncClient] = None) -> List[dict]:
-        if not browser or not browser.is_connected():
-            return []
-
-        search_terms = get_team_search_terms(query_or_terms, query_or_terms) if isinstance(query_or_terms, str) else list(query_or_terms or [])
-        owns_client = http_client is None
-        client = http_client or httpx.AsyncClient(follow_redirects=True, timeout=12.0)
-
-        try:
-            matches = await self._find_matches(client, search_terms, browser=browser)
-            if not matches:
-                return []
-
-            def match_specificity(event: tuple[str, int, str]) -> tuple[int, int, int]:
-                _, score, title = event
-                clean_title = clean_sports_text(title)
-                exact = 0
-                for term in search_terms:
-                    clean_term = clean_sports_text(term)
-                    if clean_term and re.search(rf"\b{re.escape(clean_term)}\b", clean_title):
-                        exact = max(exact, len(clean_term.split()) * 10 + len(clean_term))
-                # Strongly prioritize US English feeds (e.g. "USA" in card title)
-                us_priority = 100 if re.search(r"\b(?:usa|us)\b", title, re.IGNORECASE) else 0
-                return us_priority, exact, score
-
-            specific_matches = [match for match in matches if match_specificity(match)[1] > 0 or match_specificity(match)[0] > 0]
-            matches = sorted(specific_matches or matches, key=match_specificity, reverse=True)
-
-            verified_streams: List[dict] = []
-            for match_url, score, match_title in matches[:8]:
-                streams = await self._extract_player_streams(browser, match_url, score, match_title)
-                verified = await _verify_provider_streams(streams, client)
-                if verified:
-                    verified_streams.extend(verified)
-
-            seen_urls: Set[str] = set()
-            return [
-                stream for stream in verified_streams
-                if stream.get("url") and not (stream["url"] in seen_urls or seen_urls.add(stream["url"]))
-            ]
-        finally:
-            if owns_client:
-                await client.aclose()
-
-
-ACTIVE_PROVIDERS = [
-    TheTVAppScraper(),
-    DaddyLiveScraper(),
-    ISportSurgeScraper(),
-    MyBuffStreamsScraper(),
-    MethStreamsScraper(),
-    StreamEastScraper(),
-    FootybiteScraper(),
-    OneStreamScraper(),
-    StreamedSuScraper(),
-    TopStreamsScraper(),
-    IptvOrgScraper(),
-]
-LINEAR_PROVIDERS = tuple(provider for provider in ACTIVE_PROVIDERS if provider.name in {"TheTVApp", "DaddyLive", "IPTV-Org"})
 
 PLAYWRIGHT_CLIENT: Optional[Playwright] = None
 SHARED_BROWSER: Optional[Browser] = None
@@ -1509,7 +748,11 @@ async def master_scrape(
                 dynamic_timeout = await _get_dynamic_provider_timeout(provider.name)
                 started = time.time()
                 res = await asyncio.wait_for(
-                    provider.search(search_terms, browser=browser, http_client=client),
+                    provider.search(
+                        search_terms,
+                        browser=permitted_browser(provider, browser),
+                        http_client=client,
+                    ),
                     timeout=dynamic_timeout,
                 )
                 elapsed_ms = int((time.time() - started) * 1000)
@@ -1655,3 +898,59 @@ async def _track_provider_response_time(
         )
     except Exception as exc:
         _log_failure("track provider response time", exc)
+
+
+# IPTV-Org playlist cache. Lives here (not in the builtin plugin module) so the
+# module-level cache stays shared and test-visible as scrapers._IPTV_ORG_CACHE.
+IPTV_ORG_PLAYLIST_URL_DEFAULT = "https://iptv-org.github.io/iptv/categories/sports.m3u"
+IPTV_ORG_REFRESH_SECONDS = bounded_float(os.getenv("IPTV_ORG_REFRESH_SECONDS", "21600"), 21600.0, 300.0, 86400.0)
+_IPTV_ORG_CACHE: List[dict] = []
+_IPTV_ORG_CACHE_LOADED_AT = 0.0
+_IPTV_ORG_LOCK = asyncio.Lock()
+
+
+# --- Provider plugin system (3.0.0) -------------------------------------------
+# The 11 built-in providers now live in plugins/builtin/ (one module each) and
+# the SDK base classes in plugins/sdk.py. The loader runs here, at the end of
+# this module, so every engine name the SDK needs is already defined (this
+# ordering is what keeps the scrapers <-> plugins import cycle safe).
+from plugins import get_plugin_errors, get_plugin_records, load_plugins, permitted_browser  # noqa: E402
+from plugins import sdk as _plugin_sdk  # noqa: E402
+
+Provider = _plugin_sdk.Provider
+BaseProvider = _plugin_sdk.Provider
+HtmlAggregatorProvider = _plugin_sdk.HtmlAggregatorProvider
+HtmlAggregatorScraper = _plugin_sdk.HtmlAggregatorProvider
+
+ACTIVE_PROVIDERS: List = []
+LINEAR_PROVIDERS: tuple = ()
+
+
+def _rebuild_provider_lists(records=None) -> None:
+    """(Re)build the engine's provider lists from plugin records.
+
+    ACTIVE_PROVIDERS is mutated in place so existing `from scrapers import
+    ACTIVE_PROVIDERS` bindings keep working across a dashboard reload.
+    """
+    global LINEAR_PROVIDERS
+    recs = records if records is not None else get_plugin_records()
+    ACTIVE_PROVIDERS[:] = [r.instance for r in recs]
+    LINEAR_PROVIDERS = tuple(r.instance for r in recs if r.linear)
+
+
+_rebuild_provider_lists(load_plugins())
+
+
+# Re-export the built-in provider classes so `from scrapers import X` keeps
+# working during 3.x (tests, routes, and any external tooling).
+from plugins.builtin.daddylive.provider import DaddyLiveScraper  # noqa: E402
+from plugins.builtin.footybite.provider import FootybiteScraper  # noqa: E402
+from plugins.builtin.iptvorg.provider import IptvOrgScraper  # noqa: E402
+from plugins.builtin.isportsurge.provider import ISportSurgeScraper  # noqa: E402
+from plugins.builtin.methstreams.provider import MethStreamsScraper  # noqa: E402
+from plugins.builtin.mybuffstreams.provider import MyBuffStreamsScraper  # noqa: E402
+from plugins.builtin.onestream.provider import OneStreamScraper  # noqa: E402
+from plugins.builtin.streameast.provider import StreamEastScraper  # noqa: E402
+from plugins.builtin.streamedsu.provider import StreamedSuScraper  # noqa: E402
+from plugins.builtin.thetvapp.provider import TheTVAppScraper  # noqa: E402
+from plugins.builtin.topstreams.provider import TopStreamsScraper  # noqa: E402
