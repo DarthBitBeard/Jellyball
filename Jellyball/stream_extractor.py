@@ -21,6 +21,7 @@ from bs4 import BeautifulSoup
 from playwright.async_api import Browser, Page
 from network_safety import validate_http_url, validate_http_url_async, bounded_int
 from ts_normalize import find_ts_start
+from hls_session import parse_master_playlist
 
 LOGGER = logging.getLogger("jellyball.stream_extractor")
 MAX_INSPECTION_BYTES = 2 * 1024 * 1024
@@ -155,12 +156,81 @@ async def playwright_page(browser: Browser, *, user_agent: Optional[str] = None)
                     LOGGER.debug("Playwright page cleanup failed error=%s", type(exc).__name__)
 
 
+def extract_stream_quality(text: str, base_url: str) -> Dict[str, Any]:
+    """Variant quality summary from an already-downloaded master playlist text.
+
+    Zero network I/O: parses the text the verifier already fetched. Returns {}
+    when the text has no usable variants. Coarse on purpose (see _quality_tier):
+    playlists lie about exact bitrates, so resolution tiers drive ranking.
+    """
+    try:
+        master = parse_master_playlist(text, base_url)
+    except Exception:
+        return {}
+    variants = list(master.variants)
+    if not variants:
+        return {}
+
+    def height_of(resolution: str) -> int:
+        match = re.search(r"(\d+)\s*x\s*(\d+)", resolution or "")
+        if not match:
+            return 0
+        try:
+            return int(match.group(2))
+        except ValueError:
+            return 0
+
+    best = max(variants, key=lambda v: (height_of(v.resolution), v.bandwidth))
+    return {
+        "max_bandwidth": int(max(v.bandwidth for v in variants)),
+        "max_resolution": best.resolution or "",
+        "max_height": height_of(best.resolution),
+        "variant_count": len(variants),
+    }
+
+
+def _quality_tier(stream: Dict) -> int:
+    """Coarse quality tier for ranking: 1080p+ -> 3, 720p+ -> 2, known -> 1, unknown -> 0."""
+    quality = stream.get("quality") or {}
+    try:
+        height = int(quality.get("max_height") or 0)
+    except (TypeError, ValueError):
+        height = 0
+    if height >= 1080:
+        return 3
+    if height >= 720:
+        return 2
+    if height > 0:
+        return 1
+    return 0
+
+
+def quality_badge(stream: Dict) -> str:
+    """Short dashboard badge for a candidate's quality, e.g. '1080p'; '' when unknown."""
+    quality = stream.get("quality") or {}
+    try:
+        height = int(quality.get("max_height") or 0)
+    except (TypeError, ValueError):
+        height = 0
+    return f"{height}p" if height > 0 else ""
+
+
+def _quality_bandwidth(stream: Dict) -> int:
+    quality = stream.get("quality") or {}
+    try:
+        return int(quality.get("max_bandwidth") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def rank_streams(streams: Iterable[Dict], provider_priority: Optional[Dict[str, int]] = None) -> List[Dict]:
     """Return stream candidates in a deterministic, best-first order.
 
-    Match quality is the primary signal. Provider priority is optional and only
-    affects streams with the same match quality, while URL hints provide a safe
-    tie-breaker when providers return incomplete metadata.
+    Match quality is the primary signal: a wrong game in 4K is still wrong.
+    Measured stream quality (variant playlist resolution/bandwidth) comes next,
+    then provider priority, while URL hints provide a safe tie-breaker when
+    providers return incomplete metadata. Streams without quality data sort
+    exactly as they did before quality ranking existed.
     """
     priority = provider_priority or {}
 
@@ -181,7 +251,7 @@ def rank_streams(streams: Iterable[Dict], provider_priority: Optional[Dict[str, 
             provider_rank = int(priority.get(str(stream.get("provider", "")), 10_000))
         except (TypeError, ValueError):
             provider_rank = 10_000
-        return (-match_score, provider_rank, -hls_hint, url)
+        return (-match_score, -_quality_tier(stream), -_quality_bandwidth(stream), provider_rank, -hls_hint, url)
 
     return sorted((stream for stream in streams if stream.get("url")), key=sort_key)
 
@@ -422,6 +492,7 @@ async def verify_stream_live(
     origin: str = "",
     *,
     probe_state: Optional[dict] = None,
+    enrich: Optional[dict] = None,
 ) -> bool:
     """Verify a stream URL and, for HLS, one actual media segment.
 
@@ -430,6 +501,11 @@ async def verify_stream_live(
     used to detect a frozen live playlist (media sequence and last segment URI
     not advancing): see _playlist_is_fresh below. Pass None (the default) to
     skip freshness tracking, e.g. for a one-shot check.
+
+    enrich is an optional caller-owned dict that, when the verified URL serves
+    a top-level master playlist, is filled with extract_stream_quality() data
+    for quality-ranked candidate sorting. The boolean return contract is
+    unchanged: existing callers that ignore enrich behave exactly as before.
     """
     if not await validate_http_url_async(url) or (referer and not await validate_http_url_async(referer)):
         return False
@@ -575,6 +651,11 @@ async def verify_stream_live(
             # perfectly healthy stream fail its health check.
             media_uri = ""
             is_master = "#EXT-X-STREAM-INF" in text
+            if depth == 0 and is_master and enrich is not None:
+                # Top-level master only: deeper levels are media playlists, not
+                # variant lists. The text is already in hand, so this adds no
+                # HTTP requests.
+                enrich.update(extract_stream_quality(text, effective_url))
             for line in text.splitlines():
                 stripped = line.strip()
                 if stripped.startswith("#EXT-X-MAP:"):
