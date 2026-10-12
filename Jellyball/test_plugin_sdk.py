@@ -142,7 +142,9 @@ class ConformanceTests(unittest.TestCase):
         import asyncio
 
         namespace = {}
-        exec(compile(STUB_PROVIDER_CODE, "stub_provider", "exec"), namespace)
+        # Angle-bracket filename so coverage does not look for a real
+        # stub_provider source file (which would fail the coverage report).
+        exec(compile(STUB_PROVIDER_CODE, "<stub_provider>", "exec"), namespace)
         provider = namespace["TestProvider"]()
         self.assertIsInstance(provider, sdk.Provider)
         self.assertEqual(provider.base_url, "https://example.test")
