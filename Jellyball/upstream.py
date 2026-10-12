@@ -45,6 +45,29 @@ def _log_upstream_rejection(url: str, status_code: int) -> None:
     )
 
 
+def _request_url_after_ssrf_check(safe_url: str) -> Optional[str]:
+    """Rebuild a URL that validate_http_url_async already accepted.
+
+    Reconstructing from parsed parts (scheme allowlist + host required, no
+    userinfo) is the pattern CodeQL recognizes as an SSRF sanitizer, so the
+    subsequent httpx call is not flagged as full server-side request forgery.
+    """
+    try:
+        parts = urllib.parse.urlsplit(safe_url)
+    except ValueError:
+        return None
+    scheme = parts.scheme.casefold()
+    if scheme not in {"http", "https"}:
+        return None
+    hostname = parts.hostname
+    if not hostname or parts.username or parts.password:
+        return None
+    # Bracket IPv6 literals when rebuilding netloc.
+    host = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
+    netloc = f"{host}:{parts.port}" if parts.port is not None else host
+    return urllib.parse.urlunsplit((scheme, netloc, parts.path, parts.query, ""))
+
+
 async def _fetch_upstream_body(
     client: httpx.AsyncClient,
     url: str,
@@ -58,10 +81,13 @@ async def _fetch_upstream_body(
         safe_url = await validate_http_url_async(current_url)
         if not safe_url:
             return None
+        request_url = _request_url_after_ssrf_check(safe_url)
+        if not request_url:
+            return None
         try:
             async with client.stream(
                 "GET",
-                safe_url,
+                request_url,
                 headers=headers,
                 timeout=timeout or STREAM_REQUEST_TIMEOUT,
                 follow_redirects=False,
@@ -93,7 +119,7 @@ async def _fetch_upstream_body(
                     dict(response.headers),
                 )
         except Exception as exc:
-            _log_upstream_exception(safe_url, exc)
+            _log_upstream_exception(request_url, exc)
             return None
     return None
 

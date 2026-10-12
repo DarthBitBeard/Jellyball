@@ -5,6 +5,36 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-10-12
+
+### Added
+
+- Stream providers are now plugins: the 11 built-in scrapers live in
+  `Jellyball/plugins/builtin/`, one module each with a manifest, loaded by a
+  versioned SDK (`API_VERSION = 1`), and the Providers card shows each plugin's
+  version and origin with a "Reload plugins" action for the new
+  `plugins/third_party/` hot-load directory. Behavior of the built-ins is
+  unchanged; third-party plugins run in-process and are trusted code.
+- Stream candidates are now ranked by measured quality, not just provider priority. Verification reads each master playlist's variants (no extra requests) and the best stream wins: 1080p beats 720p beats unknown, with provider priority as the tiebreak. Channel cards show a quality badge (e.g. 1080p) on each candidate, and the /api/status snapshot carries the quality data for live updates.
+- Added per-source ffmpeg remux ingest: fMP4/CMAF and demuxed-audio sources are
+  remuxed (`-c copy`, no transcoding) to local MPEG-TS HLS and fed through the
+  normal session pipeline, so discontinuity epochs, failover, alerts, and
+  metrics behave exactly as for native TS sources. Falls back to `-c:a aac`
+  transcode when the audio codec does not fit MPEG-TS; the dashboard Remux
+  Ingest card tracks starts, transcodes, and failures by provider.
+
+### Removed
+
+- Retired the legacy passthrough proxy: fMP4 and separate-audio sources are now
+  remuxed through ffmpeg into the normalizing session engine instead of being
+  handed to a passthrough relay, and the chunk cache, prefetch, startup buffer,
+  and `/substream.m3u8`, `/resource`, `/chunk*` routes are gone. SAMPLE-AES
+  sources keep a minimal signed relay shim since ffmpeg cannot decrypt them.
+  The `STREAM_CHUNK_CACHE_*`, `STREAM_STARTUP_BUFFER_SECONDS`, `PREFETCH_*`,
+  `MAX_MANIFEST_BYTES`, `MAX_RESOURCE_BYTES`, `MAX_CACHEABLE_CHUNK_BYTES`,
+  `LEGACY_RETRY_SECONDS`, and `INCOMPATIBLE_RETRY_SECONDS` env knobs are
+  ignored (a startup warning lists any that are still set).
+
 ## [2.2.1] - 2026-10-07
 
 ### Fixed

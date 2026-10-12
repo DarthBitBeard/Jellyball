@@ -5,10 +5,12 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import remux_ingest
 from remux_ingest import (
     RemuxSession,
     RemuxSpec,
@@ -87,8 +89,12 @@ class BuildArgsTests(unittest.TestCase):
         self.assertIn("1:a:0", args)
 
     def test_scratch_dir_used(self):
-        args = build_remux_args(self._spec(), "/tmp/my-scratch", transcode_audio=False)
-        self.assertTrue(any(a.startswith("/tmp/my-scratch") for a in args))
+        # Path() normalizes separators, so assert against the platform form
+        # (Windows turns "/tmp/..." into "\\tmp\\...").
+        scratch = Path("/tmp/my-scratch")
+        args = build_remux_args(self._spec(), scratch, transcode_audio=False)
+        prefix = str(scratch)
+        self.assertTrue(any(a.startswith(prefix) for a in args), args)
 
 
 class HealthyStateMachineTests(unittest.TestCase):
@@ -102,38 +108,75 @@ class HealthyStateMachineTests(unittest.TestCase):
         asyncio.run(session.stop())  # should not raise
 
 
-@unittest.skipUnless(ffmpeg_proc.FFMPEG_AVAILABLE, "ffmpeg not available")
+@unittest.skipUnless(
+    ffmpeg_proc.FFMPEG_AVAILABLE or shutil.which("ffmpeg"),
+    "ffmpeg not available",
+)
 class RemuxIntegrationTests(unittest.TestCase):
-    """End-to-end: generate a synthetic fMP4 HLS source, remux it, assert the
-    local playlist advances and segments are valid TS."""
+    """End-to-end: live fMP4 HLS source remuxed to advancing local TS playlist.
+
+    Uses a live (no EXT-X-ENDLIST) source so remux ffmpeg stays up the way it
+    does for real provider streams; a short VOD fixture exits immediately and
+    cannot satisfy RemuxSession.healthy().
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # Unit suites do not run the app startup probe; mark ffmpeg usable when
+        # the binary is on PATH so this integration test actually runs.
+        if not ffmpeg_proc.FFMPEG_AVAILABLE and shutil.which("ffmpeg"):
+            ffmpeg_proc.FFMPEG_AVAILABLE = True
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="remux-test-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self._source_proc = None
 
-    def _make_fmp4_source(self):
-        """Generate a short fMP4 HLS stream with ffmpeg's testsrc."""
+    def tearDown(self):
+        proc = self._source_proc
+        self._source_proc = None
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    def _start_live_fmp4_source(self) -> Path:
+        """Spawn ffmpeg writing a live fMP4 HLS playlist under self.tmp/src."""
         src_dir = self.tmp / "src"
         src_dir.mkdir()
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi", "-i", "testsrc=duration=12:size=320x240:rate=10",
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=12",
-            "-c:v", "libx264", "-preset", "ultrafast",
+            "-re",
+            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10",
+            "-f", "lavfi", "-i", "sine=frequency=440",
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
             "-c:a", "aac",
             "-f", "hls", "-hls_time", "2", "-hls_list_size", "6",
+            "-hls_flags", "delete_segments+append_list",
             "-hls_segment_type", "fmp4",
             str(src_dir / "index.m3u8"),
         ]
-        subprocess.run(cmd, check=True, timeout=60, capture_output=True)
-        return src_dir / "index.m3u8"
+        self._source_proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        )
+        playlist = src_dir / "index.m3u8"
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            if self._source_proc.poll() is not None:
+                err = (self._source_proc.stderr.read() or b"").decode("utf-8", "replace")
+                self.fail(f"live fMP4 source ffmpeg exited early: {err[-500:]}")
+            if playlist.exists() and "#EXTINF" in playlist.read_text(encoding="utf-8", errors="replace"):
+                return playlist
+            time.sleep(0.25)
+        self.fail("live fMP4 source produced no playlist segments")
 
     def test_remux_produces_advancing_ts_playlist(self):
         async def run():
-            src = self._make_fmp4_source()
+            src = self._start_live_fmp4_source()
             session = RemuxSession()
-            # Serve the source over file:// is not supported by ffmpeg HLS;
-            # use a local HTTP server instead.
+            # file:// is not supported by ffmpeg HLS; serve over local HTTP.
             import http.server
             import threading
             import functools
@@ -145,32 +188,37 @@ class RemuxIntegrationTests(unittest.TestCase):
             port = httpd.server_address[1]
             thread = threading.Thread(target=httpd.serve_forever, daemon=True)
             thread.start()
+            # Isolate remux scratch so this test cannot pollute /tmp/jellyball-remux
+            # (which is registered as a sweep root and would break SweepTests).
+            remux_root = self.tmp / "remux-out"
+            remux_root.mkdir()
             try:
-                spec = RemuxSpec(
-                    url=f"http://127.0.0.1:{port}/index.m3u8",
-                    audio_url="",
-                    referer="",
-                    origin="",
-                    cookies="",
-                    user_agent="test",
-                )
-                local_path = await session.start(spec)
-                self.assertTrue(Path(local_path).exists())
-                # Wait for the playlist to advance.
-                for _ in range(30):
-                    await asyncio.sleep(1)
-                    if session.healthy():
-                        break
-                self.assertTrue(session.healthy())
-                # Segments are valid TS.
-                from ts_normalize import find_ts_start
-                playlist_dir = Path(local_path).parent
-                segments = sorted(playlist_dir.glob("seg-*.ts"))
-                self.assertTrue(segments, "no segments produced")
-                data = segments[0].read_bytes()
-                self.assertGreaterEqual(find_ts_start(data), 0)
-                await session.stop()
-                self.assertFalse(session.healthy())
+                with patch.object(remux_ingest, "REMUX_OUTPUT_ROOT", remux_root):
+                    spec = RemuxSpec(
+                        url=f"http://127.0.0.1:{port}/index.m3u8",
+                        audio_url="",
+                        referer="",
+                        origin="",
+                        cookies="",
+                        user_agent="test",
+                    )
+                    local_path = await session.start(spec)
+                    self.assertTrue(Path(local_path).exists())
+                    self.assertTrue(str(local_path).startswith(str(remux_root)))
+                    for _ in range(30):
+                        await asyncio.sleep(1)
+                        if session.healthy():
+                            break
+                    self.assertTrue(session.healthy())
+                    from ts_normalize import find_ts_start
+                    playlist_dir = Path(local_path).parent
+                    # remux writes seg%05d.ts (e.g. seg00000.ts), not seg-*.ts.
+                    segments = sorted(playlist_dir.glob("seg*.ts"))
+                    self.assertTrue(segments, "no segments produced")
+                    data = segments[0].read_bytes()
+                    self.assertGreaterEqual(find_ts_start(data), 0)
+                    await session.stop()
+                    self.assertFalse(session.healthy())
             finally:
                 httpd.shutdown()
                 thread.join(timeout=5)

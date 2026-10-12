@@ -10,11 +10,11 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import main
-import legacy_proxy
 import db
 import scrapers
 import network_safety
 from network_safety import clear_dns_cache, validate_http_url, validate_http_url_async
+from upstream import _request_url_after_ssrf_check
 
 
 class ReliabilityHardeningTests(unittest.IsolatedAsyncioTestCase):
@@ -138,28 +138,19 @@ class FailureInjectionTests(unittest.TestCase):
         self.assertIsNone(validate_http_url("javascript:alert(1)"))
         self.assertIsNone(validate_http_url("https://user:password@example.com/stream"))
 
+    def test_request_url_rebuild_after_ssrf_check(self):
+        # CodeQL-recognized sanitizer: rebuild from parsed http(s) parts only.
+        self.assertEqual(
+            _request_url_after_ssrf_check("https://cdn.example.test/a.m3u8?tok=1"),
+            "https://cdn.example.test/a.m3u8?tok=1",
+        )
+        self.assertIsNone(_request_url_after_ssrf_check("file:///etc/passwd"))
+        self.assertIsNone(_request_url_after_ssrf_check("ftp://example.test/x"))
+        self.assertIsNone(_request_url_after_ssrf_check("https://user:pass@evil.test/x"))
+
     def test_single_worker_guard_configuration_is_explicit(self):
         with patch.dict(os.environ, {"WEB_CONCURRENCY": "2"}, clear=False):
             self.assertNotEqual(os.getenv("WEB_CONCURRENCY"), "1")
-
-
-@unittest.skipUnless(os.getenv("JELLYBALL_LOAD_TESTS") == "1", "opt-in load/soak test")
-class LocalLoadAndSoakTests(unittest.IsolatedAsyncioTestCase):
-    async def test_cache_repeated_access(self):
-        cache = legacy_proxy.LRUChunkCache(capacity=256, max_bytes=4 * 1024 * 1024)
-        started = time.perf_counter()
-        for index in range(1000):
-            await cache.put(str(index % 32), b"payload", 60)
-            await cache.get(str(index % 32))
-        self.assertLess(time.perf_counter() - started, 10)
-
-    async def test_cache_soak_expiration(self):
-        cache = legacy_proxy.LRUChunkCache(capacity=32, max_bytes=1024)
-        for _ in range(100):
-            await cache.put("same", b"payload", 0.01)
-            await asyncio.sleep(0.001)
-            await cache.purge_expired()
-        self.assertLessEqual(len(cache.cache), 1)
 
 
 if __name__ == "__main__":
