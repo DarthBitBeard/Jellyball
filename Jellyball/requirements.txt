@@ -17,7 +17,7 @@ thefuzz==0.22.1
 rapidfuzz==3.14.6
 playwright==1.64.0
 pystray==0.19.5
-pillow==12.3.0
+pillow==13.0.0
 bcrypt==5.0.0
 cryptography==50.0.2
 tzdata==2026.5
