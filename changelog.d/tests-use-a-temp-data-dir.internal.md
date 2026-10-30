@@ -1,0 +1,1 @@
+Running the test suite no longer writes into your real data directory. Under `python -m unittest`, Jellyball now uses a temporary data directory unless `JELLYBALL_DATA_DIR` is set, so test runs cannot add rows, settings or log lines to a live install.
