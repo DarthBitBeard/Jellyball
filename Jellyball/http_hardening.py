@@ -139,7 +139,8 @@ def parse_networks(raw: str, setting: str) -> Tuple[List[IPNetwork], List[str]]:
         except ValueError:
             invalid.append(item)
     if invalid:
-        LOGGER.error("%s: ignoring invalid entries %s", setting, ", ".join(invalid))
+        # The values are not logged: they come from the environment and may not be addresses at all.
+        LOGGER.error("%s: ignoring %d invalid entr%s (each must be an IP address or CIDR)", setting, len(invalid), "y" if len(invalid) == 1 else "ies")
     return networks, invalid
 
 
