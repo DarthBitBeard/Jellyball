@@ -9,6 +9,7 @@ modules read it as `config.PORT`.
 """
 import os
 import sys
+import tempfile
 import ipaddress
 import logging
 import re
@@ -26,10 +27,21 @@ APP_DIR = Path(sys.executable if getattr(sys, "frozen", False) else __file__).re
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
 
 
+def _running_under_unittest() -> bool:
+    """True for `python -m unittest ...` (the project's test runner)."""
+    # unittest rewrites argv[0] to "python -m unittest".
+    return "unittest" in (sys.argv[0] or "")
+
+
 def _get_writable_data_dir() -> Path:
     # Explicit override first: the Windows service uses %ProgramData%\Jellyball,
     # Docker uses the mounted volume, tests use a temp dir.
     override = os.getenv("JELLYBALL_DATA_DIR", "").strip()
+    if not override and _running_under_unittest():
+        # A test run must never write into the developer's real data directory
+        # (database rows, settings, log lines); give it a throw-away one.
+        override = tempfile.mkdtemp(prefix="jellyball-tests-")
+        os.environ["JELLYBALL_DATA_DIR"] = override
     if override:
         candidate = Path(override).expanduser()
         candidate.mkdir(parents=True, exist_ok=True)
