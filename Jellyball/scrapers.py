@@ -613,6 +613,25 @@ PLAYWRIGHT_RECYCLE_HOURS = bounded_float(os.getenv("PLAYWRIGHT_RECYCLE_HOURS", "
 _BROWSER_LAUNCH_INFO: Optional[Tuple[int, float]] = None
 
 
+# After a failed launch, callers get None (HTTP-only extraction) instead of
+# each one trying to start Chromium again within milliseconds.
+BROWSER_LAUNCH_RETRY_SECONDS = 60.0
+_BROWSER_LAUNCH_RETRY_AT = 0.0
+
+
+def log_playwright_launch_failure(operation: str, exc: BaseException, level: int = logging.ERROR) -> None:
+    """Log a Chromium start failure; name the fix when the browser is simply not installed."""
+    if "Executable doesn't exist" in str(exc):
+        LOGGER.log(
+            level,
+            "%s failed: Chromium for Playwright is not installed. Run `python -m playwright install chromium` "
+            "(the providers that need a browser find no streams until then)",
+            operation,
+        )
+    else:
+        _log_failure(operation, exc, level)
+
+
 async def get_healthy_browser() -> Optional[Browser]:
     """Retrieve the shared browser, relaunching it if it crashed, disconnected,
     or is due for a periodic recycle (PLAYWRIGHT_RECYCLE_HOURS). The recycle
@@ -620,7 +639,7 @@ async def get_healthy_browser() -> Optional[Browser]:
     is skipped whenever a page/context is still open against it, so an
     in-flight scrape is never torn down mid-navigation.
     """
-    global SHARED_BROWSER, PLAYWRIGHT_CLIENT, _BROWSER_LAUNCH_INFO
+    global SHARED_BROWSER, PLAYWRIGHT_CLIENT, _BROWSER_LAUNCH_INFO, _BROWSER_LAUNCH_RETRY_AT
 
     async with _PLAYWRIGHT_LOCK:
         if SHARED_BROWSER and SHARED_BROWSER.is_connected():
@@ -638,6 +657,8 @@ async def get_healthy_browser() -> Optional[Browser]:
                 PLAYWRIGHT_RECYCLE_HOURS,
             )
         else:
+            if time.monotonic() < _BROWSER_LAUNCH_RETRY_AT:
+                return None
             LOGGER.warning("Playwright browser disconnected or missing. Relaunching...")
 
         try:
@@ -655,9 +676,11 @@ async def get_healthy_browser() -> Optional[Browser]:
                 return None
             SHARED_BROWSER = browser
             _BROWSER_LAUNCH_INFO = (id(browser), time.monotonic())
+            _BROWSER_LAUNCH_RETRY_AT = 0.0
             return browser
         except Exception as exc:
-            _log_failure("relaunch Playwright browser", exc, logging.ERROR)
+            _BROWSER_LAUNCH_RETRY_AT = time.monotonic() + BROWSER_LAUNCH_RETRY_SECONDS
+            log_playwright_launch_failure("relaunch Playwright browser", exc)
             return None
 
 
