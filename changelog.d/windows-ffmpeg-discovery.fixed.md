@@ -1,0 +1,1 @@
+With no `ffmpeg` on PATH, Jellyball now uses Jellyfin's ffmpeg (or `%LOCALAPPDATA%fmpeginfmpeg.exe`) for remux ingest and the No Signal screen, as Multi-View already did. Before, a Windows install without ffmpeg on PATH could not play fMP4 or separate-audio sources at all.
