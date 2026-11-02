@@ -162,14 +162,34 @@ def _bootstrap_runtime_files() -> None:
 
 _bootstrap_runtime_files()
 
+def _playwright_package_local_browsers_installed() -> bool:
+    """True when Chromium lives inside the installed playwright package
+    (driver/package/.local-browsers), i.e. it was installed with
+    PLAYWRIGHT_BROWSERS_PATH=0."""
+    import importlib.util
+
+    spec = importlib.util.find_spec("playwright")
+    if spec is None or not spec.origin:
+        return False
+    local = Path(spec.origin).parent / "driver" / "package" / ".local-browsers"
+    return local.is_dir() and any(local.glob("chromium*"))
+
+
 _PLAYWRIGHT_PATH_SET_BY_APP = not os.getenv("PLAYWRIGHT_BROWSERS_PATH")
 if _PLAYWRIGHT_PATH_SET_BY_APP:
     if getattr(sys, "frozen", False):
         bundled_browser_dir = BUNDLE_DIR / "playwright_browsers"
         browser_dir = bundled_browser_dir if bundled_browser_dir.exists() else DATA_DIR / "playwright_browsers"
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_dir)
-    else:
+    elif _playwright_package_local_browsers_installed():
+        # Chromium was installed into the package itself (PLAYWRIGHT_BROWSERS_PATH=0
+        # at install time, as the Linux guide does); keep using it.
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+    # Otherwise leave it unset: `python -m playwright install chromium`, the
+    # README's step, installs into Playwright's default per-user cache
+    # (%LOCALAPPDATA%\ms-playwright on Windows). Forcing "0" here made every
+    # source run look inside the package instead, so Chromium never started and
+    # the browser-based providers found no streams.
 
 import asyncio
 

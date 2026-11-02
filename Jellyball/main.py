@@ -168,7 +168,7 @@ async def lifespan(app: FastAPI):
         scrapers.SHARED_BROWSER = await scrapers.PLAYWRIGHT_CLIENT.chromium.launch(headless=True)
     except Exception as exc:
         # HTTP scraping remains available when Chromium is not installed or cannot start.
-        _log_failure("start Playwright; using HTTP extraction only", exc)
+        scrapers.log_playwright_launch_failure("start Playwright; using HTTP extraction only", exc, logging.WARNING)
         if scrapers.PLAYWRIGHT_CLIENT:
             await scrapers.PLAYWRIGHT_CLIENT.stop()
         scrapers.PLAYWRIGHT_CLIENT = None
