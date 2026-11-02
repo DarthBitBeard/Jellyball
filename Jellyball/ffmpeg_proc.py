@@ -24,21 +24,6 @@ from state import _spawn_background_task
 from network_safety import bounded_float
 
 
-def _default_ffmpeg_path() -> str:
-    """Prefer a bundled ffmpeg binary in the packaged executable; otherwise
-    fall back to a plain "ffmpeg" lookup on PATH (dev runs, Docker, or a
-    build that didn't have one available to bundle)."""
-    if getattr(sys, "frozen", False):
-        bundled_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
-        bundled_path = BUNDLE_DIR / "ffmpeg_bin" / bundled_name
-        if bundled_path.is_file():
-            return str(bundled_path)
-    return "ffmpeg"
-
-
-FFMPEG_PATH = os.getenv("FFMPEG_PATH") or _default_ffmpeg_path()
-
-
 def _jellyfin_ffmpeg_path() -> Optional[str]:
     """Jellyfin's own ffmpeg build, when Jellyball runs on the Jellyfin server."""
     candidates: List[Path] = []
@@ -52,6 +37,32 @@ def _jellyfin_ffmpeg_path() -> Optional[str]:
         if candidate.is_file():
             return str(candidate)
     return None
+
+
+def _default_ffmpeg_path() -> str:
+    """The ffmpeg to use when FFMPEG_PATH is not set: the copy bundled into the
+    packaged executable, else "ffmpeg" on PATH, else a well-known install on
+    this machine (Jellyfin's own build, or the folder the README suggests on
+    Windows). Without that last step a Windows install with no ffmpeg on PATH
+    had no remux ingest and no No Signal placeholder, although Jellyfin's
+    ffmpeg was right there."""
+    if getattr(sys, "frozen", False):
+        bundled_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+        bundled_path = BUNDLE_DIR / "ffmpeg_bin" / bundled_name
+        if bundled_path.is_file():
+            return str(bundled_path)
+    if shutil.which("ffmpeg"):
+        return "ffmpeg"
+    candidates: List[Optional[str]] = [_jellyfin_ffmpeg_path()]
+    if sys.platform == "win32" and os.getenv("LOCALAPPDATA"):
+        candidates.append(str(Path(os.environ["LOCALAPPDATA"]) / "ffmpeg" / "bin" / "ffmpeg.exe"))
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return candidate
+    return "ffmpeg"
+
+
+FFMPEG_PATH = os.getenv("FFMPEG_PATH") or _default_ffmpeg_path()
 
 
 # Multi-View's encoder must match the GPU driver. The bundled ffmpeg is a very
