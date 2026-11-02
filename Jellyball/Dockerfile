@@ -3,7 +3,7 @@
 # the digest is documentation (the digest is authoritative). Debian bookworm is
 # the OS pin; python:3.12.x is the interpreter pin.
 # Playwright's Chromium is only published for amd64 and arm64 Linux.
-FROM python:3.15-slim-bookworm@sha256:575f8bc12ec26542e0678bc6b60e385218248019d433157ec327264a78c3a853
+FROM python:3.15-slim-bookworm@sha256:4e03260adeeebafccd084f3584e6b84823aba5651cfb53ef8a078ed441ddf9cd
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
