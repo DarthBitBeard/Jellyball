@@ -10,7 +10,7 @@ API_VERSION = 1
 
 import asyncio
 import urllib.parse
-from typing import Any, Dict, List, Optional, Set, TypedDict
+from typing import Any, Dict, List, Optional, Set, TypedDict, cast
 
 import httpx
 from playwright.async_api import Browser
@@ -47,6 +47,10 @@ class StreamDict(TypedDict, total=False):
     match_score: int
     match_title: str
     match_url: str
+    # The listing text the provider matched the event on when the link text
+    # itself is generic ("Watch", "HD 1"): lets the engine's event filter
+    # confirm the stream belongs to the requested game.
+    match_context: str
     discovery_method: str
     quality: Dict[str, Any]
 
@@ -132,6 +136,10 @@ class Provider:
 
     name = "Base"
     categories: List[str] = []
+    # False for providers that only list 24/7 linear channels and never carry a
+    # team's game (e.g. a curated free-to-air playlist): team channels do not
+    # search them, so a team can never take an unrelated linear channel.
+    carries_team_events: bool = True
 
     def __init__(self) -> None:
         self._default_base_url = ""
@@ -167,6 +175,20 @@ class Provider:
         http_client: Optional[httpx.AsyncClient] = None,
     ) -> List[StreamDict]:
         return []
+
+
+class _MatchedEvent(tuple):
+    """A (match_url, score, match_title) event tuple that can also carry the
+    listing text it was matched on (``match_context``)."""
+
+    match_context: str = ""
+
+
+def _matched_event(match_url: str, score: int, match_title: str, context: str = "") -> tuple[str, int, str]:
+    event = _MatchedEvent((match_url, score, match_title))
+    if context:
+        event.match_context = context
+    return cast("tuple[str, int, str]", event)
 
 
 class HtmlAggregatorProvider(Provider):
@@ -298,6 +320,7 @@ class HtmlAggregatorProvider(Provider):
                 href=href,
                 title=title,
             )
+            context = ""
             if not matched:
                 # Some providers put the team names in the card rather
                 # than the anchor. Only accept that fallback for a
@@ -306,9 +329,14 @@ class HtmlAggregatorProvider(Provider):
                 context_matched, context_score, _ = match_team(search_terms, candidate_text, href=href, title=title)
                 if context_matched and context_score >= 110:
                     matched, score = context_matched, context_score
+                    context = candidate_text
             if matched:
                 seen_matches.add(match_url)
-                matches.append((match_url, score, raw_text or title or match_url))
+                # The card context rides along (as an attribute, so the event
+                # stays a 3-tuple for existing subclasses) to the streams: the
+                # engine's event filter needs what identified the game when
+                # the link text itself cannot.
+                matches.append(_matched_event(match_url, score, raw_text or title or match_url, context))
                 if len(matches) >= _engine.MAX_PROVIDER_EVENTS:
                     return
 
@@ -385,19 +413,20 @@ class HtmlAggregatorProvider(Provider):
 
             async def inspect_event(event: tuple[str, int, str]) -> List[dict]:
                 match_url, score, match_title = event
+                match_context = str(getattr(event, "match_context", "") or "")
                 async with event_semaphore:
                     async def inspect() -> List[dict]:
                         event_streams = await fetch_streams_from_page(
                             client, match_url, self.name, score, match_title
                         )
-                        for stream in event_streams:
-                            stream.setdefault("match_url", match_url)
                         if not event_streams and browser and browser.is_connected():
                             event_streams = await playwright_intercept_streams(
                                 browser, match_url, self.name, score, match_title, http_client=client
                             )
-                            for stream in event_streams:
-                                stream.setdefault("match_url", match_url)
+                        for stream in event_streams:
+                            stream.setdefault("match_url", match_url)
+                            if match_context:
+                                stream.setdefault("match_context", match_context)
                         return event_streams
 
                     try:

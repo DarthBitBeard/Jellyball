@@ -13,7 +13,9 @@ logged and shown on the dashboard's Providers card.
 `API_VERSION = 1`. The stable surface a provider may use:
 
 - `class Provider`: `name`, `base_url` property (honors the dashboard's domain
-  overrides), `categories`, and
+  overrides), `categories`, `carries_team_events` (default `True`; set it to
+  `False` for a provider that only lists 24/7 linear channels so team channels
+  never search it), and
   `async search(query_or_terms, *, browser=None, http_client=None)` returning
   a list of `StreamDict`.
 - `class HtmlAggregatorProvider(Provider)`: the shared logic for aggregators
@@ -21,7 +23,10 @@ logged and shown on the dashboard's Providers card.
   `_is_event_link`, `_parse_anchors`, and the full search pipeline).
 - `StreamDict`: the contract for one stream. Fields: `url`, `referer`,
   `origin`, `provider`, `match_score`, `match_title`, `match_url`,
-  `discovery_method`, `quality`.
+  `match_context`, `discovery_method`, `quality`. `match_context` is the
+  listing text the event was matched on when the link text itself is generic
+  ("Watch"); the engine drops a stream whose title, URL and context all fail
+  to name the requested team.
 - `fetch_text(client, url)` / `fetch_html(client, url)`: HTTP helpers built on
   `network_safety.validate_http_url_async`, so SSRF protection cannot be
   bypassed.
