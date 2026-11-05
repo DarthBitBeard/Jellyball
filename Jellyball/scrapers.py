@@ -79,6 +79,7 @@ async def _verify_provider_streams(streams: List[dict], http_client: Optional[ht
             try:
                 async with verify_semaphore:
                     enrich: dict = {}
+                    reject: dict = {}
                     is_live = await verify_stream_live(
                         client,
                         stream["url"],
@@ -86,12 +87,24 @@ async def _verify_provider_streams(streams: List[dict], http_client: Optional[ht
                         timeout=8.0,
                         origin=stream.get("origin", ""),
                         enrich=enrich,
+                        reject=reject,
                     )
                     if is_live and enrich:
                         stream["quality"] = enrich
             except Exception as exc:
                 _log_failure("verify provider stream", exc)
                 is_live = False
+                reject = {"reason": f"error {type(exc).__name__}"}
+            if not is_live:
+                # Why a found stream was thrown away is the most useful fact when a
+                # channel has no playback (e.g. a provider's CDN answering 403).
+                LOGGER.info(
+                    "Stream candidate rejected provider=%s host=%s reason=%s title=%s",
+                    stream.get("provider", "?"),
+                    urllib.parse.urlsplit(str(stream.get("url", ""))).netloc,
+                    reject.get("reason", "unknown"),
+                    str(stream.get("match_title", ""))[:60],
+                )
             return stream if is_live else None
 
         results = await asyncio.gather(*(verify_one(stream) for stream in streams), return_exceptions=True)
@@ -719,6 +732,20 @@ def _stream_matches_requested_event(stream: dict, search_terms: List[str]) -> bo
     matched, _, _ = match_team(search_terms, match_title, href=match_url, title=match_title)
     return matched
 
+def _usable_search_terms(terms: List[str]) -> List[str]:
+    """Stored search terms minus ones that can only produce false matches. Older
+    catalogs saved the bare ESPN team id ("130") as an alias; a number-only term
+    matches any listing that shows "ID: 130", so Michigan picked up a Premier
+    League channel."""
+    usable = []
+    for term in terms:
+        text = str(term or "").strip()
+        if not text or text.isdigit():
+            continue
+        usable.append(text)
+    return list(dict.fromkeys(usable))
+
+
 async def master_scrape(
     query: str,
     team_name: str = "",
@@ -733,8 +760,8 @@ async def master_scrape(
     slowest provider's timeout. May be sync or async."""
     identity = canonical_team_name(team_name or query)
     if search_terms:
-        search_terms = list(dict.fromkeys(term.strip() for term in search_terms if term and term.strip()))
-    else:
+        search_terms = _usable_search_terms(search_terms)
+    if not search_terms:
         search_terms = get_team_search_terms(identity or team_name or query, query, team_id)
     display_title = team_name or query
     LOGGER.info("Starting stream search for team=%s terms=%s", display_title, search_terms[:4])
@@ -785,7 +812,13 @@ async def master_scrape(
                     outcome=outcome, error_class=error_class, run=run,
                 )
                 _provider_breaker_success(provider.name)
-                LOGGER.info("Provider returned provider=%s team=%s streams=%d", provider.name, display_title, len(res))
+                LOGGER.info(
+                    "Provider returned provider=%s team=%s streams=%d outcome=%s index_events=%d matches=%d elapsed_ms=%d",
+                    provider.name, display_title, len(res), outcome,
+                    getattr(run, "index_events", 0) if run is not None else 0,
+                    getattr(run, "matches", 0) if run is not None else 0,
+                    elapsed_ms,
+                )
                 return res
         except asyncio.TimeoutError:
             timed_out = True

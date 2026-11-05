@@ -71,6 +71,63 @@ USER_ENV_FILE = DATA_DIR / ".env"
 LOG_FILE = DATA_DIR / "jellyball.log"
 LOGGER = logging.getLogger("jellyball")
 
+# JELLYBALL_LOG_LEVEL=DEBUG turns on per-segment request lines, full tracebacks
+# for failures and other detail meant for troubleshooting; INFO is the default.
+_LEVEL_NAMES = {"DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNING, "ERROR": logging.ERROR}
+LOG_LEVEL_NAME = (os.getenv("JELLYBALL_LOG_LEVEL") or "INFO").strip().upper()
+if LOG_LEVEL_NAME not in _LEVEL_NAMES:
+    LOG_LEVEL_NAME = "INFO"
+LOG_LEVEL = _LEVEL_NAMES[LOG_LEVEL_NAME]
+
+# Values that must never reach a log line (API keys, bot tokens, passwords). They
+# are registered when loaded (db.get_setting, security) and replaced by the filter
+# below, which also catches the usual secret shapes in URLs and headers.
+_REGISTERED_SECRETS: "set[str]" = set()
+
+
+def register_secret(value: object) -> None:
+    text = str(value or "").strip()
+    if len(text) >= 6:
+        _REGISTERED_SECRETS.add(text)
+
+
+_SECRET_PATTERNS = (
+    (re.compile(r"(?i)\b((?:api_?key|apikey|access_?token|token|auth|password|passwd|pwd|secret|signature|sig|key|hash)=)[^&\s\"'<>]+"), r"\1<redacted>"),
+    (re.compile(r'(?i)(MediaBrowser\s+Token=")[^"]*'), r"\1<redacted>"),
+    (re.compile(r"(?i)\b(authorization|x-emby-token|cookie|set-cookie)(\s*[:=]\s*)[^\n]+"), r"\1\2<redacted>"),
+    (re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b"), "<redacted-bot-token>"),
+    (re.compile(r"(?i)(discord(?:app)?\.com/api/webhooks/)[^\s\"'<>]+"), r"\1<redacted>"),
+)
+
+
+def redact(text: str) -> str:
+    """Remove registered secrets and secret-shaped substrings from text."""
+    for secret in sorted(_REGISTERED_SECRETS, key=len, reverse=True):
+        if secret in text:
+            text = text.replace(secret, "<redacted>")
+    for pattern, replacement in _SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+class _RedactingFilter(logging.Filter):
+    """Applied to every record before it is queued: the message and any
+    traceback are rendered and redacted here, so no handler can write a secret."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        cleaned = redact(message)
+        if cleaned != message or record.args:
+            record.msg, record.args = cleaned, None
+        if record.exc_info:
+            record.exc_text = redact(logging.Formatter().formatException(record.exc_info))
+            record.exc_info = None
+        return True
+
+
 # Size-capped rotation (5 x 10 MB) so a noisy day can't fill the disk of a box
 # that runs for months. Records go through a queue so the event loop never
 # blocks on file I/O; a background thread does the writing.
@@ -91,14 +148,16 @@ if sys.stdout is not None:
     _sink_handlers.append(_console_handler)
 
 root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
+root_logger.setLevel(LOG_LEVEL)
 _LOG_LISTENER: Optional["QueueListener"] = None
 if not root_logger.handlers:
     _log_queue: "queue.SimpleQueue" = queue.SimpleQueue()
-    root_logger.addHandler(QueueHandler(_log_queue))
+    _queue_handler = QueueHandler(_log_queue)
+    _queue_handler.addFilter(_RedactingFilter())
+    root_logger.addHandler(_queue_handler)
     _LOG_LISTENER = QueueListener(_log_queue, *_sink_handlers, respect_handler_level=True)
     _LOG_LISTENER.start()
-LOGGER.setLevel(logging.INFO)
+LOGGER.setLevel(LOG_LEVEL)
 
 # httpx/httpcore log one INFO line per HTTP request by default — with many active
 # channels that's every provider probe and every HLS segment fetch, drowning real
@@ -124,13 +183,20 @@ def _safe_exception_detail(exc: BaseException, limit: int = 160) -> str:
 
 
 def _log_failure(operation: str, exc: BaseException, level: int = logging.WARNING) -> None:
-    """Log a failure with its exception type only.
+    """Log a failure with its exception type and a scrubbed message.
 
-    Exception message text is intentionally omitted: it can carry tokens, URL
-    query secrets, or key material, and clear-text logging of that is both a
-    real risk and a CodeQL finding.
+    URLs are cut down to scheme and host (tokens live in paths and query
+    strings) and registered secrets are redacted, so the message can be logged.
     """
-    LOGGER.log(level, "%s failed (%s)", operation, type(exc).__name__)
+    # The message is included again (URLs cut to their host, secrets redacted by
+    # the log filter): "failed (Error)" alone made real problems undiagnosable.
+    # DEBUG adds the traceback.
+    detail = redact(_safe_exception_detail(exc, limit=300))
+    exc_info = (type(exc), exc, exc.__traceback__) if LOGGER.isEnabledFor(logging.DEBUG) else None
+    if detail:
+        LOGGER.log(level, "%s failed (%s: %s)", operation, type(exc).__name__, detail, exc_info=exc_info)
+    else:
+        LOGGER.log(level, "%s failed (%s)", operation, type(exc).__name__, exc_info=exc_info)
 
 
 def _bootstrap_runtime_files() -> None:

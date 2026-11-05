@@ -5,6 +5,65 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-11-05
+
+### Added
+
+- Logs tab: **Download diagnostics** builds `/api/diagnostics.zip` for a bug report:
+  version, OS, ffmpeg and Jellyfin details, settings, provider health, live sessions
+  and the end of the log, with API keys, webhook URLs, tokens and stream URLs removed.
+- `PLAYBACK_ALLOW_CIDRS` limits who may fetch the playlist, the guide, streams and the
+  signed relay (for example `192.168.1.0/24`); this machine is always allowed. Unset,
+  nothing changes. Behind a reverse proxy, list it in `TRUSTED_PROXIES` so the real
+  client address is checked: `X-Forwarded-For` is only read from a trusted proxy.
+- Troubleshooting logs for production testing. At startup Jellyball writes one
+  report of its environment (version, data folder, the ffmpeg it uses, whether
+  Chromium is running, channel counts, the Jellyfin host and the enabled
+  providers). Every tune-in logs how many stream candidates the channel had, how
+  long it took to start and whether it fell back to No Signal and why; a channel
+  that cannot play at all logs its state. Requests from Jellyfin for the
+  playlist, guide and channel playlists are logged with status, duration and
+  client, and failed or slow segment requests are logged. Each provider search
+  logs its outcome, and a stream that a provider found but that failed
+  verification logs the reason (for example "playlist http_403"). Failures carry
+  their message again (URLs cut to the host). `JELLYBALL_LOG_LEVEL=DEBUG` adds
+  tracebacks and one line per segment request.
+
+### Changed
+
+- Export/Import Configuration now covers Multi-View channels and the dashboard settings
+  (Advanced Settings, provider domains, toggles, Jellyfin URL and task id), not just
+  channels. Secrets are never exported or imported; 2.0 export files still import.
+
+### Fixed
+
+- A channel whose saved search terms included its bare ESPN team id (older
+  catalogs stored, for example, "130" for Michigan) no longer matches unrelated
+  listings such as "Sky Sports Premier League ID: 130". Number-only search terms
+  are ignored.
+- With no `ffmpeg` on PATH, Jellyball now uses Jellyfin's ffmpeg (or `%LOCALAPPDATA%
+  fmpegin
+  fmpeg.exe`) for remux ingest and the No Signal screen, as Multi-View already did. Before, a Windows install without ffmpeg on PATH could not play fMP4 or separate-audio sources at all.
+- Running from source on Windows, the browser-based providers (DaddyLive, TheTVApp) now find Chromium where `python -m playwright install chromium` puts it. Jellyball used to look inside the Playwright package instead, so the browser never started and those providers returned no streams. A missing Chromium is now logged once with the command that fixes it, instead of a relaunch attempt on every search.
+
+### Security
+
+- FastAPI's `/docs`, `/redoc` and `/openapi.json` pages are no longer served to
+  anyone who can reach the port. They are off by default; set
+  `JELLYBALL_API_DOCS=1` to turn them on, behind the dashboard sign-in.
+- Every log line now passes through a redaction filter: the Jellyfin API key,
+  bot tokens, webhook URLs and passwords that Jellyball loads are replaced by
+  `<redacted>`, as are token, key, signature and Authorization values in URLs and
+  headers, including inside tracebacks.
+- Every response now carries `X-Content-Type-Options: nosniff` and
+  `Referrer-Policy: same-origin`; dashboard pages also get a Content-Security-Policy
+  (no framing, no plugins, no `<base>` or cross-site form targets, scripts and
+  requests only to Jellyball itself) and `X-Frame-Options: DENY`.
+
+### Internal
+
+- Running the test suite no longer writes into your real data directory. Under `python -m unittest`, Jellyball now uses a temporary data directory unless `JELLYBALL_DATA_DIR` is set, so test runs cannot add rows, settings or log lines to a live install.
+
 ## [3.0.0] - 2026-10-12
 
 ### Added

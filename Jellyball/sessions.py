@@ -20,6 +20,7 @@ from config import _upstream_media_headers, _validate_upstream_url, LOGGER
 from state import _media_client, _spawn_background_task, PLACEHOLDER_SESSION_ID, stream_state
 from db import _METRIC_WRITER
 import engine_settings
+import diaglog
 import engine_stats
 from upstream import _fetch_upstream_body, _hls_response, HLS_MEDIA_TYPE
 from legacy_proxy import _sample_aes_proxy_stream
@@ -367,6 +368,9 @@ async def _race_cold_candidates(channel_id: str, limit: int = 3, timeout: float 
 async def _serve_session_playlist(session_id: str, segment_prefix: str, legacy=None) -> Response:
     session = SESSIONS.get(session_id)
     cold = not session.is_running and not session.window and session.state != "sample_aes"
+    tune_started = time.monotonic()
+    if cold:
+        diaglog.log_tune_in(session_id)
     if cold and _is_raceable_channel(session_id):
         # Fix 1: race the top candidates for a healthy one before the
         # session's serial poll begins, so one dead first candidate can't eat
@@ -379,22 +383,28 @@ async def _serve_session_playlist(session_id: str, segment_prefix: str, legacy=N
             LOGGER.exception("Cold-start race failed channel=%s; starting No-Signal placeholder", session_id)
             race_won = False
         engine_stats.record_cold_race(race_won)
+        diaglog.log_cold_race(session_id, race_won, time.monotonic() - tune_started)
         if not race_won:
             # Fix 2: no healthy candidate found quickly: start No-Signal NOW
             # so Jellyfin's ffmpeg always gets a playable playlist on first
             # open (it does not retry a failed first open). The real source
             # takes over through the normal discontinuity machinery when it
             # becomes ready.
-            _start_on_placeholder(session_id)
+            started = _start_on_placeholder(session_id)
+            diaglog.log_placeholder(session_id, "no candidate answered the cold-start race", started)
     session.touch()
     if session.state == "sample_aes" and legacy is not None:
         return await legacy()
     await session.wait_ready(STREAM_STARTUP_TIMEOUT)
     if session.state == "sample_aes" and legacy is not None:
         return await legacy()
-    if not session.window and _start_on_placeholder(session_id):
-        await session.wait_ready(10.0)
     if not session.window:
+        started = _start_on_placeholder(session_id)
+        diaglog.log_placeholder(session_id, f"no segments within {STREAM_STARTUP_TIMEOUT:.0f}s", started)
+        if started:
+            await session.wait_ready(10.0)
+    if not session.window:
+        diaglog.log_unplayable(session_id, session)
         # Genuinely exhausted/dead: no segments and no placeholder (ffmpeg
         # missing or failed to start). Jellyfin won't retry a 503, but there
         # is nothing playable to hand it.
@@ -403,6 +413,8 @@ async def _serve_session_playlist(session_id: str, segment_prefix: str, legacy=N
             content="Stream is starting",
             headers={"Retry-After": "2", "Cache-Control": "no-cache"},
         )
+    if cold:
+        diaglog.log_tune_in_ready(session_id, session, time.monotonic() - tune_started)
     return _hls_response(session.render_playlist(segment_prefix))
 
 

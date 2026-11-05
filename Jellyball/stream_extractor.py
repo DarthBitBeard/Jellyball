@@ -493,6 +493,7 @@ async def verify_stream_live(
     *,
     probe_state: Optional[dict] = None,
     enrich: Optional[dict] = None,
+    reject: Optional[dict] = None,
 ) -> bool:
     """Verify a stream URL and, for HLS, one actual media segment.
 
@@ -506,8 +507,17 @@ async def verify_stream_live(
     a top-level master playlist, is filled with extract_stream_quality() data
     for quality-ranked candidate sorting. The boolean return contract is
     unchanged: existing callers that ignore enrich behave exactly as before.
+
+    reject is an optional caller-owned dict; on a False result its "reason"
+    names the step that failed (e.g. "playlist http_403", "segment http_404",
+    "vod_playlist", "stale_playlist", "not_media"), for the logs.
     """
+    def why(reason: str) -> None:
+        if reject is not None:
+            reject["reason"] = reason
+
     if not await validate_http_url_async(url) or (referer and not await validate_http_url_async(referer)):
+        why("blocked_url")
         return False
 
     headers = {
@@ -548,7 +558,7 @@ async def verify_stream_live(
             or any(kind in content_type for kind in ("video", "octet-stream", "audio"))
         )
 
-    async def read_sample(current_url: str, request_headers: Dict[str, str], max_bytes: int = 64 * 1024):
+    async def read_sample(current_url: str, request_headers: Dict[str, str], max_bytes: int = 64 * 1024, stage: str = "playlist"):
         # Range is capped to match max_bytes: a 206 (or a 200 from a server
         # that ignores Range) both let us stop after max_bytes without having
         # to abort the connection mid-body. max_bytes must stay >= 64KB so a
@@ -559,6 +569,7 @@ async def verify_stream_live(
         for _ in range(MAX_REDIRECTS + 1):
             safe_url = await validate_http_url_async(current_url)
             if not safe_url:
+                why(f"{stage} blocked_url")
                 return None
             async with client.stream(
                 "GET",
@@ -570,9 +581,11 @@ async def verify_stream_live(
                 if 300 <= response.status_code < 400:
                     current_url = await next_safe_url(current_url, response)
                     if not current_url:
+                        why(f"{stage} redirect_blocked")
                         return None
                     continue
                 if response.status_code not in (200, 206):
+                    why(f"{stage} http_{response.status_code}")
                     return None
                 sample = bytearray()
                 async for block in response.aiter_bytes(chunk_size=4096):
@@ -634,16 +647,19 @@ async def verify_stream_live(
         return stalled_for <= threshold
 
     async def verify_hls_media(media_url: str, manifest_url: str, depth: int = 0) -> bool:
-        result = await read_sample(media_url, headers)
+        stage = "playlist" if depth == 0 else ("media" if "m3u8" in media_url.lower() else "segment")
+        result = await read_sample(media_url, headers, stage=stage)
         if not result:
             return False
         effective_url, content_type, sample = result
         text = sample.decode("utf-8", errors="replace")
         if sample.startswith(b"#EXTM3U") or "mpegurl" in content_type.lower():
             if depth >= 2:
+                why("nested_playlist")
                 return False
             if "#EXT-X-ENDLIST" in text:
                 # A finished/VOD playlist, not a live one.
+                why("vod_playlist")
                 return False
             # Master playlists: the first variant is as good as any. Media playlists:
             # sample the *newest* segment - the oldest one in a live sliding window is
@@ -668,14 +684,21 @@ async def verify_stream_live(
                     if is_master:
                         break
             if not media_uri:
+                why("empty_playlist")
                 return False
             if not _playlist_is_fresh(text, is_master):
+                why("stale_playlist")
                 return False
             next_url = await validate_http_url_async(urllib.parse.urljoin(effective_url, media_uri))
             if not next_url:
+                why("segment blocked_url")
                 return False
             return await verify_hls_media(next_url, effective_url, depth + 1)
-        return media_sample_is_playable(sample, content_type)
+        if media_sample_is_playable(sample, content_type):
+            return True
+        kind = (content_type or "no content-type").split(";")[0][:40]
+        why(f"not_media ({kind})")
+        return False
 
     # HEAD remains useful for direct media URLs, but a playlist must be read
     # and sampled because a healthy manifest can still contain image pixels or
@@ -707,6 +730,7 @@ async def verify_stream_live(
         return await verify_hls_media(url, url)
     except Exception as exc:
         LOGGER.debug("Stream media health check failed error=%s", type(exc).__name__)
+        why(f"error {type(exc).__name__}")
         return False
 
 async def fetch_streams_from_page(
