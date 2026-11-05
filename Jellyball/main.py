@@ -42,6 +42,8 @@ from config import (
     LOGGER,
 )
 import state
+import cpu_pool
+from loop_monitor import LoopMonitor
 from state import _cancel_background_tasks, _spawn_background_task, new_channel_state, stream_state
 from db import (
     _METRIC_WRITER,
@@ -149,6 +151,9 @@ def _warn_removed_env_knobs() -> None:
 async def lifespan(app: FastAPI):
 
     _install_loop_exception_filter()
+    loop_monitor = LoopMonitor()
+    loop_monitor.start()
+    cpu_pool.configure_gil()
     init_db()
     _METRIC_WRITER.start()
     _warn_removed_env_knobs()
@@ -297,6 +302,8 @@ async def lifespan(app: FastAPI):
     _TEAM_SCRAPE_TASKS.clear()
     _TEAM_SCRAPE_WAKE_EVENTS.clear()
     _TEAM_STATE_LOCKS.clear()
+    loop_monitor.stop()
+    cpu_pool.shutdown()
     await SESSIONS.close_all()
     for channel_id in list(_MULTIVIEW_PROCESSES):
         await _stop_multiview_process(channel_id)
