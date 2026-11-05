@@ -33,6 +33,15 @@ class RunStats:
     index_pages: int = 0
     matches: int = 0
     page_errors: List[str] = field(default_factory=list)
+    # Stream candidates the provider found and verified itself, and how many
+    # of those verification rejected (e.g. a CDN answering 403).
+    candidates: int = 0
+    rejected: int = 0
+    reject_reasons: List[str] = field(default_factory=list)
+
+    @property
+    def all_candidates_rejected(self) -> bool:
+        return self.candidates > 0 and self.rejected >= self.candidates
 
     @property
     def index_known(self) -> bool:
@@ -77,6 +86,26 @@ def report_page_error(error: "BaseException | str") -> None:
         stats.page_errors.append(error if isinstance(error, str) else classify_error(error))
 
 
+def report_verification(candidates: int, rejected_reasons: List[str]) -> None:
+    """The provider verified `candidates` streams and rejected these (reasons
+    like "playlist http_403"; kept short and URL-free by the caller)."""
+    stats = _RUN.get()
+    if stats is None:
+        return
+    stats.candidates += max(0, int(candidates))
+    stats.rejected += len(rejected_reasons)
+    for reason in rejected_reasons:
+        if len(stats.reject_reasons) < 20:
+            stats.reject_reasons.append(str(reason)[:60])
+
+
+def common_reject_reason(stats: RunStats) -> str:
+    """The most frequent rejection reason of a run ("unknown" when none)."""
+    if not stats.reject_reasons:
+        return "unknown"
+    return max(set(stats.reject_reasons), key=stats.reject_reasons.count)
+
+
 def classify_error(exc: BaseException) -> str:
     """A short, stable, secret-free label for an exception."""
     if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException, TimeoutError)):
@@ -86,6 +115,10 @@ def classify_error(exc: BaseException) -> str:
     if isinstance(exc, ssl.SSLError):
         return "tls"
     if isinstance(exc, httpx.ConnectError):
+        # httpx wraps certificate failures in ConnectError.
+        cause = exc.__cause__ or exc.__context__
+        if isinstance(cause, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in str(exc):
+            return "tls"
         return "connect"
     if isinstance(exc, httpx.TransportError):
         return "network"
@@ -110,6 +143,11 @@ def derive_outcome(
         return "ok", None
     if stats.page_errors and stats.index_events == 0:
         return "error", stats.page_errors[0]
+    if stats.all_candidates_rejected:
+        # Streams were found but every one failed verification (e.g. the
+        # stream CDN answers 403 to non-browser clients): as useless as an
+        # error, and counted as one so the circuit breaker can demote it.
+        return "error", "rejected"
     return "empty", None
 
 
