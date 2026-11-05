@@ -1,0 +1,1 @@
+Streams a provider found for a game listed as a card with a generic "Watch" link (iSportSurge, and any aggregator matched on the card text) are no longer dropped before becoming candidates, so a channel gets every verified stream for the game as a standby. The log now says at INFO why returned streams were dropped and how many candidates a scrape produced (#48).

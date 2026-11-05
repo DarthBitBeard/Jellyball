@@ -698,8 +698,15 @@ async def get_healthy_browser() -> Optional[Browser]:
 
 
 def _providers_for_search(always_live: bool = False):
-    """Keep 24/7 channel discovery on dedicated linear-channel providers."""
-    return provider_settings.filter_enabled(LINEAR_PROVIDERS if always_live else ACTIVE_PROVIDERS)
+    """Keep 24/7 channel discovery on dedicated linear-channel providers, and
+    keep team searches off providers that only list linear channels (a team
+    channel must never take an unrelated 24/7 channel, e.g. a snooker channel
+    whose name carries a "GB" region code matching the Packers' "gb")."""
+    if always_live:
+        return provider_settings.filter_enabled(LINEAR_PROVIDERS)
+    return provider_settings.filter_enabled(
+        [provider for provider in ACTIVE_PROVIDERS if getattr(provider, "carries_team_events", True)]
+    )
 
 
 async def _get_active_provider_priority() -> Dict[str, int]:
@@ -724,13 +731,42 @@ async def _get_active_provider_priority() -> Dict[str, int]:
 
 
 def _stream_matches_requested_event(stream: dict, search_terms: List[str]) -> bool:
-    """Reject a provider stream whose source page identifies another event."""
+    """Reject a provider stream whose source page identifies another event.
+
+    The link text and URL are judged first. Aggregators often list a game as a
+    card whose link only says "Watch" and points at /event/<id>; the provider
+    matched such a game on the card text and passes it along as
+    match_context, which is judged the same way (issue #48: every iSportSurge
+    stream for a 49ers game was dropped here because its link text was
+    generic)."""
     match_title = str(stream.get("match_title") or "")
     match_url = str(stream.get("match_url") or "")
-    if not match_title and not match_url:
+    match_context = str(stream.get("match_context") or "")
+    if not match_title and not match_url and not match_context:
         return True
     matched, _, _ = match_team(search_terms, match_title, href=match_url, title=match_title)
+    if not matched and match_context:
+        matched, _, _ = match_team(search_terms, match_context, href=match_url, title=match_title)
     return matched
+
+
+def _log_event_filter_drops(provider: str, team: str, streams: List[dict], kept: int) -> None:
+    """INFO line for streams a provider returned that the event filter dropped,
+    so 'Provider returned streams=7' followed by 1 candidate is explainable."""
+    dropped = len(streams) - kept
+    if dropped <= 0:
+        return
+    sample = next(
+        (s for s in streams if s.get("match_title") or s.get("match_url")),
+        streams[0] if streams else {},
+    )
+    LOGGER.info(
+        "Dropped provider streams not for the requested event provider=%s team=%s dropped=%d kept=%d "
+        "title=%s event_path=%s",
+        provider, team, dropped, kept,
+        str(sample.get("match_title") or "")[:60],
+        urllib.parse.urlsplit(str(sample.get("match_url") or "")).path[:80],
+    )
 
 def _usable_search_terms(terms: List[str]) -> List[str]:
     """Stored search terms minus ones that can only produce false matches. Older
@@ -848,8 +884,9 @@ async def master_scrape(
 
     async def _search_and_report(provider):
         res = await _jittered_search(provider)
+        playable = [s for s in res if always_live or _stream_matches_requested_event(s, search_terms)]
+        _log_event_filter_drops(provider.name, display_title, res, len(playable))
         if on_partial is not None and res:
-            playable = [s for s in res if always_live or _stream_matches_requested_event(s, search_terms)]
             if playable:
                 try:
                     ranked = rank_streams(playable, await _get_active_provider_priority())
@@ -886,6 +923,12 @@ async def master_scrape(
     # stream_state[...]['candidates'] to MAX_STREAM_CANDIDATES, but capping
     # here too bounds how many streams every caller of master_scrape (and any
     # future one) has to carry around and log.
+    if len(all_streams) != len(deduped) or len(deduped) > MAX_STREAM_CANDIDATES:
+        LOGGER.info(
+            "Stream search trimmed results team=%s matched=%d duplicate_urls=%d over_cap=%d",
+            display_title, len(all_streams), len(all_streams) - len(deduped),
+            max(0, len(deduped) - MAX_STREAM_CANDIDATES),
+        )
     return deduped[:MAX_STREAM_CANDIDATES]
 
 
