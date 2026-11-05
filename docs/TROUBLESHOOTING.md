@@ -28,6 +28,16 @@ saved in `dashboard-password.txt` in the data folder; the user name is
 written to the log. To choose your own, set `DASHBOARD_PASSWORD` in `.env`
 (or the environment) and restart.
 
+**The dashboard takes minutes to load (while `/healthz` answers at once).**
+Fixed after 3.0.1; upgrade first. Two causes: an aggregation over the provider
+statistics that got slower with the square of the stored history, and page
+parsing from provider searches queueing in the same worker pool the dashboard
+reads from. If it still happens, look in the log for `Event loop blocked for`
+warnings: they name the task and the code the server was stuck in, so please
+include them when reporting it. Trimming the load also helps: with many
+channels, lower `PROVIDER_SEARCH_CONCURRENCY`, `PER_TEAM_PROVIDER_CONCURRENCY`
+and `PROVIDER_EVENT_CONCURRENCY` (see [DOCKER.md](DOCKER.md#sizing-with-many-channels)).
+
 **"Too many failed logins" (HTTP 429).** After 8 wrong attempts within five
 minutes, that client address is locked out for five minutes. Behind a reverse
 proxy every browser may share the proxy's address; see [DOCKER.md](DOCKER.md).

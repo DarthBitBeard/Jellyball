@@ -207,6 +207,28 @@ Publish the container only to the proxy when both run on one host:
 another machine cannot use the direct address, so decide which path Jellyfin
 takes first).
 
+## Sizing with many channels
+
+With around 150 channels every channel's provider search runs on a schedule,
+and each search downloads and parses provider pages. The parsing is CPU-bound
+Python, so it is limited by how many CPU cores the container may use, not by
+memory. The shipped compose file is a sound starting point:
+
+| Setting | Recommended | Why |
+| --- | --- | --- |
+| `cpus` | `2.0` minimum, `4.0` for 100+ channels | `cpus: 1.0` leaves the dashboard and live streams sharing one core with every search |
+| `mem_limit` | `2g` (`3g` with Multi-View or 150+ channels) | Chromium plus the page caches; an OOM kill looks like a restart |
+| `read_only: true` and `tmpfs` | keep as shipped (`/tmp`, `/run`, `/home/jellyball`) | Not a speed factor: the database and data live on the `./data` volume, not the tmpfs. Keep the data volume on a local disk, not a network share (SQLite) |
+| `PROVIDER_SEARCH_CONCURRENCY` | `2` to `4` | Searches in flight at once |
+| `PER_TEAM_PROVIDER_CONCURRENCY` | `1` to `2` | Providers tried per channel at once |
+| `PROVIDER_EVENT_CONCURRENCY` | `2` to `4` | Event pages fetched per search |
+| `VERIFY_STREAM_CONCURRENCY` | `2` to `4` | Liveness checks at once |
+
+Lowering the concurrency knobs on a small container makes searches finish a
+little later but keeps the dashboard and playback responsive. If the dashboard
+is still slow, the log shows `Event loop blocked for ...` with the task and
+code responsible; see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
 ## Troubleshooting
 
 * Container exits at once: `docker compose logs jellyball`. The usual cause is
