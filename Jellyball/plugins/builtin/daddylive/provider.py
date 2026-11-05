@@ -47,7 +47,7 @@ class DaddyLiveScraper(HtmlAggregatorProvider):
         seen_matches: Set[str],
     ) -> None:
         """Pure CPU work (BeautifulSoup parse + per-card channel-term matching),
-        split out so it can run via asyncio.to_thread instead of blocking the
+        split out so it can run via cpu_pool.run_cpu instead of blocking the
         shared event loop. Mutates `matches`/`seen_matches` in place to preserve
         the original cross-page, cumulative MAX_PROVIDER_EVENTS cutoff."""
         soup = make_soup(page_html)
