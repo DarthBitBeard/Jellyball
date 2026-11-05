@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import catalog
+from leagues import OPTIONAL_GROUPS_SETTING, parse_optional_groups
 from alerts import get_jellyfin_config, request_jellyfin_guide_refresh_if_changed
 from channels import _add_manual_team, _set_catalog_entry_enabled
 from config import _clean_label, _safe_team_id, _validate_upstream_url
@@ -52,7 +53,7 @@ def _aggregators() -> Dict[str, HtmlAggregatorScraper]:
 
 
 def _exportable_keys() -> List[str]:
-    keys = [t.key for t in TUNABLES] + list(_FLAG_KEYS) + ["jellyfin_url", "jellyfin_task_id"]
+    keys = [t.key for t in TUNABLES] + list(_FLAG_KEYS) + ["jellyfin_url", "jellyfin_task_id", OPTIONAL_GROUPS_SETTING]
     keys += [_provider_url_setting_key(name) for name in _aggregators()]
     return keys
 
@@ -269,6 +270,11 @@ async def _apply_setting(key: str, value: Any) -> Optional[str]:
         return None
     if key == "jellyfin_task_id":
         await set_setting_async(key, _clean_label(text, 80))
+        return None
+    if key == OPTIONAL_GROUPS_SETTING:
+        groups = parse_optional_groups(text)
+        await set_setting_async(key, ",".join(groups))
+        catalog.set_enabled_optional_groups(",".join(groups))
         return None
     return "unknown setting"
 

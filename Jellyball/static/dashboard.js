@@ -548,6 +548,7 @@ window.addEventListener('DOMContentLoaded', () => {
         'providers_invalid': '❌ One or more provider URLs must be an absolute http(s) URL',
         'catalog_applied': '✅ Catalog selection applied',
         'catalog_toggled': '✅ Catalog entry updated',
+        'catalog_groups_saved': '✅ Catalog leagues updated',
         'favorite_toggled': '✅ Favorite updated',
         'rescrape_started': '✅ Rescrape started',
         'bulk_favorited': '✅ Favorited selected teams',
