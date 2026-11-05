@@ -9,7 +9,7 @@ from typing import List, Optional, Set
 import httpx
 from playwright.async_api import Browser
 
-from config import _log_failure
+from config import _log_failure, LOGGER
 import provider_telemetry as telemetry
 from stream_extractor import DEFAULT_USER_AGENT, make_soup, playwright_page
 from sports_matcher import clean_sports_text, get_team_search_terms
@@ -25,6 +25,10 @@ from scrapers import (
 
 
 class DaddyLiveScraper(HtmlAggregatorProvider):
+    # Stop trying further channel pages once this many in a row produced
+    # stream candidates that verification rejected (issue #49).
+    MAX_REJECTED_PLAYERS_IN_A_ROW = 2
+
     def __init__(self):
         super().__init__("DaddyLive", os.getenv("AGGREGATOR_6_URL", "https://dlhd.pk"), ["/24-7-channels.php"], ["watch.php"])
 
@@ -177,11 +181,28 @@ class DaddyLiveScraper(HtmlAggregatorProvider):
             matches = sorted(specific_matches or matches, key=match_specificity, reverse=True)
 
             verified_streams: List[dict] = []
-            for match_url, score, match_title in matches[:8]:
+            rejected_in_a_row = 0
+            candidates = matches[:8]
+            for position, (match_url, score, match_title) in enumerate(candidates):
                 streams = await self._extract_player_streams(browser, match_url, score, match_title)
                 verified = await _verify_provider_streams(streams, client)
                 if verified:
                     verified_streams.extend(verified)
+                    rejected_in_a_row = 0
+                elif streams:
+                    rejected_in_a_row += 1
+                    if rejected_in_a_row >= self.MAX_REJECTED_PLAYERS_IN_A_ROW:
+                        # Every manifest the players requested failed
+                        # verification (in 2026-11 the stream CDN answered 403
+                        # to non-browser clients). The remaining, less specific
+                        # channels use the same CDN: stop instead of spending
+                        # ~10 s of browser time on each. Not worked around.
+                        LOGGER.info(
+                            "provider %s: stream candidates of %d channel page(s) in a row were all rejected; "
+                            "skipping the remaining %d match(es)",
+                            self.name, rejected_in_a_row, len(candidates) - position - 1,
+                        )
+                        break
 
             seen_urls: Set[str] = set()
             return [

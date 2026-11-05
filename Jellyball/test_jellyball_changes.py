@@ -383,12 +383,12 @@ class JellyballChangesTests(unittest.TestCase):
             FootybiteScraper: (
                 "https://footybite.im",
                 [],
-                ["/watch/", "/stream/", "/live/", "/match/"],
+                ["/watch/", "/stream/", "/live/", "/match/", "/game/"],
             ),
             OneStreamScraper: (
                 "https://1stream.ws",
                 [],
-                ["/match/", "/stream/", "/live/"],
+                ["/match/", "/stream/", "/live/", "-live-stream/"],
             ),
             StreamedSuScraper: (
                 "https://streamed.su",
