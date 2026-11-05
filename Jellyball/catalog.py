@@ -8,16 +8,26 @@ import os
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import httpx
 
 from config import _log_failure, _safe_team_id, LOGGER
 import state
-from leagues import CATALOG_CATEGORIES, COLLEGE_CATEGORIES, LEAGUES
+from leagues import (
+    CATALOG_CATEGORIES,
+    COLLEGE_CATEGORIES,
+    LEAGUES,
+    OPTIONAL_LEAGUES,
+    OPTIONAL_LEAGUES_BY_KEY,
+    UK_SPORTS_GROUP_KEY,
+    parse_optional_groups,
+)
 from network_safety import bounded_float, safe_get
+from optional_leagues import optional_records
 from sports_catalog import (
     ESPN_DIRECTORY_ENDPOINTS,
+    OPTIONAL_SPECIAL_CHANNELS,
     parse_espn_team_directory,
     SEASON_WINDOWS,
     SPECIAL_CHANNELS,
@@ -238,7 +248,9 @@ def _catalog_display_name(category: str, record: TeamSlug) -> str:
     return _sport_labeled_name(record.display_name, category)
 
 
-_SPECIAL_CHANNELS_BY_KEY = {channel.key: channel for channel in SPECIAL_CHANNELS}
+# The opt-in UK channels are found by catalog key only: their names are not
+# labels below, so a custom channel that shares one keeps its own metadata.
+_SPECIAL_CHANNELS_BY_KEY = {channel.key: channel for channel in (*SPECIAL_CHANNELS, *OPTIONAL_SPECIAL_CHANNELS)}
 
 
 def _normalize_channel_label(value: object) -> str:
@@ -252,6 +264,11 @@ _SPECIAL_CHANNELS_BY_LABEL = {
     if _normalize_channel_label(label)
 }
 _CATEGORY_GROUP_LABELS = {league.key: league.group_title for league in LEAGUES}
+# Kept apart from the frozen catalog-league tables above (test_leagues.py).
+_OPTIONAL_GROUP_LABELS = {league.key: league.group_title for league in OPTIONAL_LEAGUES}
+_OPTIONAL_SEASON_WINDOWS = {
+    league.key: league.season_window for league in OPTIONAL_LEAGUES if league.season_window is not None
+}
 
 
 def _special_channel_for(data: dict):
@@ -292,7 +309,14 @@ def _channel_tvg_id(team_id: str, data: dict) -> str:
 
 def _channel_group_title(data: dict) -> str:
     special_channel = _special_channel_for(data)
-    return str(data.get("group_title") or (special_channel.group_title if special_channel else "") or _CATEGORY_GROUP_LABELS.get(data.get("category"), "Team Trackers"))
+    category = data.get("category")
+    return str(
+        data.get("group_title")
+        or (special_channel.group_title if special_channel else "")
+        or _CATEGORY_GROUP_LABELS.get(category)
+        or _OPTIONAL_GROUP_LABELS.get(category)
+        or "Team Trackers"
+    )
 
 
 def _channel_logo_url(data: dict) -> str:
@@ -344,13 +368,67 @@ def _special_catalog_entry(channel) -> dict:
     }
 
 
-async def get_catalog_entries() -> List[dict]:
+def _optional_team_catalog_entry(category: str, record: TeamSlug) -> dict:
+    """An opt-in league team: a team entry whose name carries the league's
+    suffix ("Arsenal (Champions League)") and whose catalog section is its league."""
+    entry = _team_catalog_entry(category, record)
+    suffix = OPTIONAL_LEAGUES_BY_KEY[category].name_suffix
+    if suffix:
+        entry["name"] = f"{record.display_name} ({suffix})"
+    entry["catalog_group"] = category
+    return entry
+
+
+def _optional_special_catalog_entry(channel) -> dict:
+    entry = _special_catalog_entry(channel)
+    entry["catalog_group"] = UK_SPORTS_GROUP_KEY
+    return entry
+
+
+# The opt-in catalog groups (leagues.OPTIONAL_CATALOG_GROUPS) the user turned
+# on; loaded from the leagues.OPTIONAL_GROUPS_SETTING row at startup and
+# updated by the dashboard. It only decides what the catalog offers: channels
+# already enabled from a group keep running when the group is turned off.
+ENABLED_OPTIONAL_GROUPS: Tuple[str, ...] = ()
+
+
+def set_enabled_optional_groups(value: str) -> Tuple[str, ...]:
+    """Parse a comma-separated group list (unknown keys dropped) and make it current."""
+    global ENABLED_OPTIONAL_GROUPS
+    ENABLED_OPTIONAL_GROUPS = parse_optional_groups(value)
+    return ENABLED_OPTIONAL_GROUPS
+
+
+def _optional_catalog_entries(groups: Iterable[str]) -> List[dict]:
+    enabled = set(groups)
+    entries: List[dict] = []
+    for league in OPTIONAL_LEAGUES:
+        if league.key in enabled:
+            entries.extend(_optional_team_catalog_entry(league.key, record) for record in optional_records(league.key))
+    if UK_SPORTS_GROUP_KEY in enabled:
+        entries.extend(_optional_special_catalog_entry(channel) for channel in OPTIONAL_SPECIAL_CHANNELS)
+    return entries
+
+
+async def get_catalog_entries(optional_groups: Optional[Iterable[str]] = None) -> List[dict]:
+    """Every catalog entry: the catalog leagues, the always-live channels, then
+    the turned-on opt-in groups. `optional_groups` overrides which opt-in groups
+    are included (a config import passes all of them, so an exported opt-in
+    channel always resolves)."""
     grouped = await get_team_catalog()
     entries: List[dict] = []
     for category in CATALOG_CATEGORIES:
         entries.extend(_team_catalog_entry(category, record) for record in grouped.get(category, ()))
     entries.extend(_special_catalog_entry(channel) for channel in SPECIAL_CHANNELS)
+    entries.extend(_optional_catalog_entries(ENABLED_OPTIONAL_GROUPS if optional_groups is None else optional_groups))
     return entries
+
+
+def catalog_group_key(entry: dict) -> str:
+    """The dashboard/setup catalog section an entry is listed under."""
+    if entry.get("catalog_group"):
+        return str(entry["catalog_group"])
+    return "special" if entry.get("content_type") == "channel" else str(entry.get("category", ""))
 
 
 _ESPN_LOGO_CDN = "https://a.espncdn.com/i/teamlogos"
@@ -359,7 +437,8 @@ _SPORT_SLUG_MAP: Dict[str, tuple[str, str]] = {
     "florida state": ("ncaa", "52"),
     "seminoles": ("ncaa", "52"),
     "miami hurricanes": ("ncaa", "2390"),
-    "inter miami": ("soccer", "10739"),
+    # ESPN soccer id 20232 is Inter Miami CF (10739 is the Philadelphia Union).
+    "inter miami": ("soccer", "20232"),
     "miami heat": ("nba", "mia"),
     "miami dolphins": ("nfl", "mia"),
     "miami marlins": ("mlb", "mia"),
@@ -415,6 +494,12 @@ _CATEGORY_LOGO_SPORTS = {league.key: league.logo_sport for league in LEAGUES}
 def resolve_espn_logo(team_name: str, category: str = "", source_id: str = "") -> str:
     if category in _CATEGORY_LOGO_SPORTS and source_id:
         return f"{_ESPN_LOGO_CDN}/{_CATEGORY_LOGO_SPORTS[category]}/500/{source_id}.png?v=titan2"
+    optional_league = OPTIONAL_LEAGUES_BY_KEY.get(category)
+    if optional_league is not None:
+        # Never a guess from the team name: CFL and PWHL have no ESPN logos.
+        if optional_league.logo_sport and source_id:
+            return f"{_ESPN_LOGO_CDN}/{optional_league.logo_sport}/500/{source_id}.png?v=titan2"
+        return ""
     sport, slug, _ = _resolve_espn_team(team_name)
     if sport and slug:
         return f"{_ESPN_LOGO_CDN}/{sport}/500/{slug}.png?v=titan2"
@@ -449,7 +534,7 @@ def is_in_season(category: str, today: Optional[date] = None) -> bool:
     Categories with no defined window (manually added "custom" teams, and
     non-sport special channels) are always considered in season.
     """
-    window = SEASON_WINDOWS.get(category)
+    window = SEASON_WINDOWS.get(category) or _OPTIONAL_SEASON_WINDOWS.get(category)
     if not window:
         return True
     start_month, start_day, end_month, end_day = window
@@ -465,7 +550,7 @@ def is_in_season(category: str, today: Optional[date] = None) -> bool:
 
 def _season_resume_label(category: str) -> str:
     """Return a short "Mon D" label for when `category`'s season window reopens."""
-    window = SEASON_WINDOWS.get(category)
+    window = SEASON_WINDOWS.get(category) or _OPTIONAL_SEASON_WINDOWS.get(category)
     if not window:
         return ""
     start_month, start_day, _, _ = window

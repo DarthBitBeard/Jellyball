@@ -163,12 +163,15 @@ class EspnScheduleTests(unittest.TestCase):
         cases = [
             ("Miami Dolphins", "football/nfl/teams/mia", timedelta(hours=4)),
             ("Florida Gators", "football/college-football/teams/57", timedelta(hours=4)),
-            ("Inter Miami", "soccer/usa.1/teams/10739", timedelta(hours=2.5)),
+            # Issue #46: Inter Miami CF is ESPN 20232 (10739 is the Philadelphia
+            # Union), and ESPN's soccer schedule lists upcoming games only with fixture=true.
+            ("Inter Miami", "soccer/usa.1/teams/20232", timedelta(hours=2.5)),
         ]
         for team_name, path, length in cases:
             with self.subTest(team=team_name):
                 (start, stop, ok), urls = _fetch(_json(_schedule(game)), team_name)
-                self.assertEqual(urls, [f"{ESPN_API}/{path}/schedule"])
+                query = "?fixture=true" if path.startswith("soccer/") else ""
+                self.assertEqual(urls, [f"{ESPN_API}/{path}/schedule{query}"])
                 self.assertEqual((start, stop - start, ok), (game, length, True))
 
     def test_query_is_used_when_the_name_is_empty(self):

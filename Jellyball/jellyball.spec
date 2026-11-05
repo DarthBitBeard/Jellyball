@@ -132,9 +132,14 @@ for _path in _plugins_dir.rglob("*"):
     if _path.is_file() and _path.suffix not in (".py", ".pyc") and "__pycache__" not in _path.parts:
         datas.append((str(_path), str(Path("plugins") / _path.relative_to(_plugins_dir).parent)))
 
+# Opt-in league team seeds, read by optional_leagues from <bundle>/league_seeds.
+for _seed_path in sorted((ROOT / "league_seeds").glob("*.json")):
+    datas.append((str(_seed_path), "league_seeds"))
+
 binaries = []
 hiddenimports = [
     "leagues",
+    "optional_leagues",
     "sports_catalog",
     "sports_matcher",
     "stream_extractor",

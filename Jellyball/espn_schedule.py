@@ -17,7 +17,7 @@ import httpx
 from network_safety import bounded_float, safe_get
 
 from config import _log_failure, LOGGER
-from leagues import SCHEDULE_LEAGUES
+from leagues import schedule_league as _schedule_league
 import state
 
 
@@ -50,7 +50,11 @@ async def fetch_espn_team_schedule(
     if not matched_sport or not matched_slug:
         return None, None, False
 
-    if matched_sport not in SCHEDULE_LEAGUES:
+    league = _schedule_league(matched_sport)
+    # An opt-in league ESPN does not cover (CFL, PWHL) makes no request: like
+    # an unknown league it is "lookup failed", so its channels keep searching
+    # throughout their season window.
+    if league is None or not league.has_schedule:
         return None, None, False
 
     cache_key = (matched_sport, matched_slug)
@@ -77,7 +81,9 @@ async def _fetch_espn_team_schedule_uncached(
 ) -> tuple[Optional[datetime], Optional[datetime], bool]:
     """One live request to ESPN's team schedule API (no cache)."""
 
-    schedule_league = SCHEDULE_LEAGUES[matched_sport]
+    schedule_league = _schedule_league(matched_sport)
+    if schedule_league is None:
+        return None, None, False
     sport, league = schedule_league.espn_sport, schedule_league.espn_league
     url = f"https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams/{matched_slug}/schedule"
 
@@ -87,7 +93,8 @@ async def _fetch_espn_team_schedule_uncached(
     owns_client = state.SHARED_HTTP_CLIENT is None
     client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=8.0, follow_redirects=False, http2=True)
     try:
-        resp = await safe_get(client, url)
+        params = dict(schedule_league.schedule_params)
+        resp = await safe_get(client, url, params=params) if params else await safe_get(client, url)
         if resp is None or resp.status_code != 200:
             LOGGER.warning("ESPN schedule request team=%s status=%s", team_name,
                            resp.status_code if resp is not None else "fetch-failed")
