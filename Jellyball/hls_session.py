@@ -242,6 +242,43 @@ def _resolve_uri(base: str, uri: str, local: bool) -> Optional[str]:
     return urllib.parse.urljoin(base, uri.strip())
 
 
+# Query parameters that carry per-request signatures/expiry rather than which
+# segment a URI names. Some CDNs re-sign every segment URI on every playlist
+# poll, so the same segment shows up with a new query string each time.
+_VOLATILE_QUERY_KEYS = frozenset({
+    "token", "tok", "sig", "signature", "hash", "hmac", "md5", "expires", "expiry",
+    "exp", "e", "st", "ts", "t", "time", "timestamp", "auth", "auth_key", "authkey",
+    "key", "keyid", "policy", "key-pair-id", "hdnts", "hdnea", "wmsauthsign",
+    "nonce", "session", "sessionid", "sid", "s", "ip", "validfrom", "validto",
+    "verify", "acl", "x-amz-signature", "x-amz-date", "x-amz-credential",
+    "x-amz-security-token", "x-amz-expires", "x-amz-algorithm", "x-amz-signedheaders",
+})
+
+
+def segment_identity(uri: str) -> str:
+    """Which segment a URI names, ignoring its host and signature/expiry query
+    parameters. A segment endpoint like `video-5segment_x.txt?path=...` keeps
+    the parameter that names the segment, so two different segments never
+    compare equal; one segment re-signed on every poll still compares equal."""
+    try:
+        parts = urllib.parse.urlsplit(str(uri or "").strip())
+    except ValueError:
+        return str(uri or "")
+    kept = sorted(
+        (key, value)
+        for key, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+        if key.lower() not in _VOLATILE_QUERY_KEYS
+    )
+    return parts.path + ("?" + urllib.parse.urlencode(kept) if kept else "")
+
+
+def _segment_key(segment: "UpstreamSegment") -> str:
+    key = segment_identity(segment.uri)
+    if segment.byterange:
+        key += "#%d@%d" % segment.byterange
+    return key
+
+
 def is_master_playlist(text: str) -> bool:
     return "#EXT-X-STREAM-INF" in text
 
@@ -305,6 +342,11 @@ def choose_variant(master: MasterPlaylist, bandwidth_cap: int = 0) -> Tuple[Opti
             return max(under, key=lambda v: v.bandwidth), demuxed
         return min(pool, key=lambda v: v.bandwidth), demuxed
     return max(pool, key=lambda v: v.bandwidth), demuxed
+
+
+def _looks_like_hls(text: str) -> bool:
+    """An HLS playlist starts with #EXTM3U (ffmpeg refuses one that doesn't)."""
+    return text.lstrip("\ufeff \t\r\n").startswith("#EXTM3U")
 
 
 def parse_media_playlist(text: str, base: str, local: bool = False) -> MediaPlaylist:
@@ -480,6 +522,15 @@ class ChannelSession:
         self._resolved_once = False
         self._last_poll_error_log: Dict[str, float] = {}
         self._last_playlist_status_log: Tuple[Optional[int], float] = (None, -1e9)
+        # The last published segment's identity (see segment_identity): lets a
+        # playlist whose media sequence never advances still be followed.
+        self._last_segment_key: Optional[str] = None
+        self._sequence_fallback_logged = False
+        # Why the last remote playlist could not be used, when it answered 200
+        # but was not HLS (an HTML page, an error text): reported as such
+        # instead of as an unexplained stale playlist.
+        self._playlist_problem = ""
+        self._last_not_hls_log = -1e9
 
     # -- public API ---------------------------------------------------------
 
@@ -727,6 +778,7 @@ class ChannelSession:
         self.source = None
         self.media_url = None
         self.last_useq = None
+        self._last_segment_key = None
         # A new run means new clients: the sticky target duration can reset.
         self.target_duration = 0
         self._reset_seen_at = None
@@ -753,11 +805,15 @@ class ChannelSession:
             self.source = spec
             self.media_url = None
 
+        self._playlist_problem = ""
         playlist = await self._load_media_playlist()
         if playlist is None:
             self.stats["playlist_failures"] += 1
-            self._log_playlist_failure()
-            self._note_failure("playlist unavailable")
+            if self._playlist_problem:
+                self._note_failure(self._playlist_problem)
+            else:
+                self._log_playlist_failure()
+                self._note_failure("playlist unavailable")
             self._check_stale()
             return
         if playlist.sample_aes:
@@ -804,6 +860,11 @@ class ChannelSession:
             else:
                 self._reset_seen_at = None
                 new = [s for s in segments if s.useq > self.last_useq]
+                if not new:
+                    # Same media sequence: some origins never advance (or omit)
+                    # EXT-X-MEDIA-SEQUENCE while the window slides. Follow the
+                    # segment URIs instead of calling a moving stream stale.
+                    new = self._segments_after_last_published(segments)
                 if len(new) > self.cfg.max_catchup_segments:
                     # Far behind (e.g. after a stall): jump to the live edge.
                     new = new[-self.cfg.live_edge_segments:]
@@ -822,6 +883,28 @@ class ChannelSession:
         if now - self._next_seq_persisted_at >= _NEXT_SEQ_PERSIST_SECONDS:
             self._next_seq_persisted_at = now
             _persist_next_seq(self.next_seq)
+
+    def _segments_after_last_published(self, segments: List[UpstreamSegment]) -> List[UpstreamSegment]:
+        """Segments listed after the last one published, found by identity.
+
+        Empty when the newest listed segment is the one already published (a
+        genuinely unchanged playlist) or when the last published segment is no
+        longer recognisable (then nothing is guessed: replaying old segments is
+        worse than the stale-playlist failover)."""
+        last = self._last_segment_key
+        if last is None or not segments:
+            return []
+        keys = [_segment_key(segment) for segment in segments]
+        if keys[-1] == last or last not in keys:
+            return []
+        index = len(keys) - 1 - keys[::-1].index(last)
+        if not self._sequence_fallback_logged:
+            self._sequence_fallback_logged = True
+            LOGGER.info(
+                "Upstream media sequence is not advancing; following segment URIs channel=%s source=%s",
+                self.channel_id, self.source.label if self.source else "?",
+            )
+        return segments[index + 1:]
 
     def _live_edge_count(self, segments: List[UpstreamSegment]) -> int:
         gap = self._switch_gap
@@ -860,6 +943,8 @@ class ChannelSession:
         self.source = spec
         self.media_url = None
         self.last_useq = None
+        self._last_segment_key = None
+        self._sequence_fallback_logged = False
         self._sync_audio_preference()
         self.normalizer.start_new_epoch()
         self.pending_discontinuity = bool(self.window)
@@ -896,6 +981,9 @@ class ChannelSession:
                 self.media_url = None  # variant token expired: re-resolve the master next poll
             return None
         text = result.body.decode("utf-8", errors="replace")
+        if not _looks_like_hls(text):
+            self._note_not_hls(result)
+            return None
         audio_url = ""
         variant_url = result.url
         if is_master_playlist(text):
@@ -912,6 +1000,10 @@ class ChannelSession:
                 self.media_url = None
                 return None
             text = result.body.decode("utf-8", errors="replace")
+            if not _looks_like_hls(text):
+                self.media_url = None
+                self._note_not_hls(result)
+                return None
             if is_master_playlist(text):
                 return None
         elif self.media_url is None:
@@ -925,6 +1017,24 @@ class ChannelSession:
                 return await self._load_media_playlist()
             return None
         return playlist
+
+    def _note_not_hls(self, result: FetchResult) -> None:
+        """A playlist URL answered 200 with something that is not a playlist
+        (often an HTML page: a block/consent page or the player page itself).
+        Reported as its own reason so the log does not just say 'stale'."""
+        self._playlist_problem = "playlist not HLS"
+        now = time.monotonic()
+        if now - self._last_not_hls_log < 60.0:
+            return
+        self._last_not_hls_log = now
+        LOGGER.warning(
+            "Upstream playlist is not HLS channel=%s source=%s host=%s content_type=%s bytes=%d",
+            self.channel_id,
+            self.source.label if self.source else "?",
+            urllib.parse.urlsplit(result.url or "").netloc or "-",
+            (result.content_type or "-").split(";")[0][:60],
+            len(result.body or b""),
+        )
 
     async def _start_remux(self, variant_url: str, audio_url: str, headers: Dict[str, str]) -> bool:
         """Start an ffmpeg remux of the variant to local HLS.
@@ -1065,6 +1175,7 @@ class ChannelSession:
                     data=result.data,
                 ))
                 self.last_useq = segment.useq
+                self._last_segment_key = _segment_key(segment)
         finally:
             for task in downloads:
                 if not task.done():

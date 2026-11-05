@@ -126,6 +126,7 @@ class FailoverCountersTests(StateMixin, unittest.IsolatedAsyncioTestCase):
                 # Make the other one eligible again each round.
                 for c in data["candidates"]:
                     c["last_health_check"] = 0.0
+                    c.pop("failed_over_at", None)
                 await failover.request_failover("t", sessions.candidate_source_key(active), "segments failing")
         alert_calls = [c for c in spawn.call_args_list if "failover alert" in c.args[1]]
         self.assertEqual(len(alert_calls), 1)

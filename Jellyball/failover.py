@@ -195,6 +195,10 @@ def _merge_stream_candidates(
             for field in _CANDIDATE_HEALTH_FIELDS:
                 if field in old and field not in candidate:
                     candidate[field] = old[field]
+            if "failed_over_at" in old and "failed_over_at" not in candidate and old.get("url") == candidate.get("url"):
+                # Same URL as the one playback just gave up on: still failed.
+                # A refreshed token (new URL) is a new chance.
+                candidate["failed_over_at"] = old["failed_over_at"]
         merged.append(candidate)
         seen.add(key)
 
@@ -208,6 +212,19 @@ def _merge_stream_candidates(
     # Nothing to keep: start at the best-health source, not blindly at [0]
     # (which may have failed seconds ago).
     return merged, _best_candidate_index(merged)
+
+
+def _log_candidate_merge(team_id: str, previous: List[dict], fresh: List[dict], merged: List[dict]) -> None:
+    """One INFO line per merge: what a scrape found vs. what the channel now
+    holds (the dashboard's "N candidates"), with providers, so a stream that
+    was found but is not a candidate can be traced."""
+    providers = sorted({str(c.get("provider") or "?") for c in merged})
+    fresh_keys = {candidate_source_key(c) for c in fresh if c.get("url")}
+    LOGGER.info(
+        "Stream candidates updated team=%s found=%d same_source_duplicates=%d candidates=%d previous=%d providers=%s",
+        team_id, len(fresh), len([c for c in fresh if c.get("url")]) - len(fresh_keys),
+        len(merged), len(previous), ",".join(providers) or "-",
+    )
 
 
 async def trigger_scrape(team_id: str, force: bool = False):
@@ -339,6 +356,7 @@ async def _trigger_scrape_unlocked(team_id: str, force: bool = False):
             new_candidates,
             keep_active=bool(was_healthy),
         )
+        _log_candidate_merge(team_id, current.get("candidates", []), new_candidates, merged)
         current["candidates"] = merged
         current["active_index"] = merged_index
         current["exhausted"] = False
@@ -452,7 +470,16 @@ _ACTIVE_PROBE_SEMAPHORE: Optional[asyncio.Semaphore] = None
 
 
 def _candidate_tier(candidate: dict, now: float) -> int:
-    """0 known-good recently, 1 unknown, 2 failed a while ago, 3 failed moments ago."""
+    """0 known-good recently, 1 unknown, 2 failed a while ago, 3 failed moments ago.
+
+    A source the channel failed over from (real playback found it stale or
+    failing) stays tier 3 for CANDIDATE_FAILED_RETRY_AFTER even if a probe
+    since then reached its playlist: a reachable playlist is not proof that it
+    plays, and trusting it put an exhausted channel straight back on the same
+    stalled source (issue #48: "Retrying the same source" forever)."""
+    failed_at = float(candidate.get("failed_over_at") or 0.0)
+    if failed_at and 0 <= now - failed_at <= CANDIDATE_FAILED_RETRY_AFTER:
+        return 3
     ok = candidate.get("last_health_ok")
     checked = float(candidate.get("last_health_check") or 0.0)
     if ok is True and now - checked < CANDIDATE_GOOD_FOR_SECONDS:
@@ -552,6 +579,10 @@ async def _request_failover_unlocked(
     active = candidates[active_index]
     active["last_health_ok"] = False
     active["last_health_check"] = time.time()
+    if reason != "playlist forbidden":
+        # Not for 401/403: a token refresh gives the same source a new URL
+        # that deserves an immediate try.
+        active["failed_over_at"] = active["last_health_check"]
     team_name = data.get("name", team_id)
     if reason == "playlist forbidden":
         refreshed = _request_token_refresh(team_id, data)
@@ -673,7 +704,7 @@ async def _probe_exhausted_candidates(team_id: str, data: dict) -> None:
             return
         now = time.time()
         for index, candidate in enumerate(data["candidates"]):
-            if candidate.get("last_health_ok") is True:
+            if candidate.get("last_health_ok") is True and _candidate_tier(candidate, now) < 3:
                 data["active_index"] = index
                 data["exhausted"] = False
                 data["is_healthy"] = True
@@ -750,6 +781,7 @@ async def emergency_rescrape(team_id: str) -> None:
                         current.get("candidates", []), current.get("active_index", 0) if playing_early else 0,
                         candidates, keep_active=playing_early,
                     )
+                    _log_candidate_merge(team_id, current.get("candidates", []), candidates, merged)
                     current["candidates"] = merged
                     current["active_index"] = merged_index
                     current["is_healthy"] = True

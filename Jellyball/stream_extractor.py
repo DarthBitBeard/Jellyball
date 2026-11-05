@@ -21,7 +21,7 @@ from bs4 import BeautifulSoup
 from playwright.async_api import Browser, Page
 from network_safety import validate_http_url, validate_http_url_async, bounded_int
 from ts_normalize import find_ts_start
-from hls_session import parse_master_playlist
+from hls_session import parse_master_playlist, segment_identity
 
 LOGGER = logging.getLogger("jellyball.stream_extractor")
 MAX_INSPECTION_BYTES = 2 * 1024 * 1024
@@ -624,7 +624,11 @@ async def verify_stream_live(
         media_sequence = int(seq_match.group(1)) if seq_match else 0
         duration_match = re.search(r'#EXT-X-TARGETDURATION:(\d+(?:\.\d+)?)', text)
         target_duration = float(duration_match.group(1)) if duration_match else 6.0
-        last_uri = _last_playlist_uri(text)
+        # Compared by identity, not raw text: a CDN that re-signs the same
+        # segment URI on every request must not make a frozen playlist look
+        # like it advanced (and a ?path=<segment> endpoint still differs per
+        # segment, so a sliding window without a media sequence is fresh).
+        last_uri = segment_identity(_last_playlist_uri(text))
 
         now = time.monotonic()
         prev_sequence = probe_state.get("media_sequence")
@@ -720,7 +724,11 @@ async def verify_stream_live(
                     continue
                 if head_resp.status_code in (200, 206):
                     ctype = head_resp.headers.get("content-type", "").lower()
-                    if "mpegurl" not in ctype and media_sample_is_playable(b"\x47", ctype):
+                    # Only a declared audio/video type passes on HEAD alone. A
+                    # playlist endpoint without a .m3u8 suffix often answers
+                    # text/plain, octet-stream or text/html: it must be read (and
+                    # judged for freshness) below, not waved through.
+                    if "mpegurl" not in ctype and ctype.startswith(("video/", "audio/")):
                         return True
                 break
         except Exception as exc:
