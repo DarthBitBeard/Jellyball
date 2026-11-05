@@ -342,7 +342,8 @@ class ProviderSettingsTests(TempDbCase):
         provider_settings.set_provider_sync(scrapers.ACTIVE_PROVIDERS[0].name, False, None)
         names = [p.name for p in scrapers._providers_for_search()]
         self.assertNotIn(scrapers.ACTIVE_PROVIDERS[0].name, names)
-        self.assertEqual(len(names), len(scrapers.ACTIVE_PROVIDERS) - 1)
+        team_providers = [p for p in scrapers.ACTIVE_PROVIDERS if p.carries_team_events]
+        self.assertEqual(len(names), len(team_providers) - 1)
 
     def test_priority_override_reorders_streams_with_equal_match_scores(self):
         from stream_extractor import rank_streams

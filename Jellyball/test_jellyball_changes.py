@@ -221,9 +221,10 @@ class JellyballChangesTests(unittest.TestCase):
             [provider.name for provider in _providers_for_search(always_live=True)],
             ["TheTVApp", "DaddyLive", "IPTV-Org"],
         )
+        # Team searches skip providers that only list linear channels (#48).
         self.assertEqual(
             [provider.name for provider in _providers_for_search(always_live=False)],
-            [provider.name for provider in ACTIVE_PROVIDERS],
+            [provider.name for provider in ACTIVE_PROVIDERS if provider.name != "IPTV-Org"],
         )
 
     def test_playlist_request_filter_rejects_tracking_images(self):
