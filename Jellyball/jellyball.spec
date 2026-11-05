@@ -138,6 +138,9 @@ for _seed_path in sorted((ROOT / "league_seeds").glob("*.json")):
 
 binaries = []
 hiddenimports = [
+    "cpu_pool",
+    "read_cache",
+    "loop_monitor",
     "leagues",
     "optional_leagues",
     "sports_catalog",

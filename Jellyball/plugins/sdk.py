@@ -19,6 +19,7 @@ import httpx
 from playwright.async_api import Browser
 
 from config import _log_failure, _validate_upstream_url, LOGGER
+from cpu_pool import run_cpu
 from network_safety import validate_http_url_async
 import provider_settings
 import provider_telemetry as telemetry
@@ -434,7 +435,7 @@ class HtmlAggregatorProvider(Provider):
         seen_matches: Set[str],
     ) -> None:
         """Pure CPU work (BeautifulSoup parse + per-anchor fuzzy matching),
-        split out so it can run in a worker thread via asyncio.to_thread instead
+        split out so it can run in a worker thread via cpu_pool.run_cpu instead
         of blocking the shared event loop that also serves live video segments.
         Mutates `matches`/`seen_matches` in place to preserve the original
         cross-page, cumulative MAX_PROVIDER_EVENTS cutoff.
@@ -522,7 +523,7 @@ class HtmlAggregatorProvider(Provider):
                 log_site_state(self.name, page_state[0], page_state[1], self._effective_page_url(page_url))
                 return
             effective_url = self._effective_page_url(page_url)
-            await asyncio.to_thread(parse_matches, page_html, effective_url, search_terms, matches, seen_matches)
+            await run_cpu(parse_matches, page_html, effective_url, search_terms, matches, seen_matches)
 
         for page_url in self.get_scan_urls():
             if catch_page_errors:

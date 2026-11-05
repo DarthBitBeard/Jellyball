@@ -19,6 +19,7 @@ from typing import AsyncIterator, List, Dict, Tuple, Set, Optional, Iterable, An
 import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import Browser, Page
+from cpu_pool import run_cpu
 from network_safety import validate_http_url, validate_http_url_async, bounded_int
 from ts_normalize import find_ts_start
 from hls_session import parse_master_playlist, segment_identity
@@ -433,7 +434,7 @@ def extract_iframes_and_streamers(soup: BeautifulSoup, page_url: str) -> Tuple[L
 
 def _parse_iframes_and_streamers_from_html(html_text: str, page_url: str) -> Tuple[List[str], List[str]]:
     """Sync CPU work (BeautifulSoup parse + iframe/streamer-link scan) split out
-    of the async code path so it can run via asyncio.to_thread instead of
+    of the async code path so it can run via cpu_pool.run_cpu instead of
     blocking the event loop that also serves live video segments."""
     soup = make_soup(html_text)
     return extract_iframes_and_streamers(soup, page_url)
@@ -802,7 +803,7 @@ async def fetch_streams_from_page(
             return []
         # Direct streams on match page. Regex scanning + unpack_js over up to
         # 2MB of text is pure CPU work, so it runs off the event loop.
-        direct_streams = await asyncio.to_thread(extract_streams_from_text, page_html, match_url)
+        direct_streams = await run_cpu(extract_streams_from_text, page_html, match_url)
         for url in direct_streams[:MAX_EXTRACTED_STREAMS]:
             if url not in seen_urls:
                 seen_urls.add(url)
@@ -817,7 +818,7 @@ async def fetch_streams_from_page(
                     })
 
         # Parse iframes and streamer links (BeautifulSoup parse is also CPU work).
-        iframe_urls, streamer_urls = await asyncio.to_thread(
+        iframe_urls, streamer_urls = await run_cpu(
             _parse_iframes_and_streamers_from_html, page_html, match_url
         )
 
@@ -845,7 +846,7 @@ async def fetch_streams_from_page(
                     sub_html = await fetch_bounded_text(client, curr_url, sub_headers, 8.0)
                 if sub_html is None:
                     return
-                sub_streams = await asyncio.to_thread(extract_streams_from_text, sub_html, curr_url)
+                sub_streams = await run_cpu(extract_streams_from_text, sub_html, curr_url)
                 stream_tasks = []
                 for s_url in sub_streams:
                     async with visited_lock:
@@ -875,7 +876,7 @@ async def fetch_streams_from_page(
                 )
 
                 if depth < max_iframe_depth:
-                    nested_iframes, _ = await asyncio.to_thread(
+                    nested_iframes, _ = await run_cpu(
                         _parse_iframes_and_streamers_from_html, sub_html, curr_url
                     )
                     await asyncio.gather(
@@ -953,7 +954,7 @@ async def playwright_intercept_streams(
             # Also inspect page content in case it's in DOM. Regex scanning is
             # CPU work, so it runs off the event loop.
             content = await page.content()
-            for s_url in await asyncio.to_thread(extract_streams_from_text, content, page_url):
+            for s_url in await run_cpu(extract_streams_from_text, content, page_url):
                 if s_url not in captured_urls:
                     captured_urls.add(s_url)
                     streams.append({

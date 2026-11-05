@@ -10,6 +10,7 @@ import httpx
 from playwright.async_api import Browser
 
 from config import _log_failure
+from cpu_pool import run_cpu
 import provider_telemetry as telemetry
 from network_safety import validate_http_url
 from stream_extractor import DEFAULT_USER_AGENT, make_soup, playwright_page
@@ -150,7 +151,7 @@ class TheTVAppScraper(HtmlAggregatorProvider):
                 html = await self._load_page(page, target_url)
                 if html is None:
                     return []
-                best_url, best_score, best_title, listed = await asyncio.to_thread(
+                best_url, best_score, best_title, listed = await run_cpu(
                     self._scan_channel_anchors, html, raw_terms_lower, search_terms, target_url
                 )
                 if not listed:
