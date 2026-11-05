@@ -108,7 +108,7 @@ class TheTVAppScraper(HtmlAggregatorProvider):
         self, html_text: str, raw_terms_lower: List[str], search_terms: List[str], page_url: str = ""
     ) -> tuple[Optional[str], int, str]:
         """Pure CPU work (BeautifulSoup parse + per-anchor fuzzy matching over
-        every listed channel), split out so it can run via asyncio.to_thread
+        every listed channel), split out so it can run via cpu_pool.run_cpu
         instead of blocking the shared event loop."""
         best_url, best_score, best_title, listed = self._scan_channel_anchors(
             html_text, raw_terms_lower, search_terms, page_url or self.base_url + "/tv/"
@@ -165,7 +165,7 @@ class TheTVAppScraper(HtmlAggregatorProvider):
                     html = await self._load_page(page, target_url)
                     if html is None:
                         return []
-                    best_url, best_score, best_title, listed = await asyncio.to_thread(
+                    best_url, best_score, best_title, listed = await run_cpu(
                         self._scan_channel_anchors, html, raw_terms_lower, search_terms, target_url
                     )
                 telemetry.report_index_events(listed)
