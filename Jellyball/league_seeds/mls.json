@@ -1,0 +1,198 @@
+{
+ "league": "mls",
+ "source": "Team ids and names: ESPN site API soccer/usa.1/teams, captured 2026-11-05.",
+ "teams": [
+  {
+   "id": "182",
+   "name": "Chicago Fire FC",
+   "aliases": [
+    "Chicago Fire"
+   ]
+  },
+  {
+   "id": "183",
+   "name": "Columbus Crew",
+   "aliases": [
+    "Columbus Crew SC"
+   ]
+  },
+  {
+   "id": "184",
+   "name": "Colorado Rapids",
+   "aliases": []
+  },
+  {
+   "id": "185",
+   "name": "FC Dallas",
+   "aliases": []
+  },
+  {
+   "id": "186",
+   "name": "Sporting Kansas City",
+   "aliases": [
+    "Sporting KC"
+   ]
+  },
+  {
+   "id": "187",
+   "name": "LA Galaxy",
+   "aliases": [
+    "Los Angeles Galaxy"
+   ]
+  },
+  {
+   "id": "189",
+   "name": "New England Revolution",
+   "aliases": []
+  },
+  {
+   "id": "190",
+   "name": "Red Bull New York",
+   "aliases": [
+    "New York Red Bulls",
+    "NY Red Bulls",
+    "Red Bull NY"
+   ]
+  },
+  {
+   "id": "191",
+   "name": "San Jose Earthquakes",
+   "aliases": [
+    "SJ Earthquakes"
+   ]
+  },
+  {
+   "id": "193",
+   "name": "D.C. United",
+   "aliases": [
+    "DC United"
+   ]
+  },
+  {
+   "id": "4771",
+   "name": "Real Salt Lake",
+   "aliases": []
+  },
+  {
+   "id": "6077",
+   "name": "Houston Dynamo FC",
+   "aliases": [
+    "Houston Dynamo"
+   ]
+  },
+  {
+   "id": "7318",
+   "name": "Toronto FC",
+   "aliases": []
+  },
+  {
+   "id": "9720",
+   "name": "CF Montréal",
+   "aliases": [
+    "CF Montreal",
+    "Club de Foot Montreal"
+   ]
+  },
+  {
+   "id": "9723",
+   "name": "Portland Timbers",
+   "aliases": []
+  },
+  {
+   "id": "9726",
+   "name": "Seattle Sounders FC",
+   "aliases": [
+    "Seattle Sounders"
+   ]
+  },
+  {
+   "id": "9727",
+   "name": "Vancouver Whitecaps",
+   "aliases": [
+    "Vancouver Whitecaps FC"
+   ]
+  },
+  {
+   "id": "10739",
+   "name": "Philadelphia Union",
+   "aliases": []
+  },
+  {
+   "id": "12011",
+   "name": "Orlando City SC",
+   "aliases": [
+    "Orlando City"
+   ]
+  },
+  {
+   "id": "17362",
+   "name": "Minnesota United FC",
+   "aliases": [
+    "Minnesota United"
+   ]
+  },
+  {
+   "id": "17606",
+   "name": "New York City FC",
+   "aliases": [
+    "NYCFC",
+    "NYC FC"
+   ]
+  },
+  {
+   "id": "18267",
+   "name": "FC Cincinnati",
+   "aliases": []
+  },
+  {
+   "id": "18418",
+   "name": "Atlanta United FC",
+   "aliases": [
+    "Atlanta United"
+   ]
+  },
+  {
+   "id": "18966",
+   "name": "LAFC",
+   "aliases": [
+    "Los Angeles FC"
+   ]
+  },
+  {
+   "id": "18986",
+   "name": "Nashville SC",
+   "aliases": []
+  },
+  {
+   "id": "20232",
+   "name": "Inter Miami CF",
+   "aliases": [
+    "Inter Miami"
+   ]
+  },
+  {
+   "id": "20906",
+   "name": "Austin FC",
+   "aliases": []
+  },
+  {
+   "id": "21300",
+   "name": "Charlotte FC",
+   "aliases": []
+  },
+  {
+   "id": "21812",
+   "name": "St. Louis CITY SC",
+   "aliases": [
+    "St Louis City",
+    "St Louis City SC",
+    "St. Louis City"
+   ]
+  },
+  {
+   "id": "22529",
+   "name": "San Diego FC",
+   "aliases": []
+  }
+ ]
+}

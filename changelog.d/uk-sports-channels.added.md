@@ -1,0 +1,1 @@
+Opt-in "UK Sports Channels" group (issue #46): always-live Sky Sports (Main Event, Premier League, Football, Cricket, Golf, F1, Action, Tennis, Mix, News, Racing), TNT Sports 1-4 UK and Premier Sports 1-2, each matching only its own provider listing. The US TNT Sports channel no longer picks up provider channels named like "TNT Sports 1 UK".

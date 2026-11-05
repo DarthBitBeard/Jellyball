@@ -122,9 +122,14 @@ for _dashboard_dir_name in ("templates", "static"):
             if _path.is_file():
                 datas.append((str(_path), str(Path(_dashboard_dir_name) / _path.relative_to(_dashboard_dir).parent)))
 
+# Opt-in league team seeds, read by optional_leagues from <bundle>/league_seeds.
+for _seed_path in sorted((ROOT / "league_seeds").glob("*.json")):
+    datas.append((str(_seed_path), "league_seeds"))
+
 binaries = []
 hiddenimports = [
     "leagues",
+    "optional_leagues",
     "sports_catalog",
     "sports_matcher",
     "stream_extractor",

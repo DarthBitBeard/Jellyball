@@ -1,0 +1,135 @@
+{
+ "league": "epl",
+ "source": "Team ids and names: ESPN site API soccer/eng.1/teams, captured 2026-11-05.",
+ "teams": [
+  {
+   "id": "306",
+   "name": "Hull City",
+   "aliases": [
+    "Hull"
+   ]
+  },
+  {
+   "id": "331",
+   "name": "Brighton & Hove Albion",
+   "aliases": [
+    "Brighton",
+    "Brighton and Hove Albion"
+   ]
+  },
+  {
+   "id": "337",
+   "name": "Brentford",
+   "aliases": []
+  },
+  {
+   "id": "349",
+   "name": "AFC Bournemouth",
+   "aliases": [
+    "Bournemouth"
+   ]
+  },
+  {
+   "id": "357",
+   "name": "Leeds United",
+   "aliases": [
+    "Leeds"
+   ]
+  },
+  {
+   "id": "359",
+   "name": "Arsenal",
+   "aliases": []
+  },
+  {
+   "id": "360",
+   "name": "Manchester United",
+   "aliases": [
+    "Man Utd",
+    "Man United",
+    "Manchester Utd"
+   ]
+  },
+  {
+   "id": "361",
+   "name": "Newcastle United",
+   "aliases": [
+    "Newcastle"
+   ]
+  },
+  {
+   "id": "362",
+   "name": "Aston Villa",
+   "aliases": []
+  },
+  {
+   "id": "363",
+   "name": "Chelsea",
+   "aliases": []
+  },
+  {
+   "id": "364",
+   "name": "Liverpool",
+   "aliases": []
+  },
+  {
+   "id": "366",
+   "name": "Sunderland",
+   "aliases": []
+  },
+  {
+   "id": "367",
+   "name": "Tottenham Hotspur",
+   "aliases": [
+    "Spurs",
+    "Tottenham"
+   ]
+  },
+  {
+   "id": "368",
+   "name": "Everton",
+   "aliases": []
+  },
+  {
+   "id": "370",
+   "name": "Fulham",
+   "aliases": []
+  },
+  {
+   "id": "373",
+   "name": "Ipswich Town",
+   "aliases": [
+    "Ipswich"
+   ]
+  },
+  {
+   "id": "382",
+   "name": "Manchester City",
+   "aliases": [
+    "Man City"
+   ]
+  },
+  {
+   "id": "384",
+   "name": "Crystal Palace",
+   "aliases": [
+    "C Palace"
+   ]
+  },
+  {
+   "id": "388",
+   "name": "Coventry City",
+   "aliases": [
+    "Coventry"
+   ]
+  },
+  {
+   "id": "393",
+   "name": "Nottingham Forest",
+   "aliases": [
+    "Nottm Forest",
+    "Nott'm Forest"
+   ]
+  }
+ ]
+}

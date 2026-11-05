@@ -1,0 +1,78 @@
+{
+ "league": "cfl",
+ "source": "Team ids and names: ESPN site API football/cfl/teams, captured 2026-11-05. ESPN's CFL data stops at the 2022 season (no schedules or logos), so only the team list is used.",
+ "teams": [
+  {
+   "id": "79",
+   "name": "BC Lions",
+   "aliases": [
+    "Lions"
+   ]
+  },
+  {
+   "id": "80",
+   "name": "Calgary Stampeders",
+   "aliases": [
+    "Stampeders",
+    "Stamps"
+   ]
+  },
+  {
+   "id": "81",
+   "name": "Edmonton Elks",
+   "aliases": [
+    "Elks"
+   ]
+  },
+  {
+   "id": "82",
+   "name": "Hamilton Tiger-Cats",
+   "aliases": [
+    "Tiger-Cats",
+    "Ticats",
+    "Hamilton Ticats"
+   ]
+  },
+  {
+   "id": "83",
+   "name": "Montreal Alouettes",
+   "aliases": [
+    "Alouettes",
+    "Montréal Alouettes"
+   ]
+  },
+  {
+   "id": "84",
+   "name": "Saskatchewan Roughriders",
+   "aliases": [
+    "Roughriders",
+    "Sask Roughriders"
+   ]
+  },
+  {
+   "id": "85",
+   "name": "Toronto Argonauts",
+   "aliases": [
+    "Argonauts",
+    "Argos",
+    "Toronto Argos"
+   ]
+  },
+  {
+   "id": "86",
+   "name": "Winnipeg Blue Bombers",
+   "aliases": [
+    "Blue Bombers"
+   ]
+  },
+  {
+   "id": "87",
+   "name": "Ottawa Redblacks",
+   "aliases": [
+    "Ottawa Red Blacks",
+    "Red Blacks",
+    "Redblacks"
+   ]
+  }
+ ]
+}

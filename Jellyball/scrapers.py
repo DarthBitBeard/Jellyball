@@ -601,6 +601,24 @@ def _espn_number_mismatch(term_fold: str, value: str) -> bool:
     return m.group(1) != want
 
 
+def _tnt_sports_number_mismatch(term_fold: str, value: str) -> bool:
+    """Keeps the US "TNT Sports" channel and the numbered UK feeds apart.
+
+    A numbered term ("tnt sports 1", the UK channels) must not match another
+    number ("TNT Sports 2 UK"). The US channel's "tnt"/"tnt sports" terms must
+    not pick up a numbered feed that is marked UK ("TNT Sports 1 UK", "UK: TNT
+    Sports 2"); an unmarked name matches as it always has."""
+    if not term_fold.startswith("tnt"):
+        return False
+    m = re.search(r"(?<![a-z0-9])tnt\s*sports\s*([0-9]+)", value)
+    if not m:
+        return False
+    wanted = re.fullmatch(r"tnt\s*sports\s*([0-9]+)", term_fold)
+    if wanted is not None:
+        return wanted.group(1) != m.group(1)
+    return re.search(r"(?<![a-z0-9])uk(?![a-z0-9])", value) is not None
+
+
 def _channel_term_matches(text: str, terms: List[str]) -> bool:
     """Match a channel name without allowing ESPN to match ESPN2/ESPN+, or broadcast nets to match sports/news spin-offs."""
     value = str(text or "").casefold()
@@ -615,6 +633,8 @@ def _channel_term_matches(text: str, terms: List[str]) -> bool:
             # Bare "espn" must not match numbered regional feeds ("ESPN 3", "ESPN 4");
             # "espn2" must not match "ESPN 3", etc.
             if term_fold in {"espn", "espn2", "espnu"} and _espn_number_mismatch(term_fold, value):
+                continue
+            if _tnt_sports_number_mismatch(term_fold, value):
                 continue
             disallowed = _DISALLOWED_CHANNEL_SUBSTRINGS.get(term_fold)
             if disallowed and any(re.search(rf"(?<![a-z0-9]){re.escape(sub)}(?![a-z0-9])", value) for sub in disallowed):

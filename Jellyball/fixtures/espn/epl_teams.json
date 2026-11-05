@@ -1,0 +1,228 @@
+{
+  "sports": [
+    {
+      "id": "600",
+      "leagues": [
+        {
+          "abbreviation": "Premier League",
+          "id": "700",
+          "name": "English Premier League",
+          "season": {
+            "displayName": "2026",
+            "year": 2026
+          },
+          "shortName": "English Premier League",
+          "slug": "eng.1",
+          "teams": [
+            {
+              "team": {
+                "abbreviation": "BOU",
+                "alternateColor": "B57EDC",
+                "color": "f42727",
+                "displayName": "AFC Bournemouth",
+                "id": "349",
+                "isActive": true,
+                "isAllStar": false,
+                "links": [
+                  {
+                    "href": "https://www.espn.com/soccer/club/_/id/349/afc-bournemouth",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "shortText": "Clubhouse",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "href": "https://www.espn.com/soccer/team/stats/_/id/349/afc-bournemouth",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "stats",
+                      "desktop"
+                    ],
+                    "shortText": "Stats",
+                    "text": "Stats"
+                  }
+                ],
+                "location": "AFC Bournemouth",
+                "logos": [
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/soccer/500/349.png",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "width": 500
+                  },
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/soccer/500-dark/349.png",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "width": 500
+                  }
+                ],
+                "name": "AFC Bournemouth",
+                "nickname": "Bournemouth",
+                "shortDisplayName": "Bournemouth",
+                "slug": "eng.bournemouth",
+                "uid": "s:600~t:349"
+              }
+            },
+            {
+              "team": {
+                "abbreviation": "ARS",
+                "alternateColor": "003399",
+                "color": "e20520",
+                "displayName": "Arsenal",
+                "id": "359",
+                "isActive": true,
+                "isAllStar": false,
+                "links": [
+                  {
+                    "href": "https://www.espn.com/soccer/club/_/id/359/arsenal",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "shortText": "Clubhouse",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "href": "https://www.espn.com/soccer/team/stats/_/id/359/arsenal",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "stats",
+                      "desktop"
+                    ],
+                    "shortText": "Stats",
+                    "text": "Stats"
+                  }
+                ],
+                "location": "Arsenal",
+                "logos": [
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/soccer/500/359.png",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "width": 500
+                  },
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/soccer/500-dark/359.png",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "width": 500
+                  }
+                ],
+                "name": "Arsenal",
+                "nickname": "Gunners",
+                "shortDisplayName": "Arsenal",
+                "slug": "eng.arsenal",
+                "uid": "s:600~t:359"
+              }
+            },
+            {
+              "team": {
+                "abbreviation": "AVL",
+                "alternateColor": "000000",
+                "color": "660e36",
+                "displayName": "Aston Villa",
+                "id": "362",
+                "isActive": true,
+                "isAllStar": false,
+                "links": [
+                  {
+                    "href": "https://www.espn.com/soccer/club/_/id/362/aston-villa",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "clubhouse",
+                      "desktop"
+                    ],
+                    "shortText": "Clubhouse",
+                    "text": "Clubhouse"
+                  },
+                  {
+                    "href": "https://www.espn.com/soccer/team/stats/_/id/362/aston-villa",
+                    "isExternal": false,
+                    "isHidden": false,
+                    "isPremium": false,
+                    "language": "en-US",
+                    "rel": [
+                      "stats",
+                      "desktop"
+                    ],
+                    "shortText": "Stats",
+                    "text": "Stats"
+                  }
+                ],
+                "location": "Aston Villa",
+                "logos": [
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/soccer/500/362.png",
+                    "rel": [
+                      "full",
+                      "default"
+                    ],
+                    "width": 500
+                  },
+                  {
+                    "alt": "",
+                    "height": 500,
+                    "href": "https://a.espncdn.com/i/teamlogos/soccer/500-dark/362.png",
+                    "rel": [
+                      "full",
+                      "dark"
+                    ],
+                    "width": 500
+                  }
+                ],
+                "name": "Aston Villa",
+                "nickname": "Aston Villa",
+                "shortDisplayName": "Aston Villa",
+                "slug": "eng.aston_villa",
+                "uid": "s:600~t:362"
+              }
+            }
+          ],
+          "uid": "s:600~l:700",
+          "year": 2026
+        }
+      ],
+      "name": "Soccer",
+      "slug": "soccer",
+      "uid": "s:600"
+    }
+  ]
+}

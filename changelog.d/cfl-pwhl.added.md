@@ -1,0 +1,1 @@
+Opt-in CFL and PWHL teams (issue #45), turned on the same way. ESPN stopped publishing CFL schedules after 2022 and has no PWHL data, so these channels have no game times: they keep searching for the team throughout the league season instead of only around games.

@@ -12,6 +12,7 @@ They are test data and are excluded from the Docker image.
 | `espn/nfl_team_schedule_buf.json` | ESPN NFL team schedule for `buf` | Captured from the public API, trimmed |
 | `espn/mls_team_schedule_inter_miami.json` | ESPN MLS (`usa.1`) schedule for team 20232 | Captured, trimmed |
 | `espn/nfl_teams.json`, `espn/college_football_teams.json` | ESPN team directories (`?limit=1000`) | Captured, trimmed to 3 teams |
+| `espn/epl_teams.json` | ESPN Premier League (`soccer/eng.1`) team directory, the source of `league_seeds/epl.json` | Captured 2026-11-05 from a saved response, trimmed to 3 teams |
 | `tvguide/schedule.json` | TVGuide schedule: ESPN and FS1 with 4 programmes each | Captured (`duration=1440`), 2 channels picked |
 | `providers/aggregator/*` | Index, category, event, player and streamer pages for the `HtmlAggregatorScraper` subclasses | Hand-written |
 | `providers/hls/*` | A live media playlist, a master playlist and a finished (VOD) playlist | Hand-written |

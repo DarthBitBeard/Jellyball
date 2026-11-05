@@ -149,8 +149,9 @@ class DerivedStructureTests(unittest.TestCase):
         cdn = "https://a.espncdn.com/i/teamlogos"
         self.assertEqual(catalog.resolve_espn_logo("x", "ncaam", "130"), f"{cdn}/ncaa/500/130.png?v=titan2")
         self.assertEqual(catalog.resolve_espn_logo("x", "nhl", "bos"), f"{cdn}/nhl/500/bos.png?v=titan2")
-        # Not a catalog category: falls back to the team-name map.
-        self.assertEqual(catalog.resolve_espn_logo("Inter Miami", "soccer", "1"), f"{cdn}/soccer/500/10739.png?v=titan2")
+        # Not a catalog category: falls back to the team-name map. Deliberately
+        # changed in issue #46: 10739 was the Philadelphia Union; Inter Miami CF is 20232.
+        self.assertEqual(catalog.resolve_espn_logo("Inter Miami", "soccer", "1"), f"{cdn}/soccer/500/20232.png?v=titan2")
 
     def test_schedule_endpoints_and_game_lengths(self):
         endpoints = {key: (lg.espn_sport, lg.espn_league) for key, lg in leagues.SCHEDULE_LEAGUES.items()}

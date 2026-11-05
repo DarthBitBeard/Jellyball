@@ -1,0 +1,91 @@
+{
+ "league": "pwhl",
+ "source": "ESPN has no PWHL league. Team list: the twelve 2026-27 PWHL teams as listed on the English Wikipedia PWHL article, read 2026-11-05; the four 2026 expansion teams were listed without nicknames. Ids are Jellyball's own slugs and are frozen.",
+ "teams": [
+  {
+   "id": "boston-fleet",
+   "name": "Boston Fleet",
+   "aliases": [
+    "PWHL Boston"
+   ]
+  },
+  {
+   "id": "minnesota-frost",
+   "name": "Minnesota Frost",
+   "aliases": [
+    "PWHL Minnesota"
+   ]
+  },
+  {
+   "id": "montreal-victoire",
+   "name": "Montréal Victoire",
+   "aliases": [
+    "Montreal Victoire",
+    "PWHL Montreal",
+    "PWHL Montréal",
+    "Victoire"
+   ]
+  },
+  {
+   "id": "new-york-sirens",
+   "name": "New York Sirens",
+   "aliases": [
+    "PWHL New York",
+    "NY Sirens",
+    "Sirens"
+   ]
+  },
+  {
+   "id": "ottawa-charge",
+   "name": "Ottawa Charge",
+   "aliases": [
+    "PWHL Ottawa"
+   ]
+  },
+  {
+   "id": "toronto-sceptres",
+   "name": "Toronto Sceptres",
+   "aliases": [
+    "PWHL Toronto",
+    "Sceptres"
+   ]
+  },
+  {
+   "id": "seattle-torrent",
+   "name": "Seattle Torrent",
+   "aliases": [
+    "PWHL Seattle"
+   ]
+  },
+  {
+   "id": "vancouver-goldeneyes",
+   "name": "Vancouver Goldeneyes",
+   "aliases": [
+    "PWHL Vancouver",
+    "Goldeneyes"
+   ]
+  },
+  {
+   "id": "pwhl-detroit",
+   "name": "PWHL Detroit",
+   "aliases": []
+  },
+  {
+   "id": "pwhl-hamilton",
+   "name": "PWHL Hamilton",
+   "aliases": []
+  },
+  {
+   "id": "pwhl-las-vegas",
+   "name": "PWHL Las Vegas",
+   "aliases": [
+    "PWHL Vegas"
+   ]
+  },
+  {
+   "id": "pwhl-san-jose",
+   "name": "PWHL San Jose",
+   "aliases": []
+  }
+ ]
+}
