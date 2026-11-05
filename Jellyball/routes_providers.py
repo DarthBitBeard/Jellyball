@@ -24,6 +24,7 @@ import scrapers
 from plugins import get_plugin_errors, get_plugin_records
 from config import _log_failure
 from dashboard_cards import Card, register_card
+from read_cache import cached_thread
 from security import verify_dashboard_auth
 
 router = APIRouter()
@@ -93,7 +94,7 @@ def provider_rows(db_stats: dict) -> list:
 
 @router.get("/api/providers", response_class=JSONResponse)
 async def list_providers(auth: bool = Depends(verify_dashboard_auth)):
-    stats = await asyncio.to_thread(provider_telemetry.provider_stats_sync)
+    stats = await cached_thread("provider_stats", provider_telemetry.provider_stats_sync)
     return {"providers": provider_rows(stats)}
 
 
@@ -190,7 +191,7 @@ async def reload_providers(auth: bool = Depends(verify_dashboard_auth)):
 
 
 async def _provider_card_context(request: Request) -> dict:
-    stats = await asyncio.to_thread(provider_telemetry.provider_stats_sync)
+    stats = await cached_thread("provider_stats", provider_telemetry.provider_stats_sync)
     return {"providers": provider_rows(stats), "plugin_errors": get_plugin_errors()}
 
 
