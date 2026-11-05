@@ -5,9 +5,10 @@ and precision token matching with state/short-word guardrails.
 """
 
 import re
-from typing import List, Tuple, Set, Dict, Optional
+from functools import lru_cache
+from typing import FrozenSet, List, Pattern, Tuple, Set, Dict, Optional
 
-from sports_catalog import STATIC_TEAM_RECORDS, normalize_team_label
+from sports_catalog import STATIC_TEAM_RECORDS, fold_accents, normalize_team_label
 
 try:
     from thefuzz import fuzz
@@ -277,7 +278,7 @@ _NOISE_PATTERNS = [
 
 def clean_sports_text(text: str) -> str:
     """Removes live match metadata noise, timestamps, and quarter info."""
-    clean = text.lower()
+    clean = fold_accents(text).lower()
     for pattern in _NOISE_PATTERNS:
         clean = re.sub(pattern, ' ', clean, flags=re.IGNORECASE)
     # Replace non-alphanumeric with spaces except keep vs, @, -
@@ -544,6 +545,60 @@ def has_compound_conflict(term: str, target: str, search_terms: List[str]) -> bo
                     return True
     return False
 
+# --- Opt-in league teams (optional_leagues) ---------------------------------
+# Their names never join _TEAM_ALIASES_DB (see optional_leagues), so they never
+# change which existing nickname counts as ambiguous. Two guards keep them and
+# the existing teams apart instead:
+# - a title naming an opt-in team is read without that team's multi-word
+#   names unless the search is for it, so "kansas city" (Chiefs) no longer
+#   matches "Sporting Kansas City vs LA Galaxy" and "lions" (Detroit) no longer
+#   matches "BC Lions at Edmonton Elks";
+# - an opt-in team's own names match only as exact phrases, never by substring
+#   or fuzzy score ("nashville sc" must not match "Nashville Predators").
+
+OptionalNameData = Tuple[FrozenSet[str], Dict[str, FrozenSet[Tuple[str, str]]], Optional[Pattern[str]]]
+
+
+@lru_cache(maxsize=1)
+def _optional_team_name_data() -> OptionalNameData:
+    """(every opt-in name, owners of each name, regex over the multi-word names)."""
+    from optional_leagues import OPTIONAL_TEAM_NAMES  # late: optional_leagues imports this module
+
+    owners: Dict[str, Set[Tuple[str, str]]] = {}
+    for identity, names in OPTIONAL_TEAM_NAMES.items():
+        for name in names:
+            owners.setdefault(name, set()).add(identity)
+    multi_word = sorted((name for name in owners if " " in name), key=len, reverse=True)
+    pattern = None
+    if multi_word:
+        alternatives = "|".join(r"[\s\-]+".join(re.escape(word) for word in name.split()) for name in multi_word)
+        pattern = re.compile(rf"(?<![a-z0-9])(?:{alternatives})(?![a-z0-9])")
+    return frozenset(owners), {name: frozenset(ids) for name, ids in owners.items()}, pattern
+
+
+def _requested_optional_teams(search_terms: List[str]) -> FrozenSet[Tuple[str, str]]:
+    _, owners, _ = _optional_team_name_data()
+    requested: Set[Tuple[str, str]] = set()
+    for term in search_terms:
+        requested.update(owners.get(normalize_team_label(term), ()))
+    return frozenset(requested)
+
+
+def strip_other_optional_teams(target: str, search_terms: List[str]) -> str:
+    """`target` without the multi-word names of opt-in teams the search is not for."""
+    _, owners, pattern = _optional_team_name_data()
+    if pattern is None or not target:
+        return target
+    requested = _requested_optional_teams(search_terms)
+
+    def replace(match: "re.Match[str]") -> str:
+        if owners.get(normalize_team_label(match.group(0)), frozenset()) & requested:
+            return match.group(0)
+        return " | "
+
+    return pattern.sub(replace, target)
+
+
 def match_team(
     search_terms: List[str],
     text: str,
@@ -572,6 +627,8 @@ def match_team(
         all_targets.append(slug_text)
     if clean_title:
         all_targets.append(clean_title)
+    all_targets = [strip_other_optional_teams(target, search_terms) for target in all_targets]
+    optional_names = _optional_team_name_data()[0]
 
     best_score = 0
     best_term = ""
@@ -584,6 +641,7 @@ def match_team(
             continue
 
         term_is_short = len(term_low) <= 4
+        exact_only = term_is_short or normalize_team_label(term_low) in optional_names
 
         for target in all_targets:
             if not target:
@@ -602,6 +660,9 @@ def match_team(
 
             # 1. Exact phrase / acronym with word boundaries
             pattern = rf'\b{re.escape(term_low)}\b'
+            if exact_only and not term_is_short:
+                # An opt-in team's name also matches hyphenated ("Paris Saint-Germain").
+                pattern = r'\b' + r'[\s\-]+'.join(re.escape(word) for word in term_low.split()) + r'\b'
             if re.search(pattern, target):
                 score = 110 if len(term_low.split()) > 1 else (100 if len(term_low) > 2 else 95)
                 if score > best_score:
@@ -609,7 +670,7 @@ def match_team(
                     best_term = term_low
                 continue
 
-            if term_is_short:
+            if exact_only:
                 continue
 
             # 2. Substring match for longer multi-word terms

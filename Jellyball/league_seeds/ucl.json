@@ -1,0 +1,257 @@
+{
+ "league": "ucl",
+ "source": "Team ids and names: ESPN site API soccer/uefa.champions/teams, captured 2026-11-05.",
+ "teams": [
+  {
+   "id": "83",
+   "name": "Barcelona",
+   "aliases": [
+    "FC Barcelona",
+    "Barca"
+   ]
+  },
+  {
+   "id": "86",
+   "name": "Real Madrid",
+   "aliases": []
+  },
+  {
+   "id": "102",
+   "name": "Villarreal",
+   "aliases": []
+  },
+  {
+   "id": "104",
+   "name": "AS Roma",
+   "aliases": [
+    "Roma"
+   ]
+  },
+  {
+   "id": "110",
+   "name": "Internazionale",
+   "aliases": [
+    "Inter Milan",
+    "Inter"
+   ]
+  },
+  {
+   "id": "114",
+   "name": "Napoli",
+   "aliases": [
+    "SSC Napoli"
+   ]
+  },
+  {
+   "id": "124",
+   "name": "Borussia Dortmund",
+   "aliases": [
+    "Dortmund"
+   ]
+  },
+  {
+   "id": "132",
+   "name": "Bayern Munich",
+   "aliases": [
+    "Bayern",
+    "Bayern Munchen",
+    "Bayern München",
+    "FC Bayern"
+   ]
+  },
+  {
+   "id": "134",
+   "name": "VfB Stuttgart",
+   "aliases": [
+    "Stuttgart"
+   ]
+  },
+  {
+   "id": "142",
+   "name": "Feyenoord Rotterdam",
+   "aliases": [
+    "Feyenoord"
+   ]
+  },
+  {
+   "id": "148",
+   "name": "PSV Eindhoven",
+   "aliases": [
+    "PSV"
+   ]
+  },
+  {
+   "id": "160",
+   "name": "Paris Saint-Germain",
+   "aliases": [
+    "PSG",
+    "Paris SG"
+   ]
+  },
+  {
+   "id": "166",
+   "name": "Lille",
+   "aliases": [
+    "Lille OSC"
+   ]
+  },
+  {
+   "id": "175",
+   "name": "Lens",
+   "aliases": [
+    "RC Lens"
+   ]
+  },
+  {
+   "id": "244",
+   "name": "Real Betis",
+   "aliases": [
+    "Betis"
+   ]
+  },
+  {
+   "id": "359",
+   "name": "Arsenal",
+   "aliases": []
+  },
+  {
+   "id": "360",
+   "name": "Manchester United",
+   "aliases": [
+    "Man Utd",
+    "Man United",
+    "Manchester Utd"
+   ]
+  },
+  {
+   "id": "362",
+   "name": "Aston Villa",
+   "aliases": []
+  },
+  {
+   "id": "364",
+   "name": "Liverpool",
+   "aliases": []
+  },
+  {
+   "id": "382",
+   "name": "Manchester City",
+   "aliases": [
+    "Man City"
+   ]
+  },
+  {
+   "id": "432",
+   "name": "Galatasaray",
+   "aliases": []
+  },
+  {
+   "id": "436",
+   "name": "Fenerbahce",
+   "aliases": [
+    "Fenerbahçe"
+   ]
+  },
+  {
+   "id": "437",
+   "name": "FC Porto",
+   "aliases": [
+    "Porto"
+   ]
+  },
+  {
+   "id": "493",
+   "name": "Shakhtar Donetsk",
+   "aliases": [
+    "Shakhtar"
+   ]
+  },
+  {
+   "id": "494",
+   "name": "Slavia Prague",
+   "aliases": [
+    "Slavia Praha"
+   ]
+  },
+  {
+   "id": "510",
+   "name": "Viking FK",
+   "aliases": [
+    "Viking"
+   ]
+  },
+  {
+   "id": "521",
+   "name": "Slovan Bratislava",
+   "aliases": [
+    "S Bratislava",
+    "Slovan"
+   ]
+  },
+  {
+   "id": "570",
+   "name": "Club Brugge",
+   "aliases": [
+    "Brugge"
+   ]
+  },
+  {
+   "id": "887",
+   "name": "AEK Athens",
+   "aliases": []
+  },
+  {
+   "id": "1068",
+   "name": "Atlético Madrid",
+   "aliases": [
+    "Atlético",
+    "Atletico Madrid",
+    "Atletico de Madrid"
+   ]
+  },
+  {
+   "id": "2250",
+   "name": "Sporting CP",
+   "aliases": [
+    "Sporting",
+    "Sporting Lisbon"
+   ]
+  },
+  {
+   "id": "2572",
+   "name": "Como",
+   "aliases": [
+    "Como 1907"
+   ]
+  },
+  {
+   "id": "2980",
+   "name": "Bodo/Glimt",
+   "aliases": [
+    "Bodø/Glimt",
+    "Bodo Glimt"
+   ]
+  },
+  {
+   "id": "4411",
+   "name": "LASK Linz",
+   "aliases": [
+    "LASK"
+   ]
+  },
+  {
+   "id": "11420",
+   "name": "RB Leipzig",
+   "aliases": [
+    "Leipzig"
+   ]
+  },
+  {
+   "id": "21922",
+   "name": "Sabah FK",
+   "aliases": [
+    "Sabah"
+   ]
+  }
+ ]
+}

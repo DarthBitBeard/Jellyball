@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import re
+import unicodedata
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from leagues import (
@@ -37,6 +38,9 @@ class TeamSlug:
     logo_sport: str
     aliases: Tuple[str, ...] = ()
     team_id: str = ""
+    # Readable label when canonical.title() would mangle it ("Inter Miami CF",
+    # not "Inter Miami Cf"); only the opt-in league seeds set it.
+    display: str = ""
 
     @property
     def is_college(self) -> bool:
@@ -50,7 +54,7 @@ class TeamSlug:
     @property
     def display_name(self) -> str:
         """Return a readable label for server-rendered catalog controls."""
-        return self.canonical.title()
+        return self.display or self.canonical.title()
 
 
 @dataclass(frozen=True)
@@ -65,10 +69,25 @@ class SpecialChannel:
     group_title: str = "24/7 Sports"
 
 
+# Latin letters NFKD does not decompose into a base letter plus a mark.
+_FOLD_LETTERS = str.maketrans({"ø": "o", "æ": "ae", "œ": "oe", "ß": "ss", "ł": "l", "đ": "d", "ı": "i", "þ": "th"})
+
+
+def fold_accents(value: str) -> str:
+    """Casefold and drop accents ("Montréal", "Bodø" -> "montreal", "bodo"),
+    so an accented title or name matches its plain spelling instead of losing
+    the accented letter. Leaves plain ASCII text unchanged."""
+    text = str(value or "").casefold()
+    if text.isascii():
+        return text
+    decomposed = unicodedata.normalize("NFKD", text.translate(_FOLD_LETTERS))
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
+
+
 def normalize_team_label(value: str) -> str:
     """Normalize a team label without making short aliases more permissive."""
     normalized = str(value or "").casefold().replace("&", " and ")
-    normalized = normalized.replace("â€™", "'")
+    normalized = fold_accents(normalized.replace("â€™", "'"))
     normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
     return re.sub(r"\s+", " ", normalized).strip()
 
@@ -344,6 +363,55 @@ SPECIAL_CHANNELS: Tuple[SpecialChannel, ...] = (
         _TV_LOGOS_BASE + "tru-tv-us.png",
         "TruTV.us",
     ),
+)
+
+
+_UK_TV_LOGOS_BASE = "https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/united-kingdom/"
+
+
+def _uk_channel(key: str, name: str, search_terms: Tuple[str, ...], logo: str, tvg_id: str) -> SpecialChannel:
+    return SpecialChannel(f"uk_{key}", name, search_terms, _UK_TV_LOGOS_BASE + logo, tvg_id, "UK Sports Channels")
+
+
+# Opt-in always-live UK channels (issue #46; leagues.UK_SPORTS_GROUP_KEY). Kept
+# out of SPECIAL_CHANNELS: they reach the catalog only when the group is turned
+# on, and catalog._special_channel_for finds them by catalog key only, never by
+# name, so an existing custom channel that happens to share a name keeps its
+# tvg-id and group. Every term names one exact channel ("sky sports football",
+# never a bare "sky sports"); scrapers._channel_term_matches keeps the US "TNT"
+# channel off the numbered UK "TNT Sports 1-4" feeds.
+OPTIONAL_SPECIAL_CHANNELS: Tuple[SpecialChannel, ...] = (
+    _uk_channel("sky_sports_main_event", "Sky Sports Main Event", ("sky sports main event",),
+                "sky-sports-main-event-uk.png", "SkySportsMainEvent.uk"),
+    _uk_channel("sky_sports_premier_league", "Sky Sports Premier League",
+                ("sky sports premier league", "sky sports pl"),
+                "sky-sports-premier-league-uk.png", "SkySportsPremierLeague.uk"),
+    _uk_channel("sky_sports_football", "Sky Sports Football", ("sky sports football",),
+                "sky-sports-football-uk.png", "SkySportsFootball.uk"),
+    _uk_channel("sky_sports_cricket", "Sky Sports Cricket", ("sky sports cricket",),
+                "sky-sports-cricket-uk.png", "SkySportsCricket.uk"),
+    _uk_channel("sky_sports_golf", "Sky Sports Golf", ("sky sports golf",),
+                "sky-sports-golf-uk.png", "SkySportsGolf.uk"),
+    _uk_channel("sky_sports_f1", "Sky Sports F1", ("sky sports f1", "sky sports formula 1"),
+                "sky-sports-f1-uk.png", "SkySportsF1.uk"),
+    _uk_channel("sky_sports_action", "Sky Sports Action", ("sky sports action",),
+                "sky-sports-action-uk.png", "SkySportsAction.uk"),
+    _uk_channel("sky_sports_tennis", "Sky Sports Tennis", ("sky sports tennis",),
+                "sky-sports-tennis-uk.png", "SkySportsTennis.uk"),
+    _uk_channel("sky_sports_mix", "Sky Sports Mix", ("sky sports mix",),
+                "sky-sports-mix-uk.png", "SkySportsMix.uk"),
+    _uk_channel("sky_sports_news", "Sky Sports News", ("sky sports news",),
+                "sky-sports-news-uk.png", "SkySportsNews.uk"),
+    _uk_channel("sky_sports_racing", "Sky Sports Racing", ("sky sports racing",),
+                "sky-sports-racing-uk.png", "SkySportsRacing.uk"),
+    _uk_channel("tnt_sports_1", "TNT Sports 1 UK", ("tnt sports 1",), "tnt-sports-1-uk.png", "TNTSports1.uk"),
+    _uk_channel("tnt_sports_2", "TNT Sports 2 UK", ("tnt sports 2",), "tnt-sports-2-uk.png", "TNTSports2.uk"),
+    _uk_channel("tnt_sports_3", "TNT Sports 3 UK", ("tnt sports 3",), "tnt-sports-3-uk.png", "TNTSports3.uk"),
+    _uk_channel("tnt_sports_4", "TNT Sports 4 UK", ("tnt sports 4",), "tnt-sports-4-uk.png", "TNTSports4.uk"),
+    _uk_channel("premier_sports_1", "Premier Sports 1", ("premier sports 1",),
+                "premier-sports-1-uk.png", "PremierSports1.uk"),
+    _uk_channel("premier_sports_2", "Premier Sports 2", ("premier sports 2",),
+                "premier-sports-2-uk.png", "PremierSports2.uk"),
 )
 
 
