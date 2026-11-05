@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -84,6 +85,8 @@ from failover import (
     STARTUP_SCRAPE_SPREAD_SECONDS,
 )
 from channels import enforce_scheduled_disables
+import diaglog
+import provider_settings
 import epg
 from tunables import _load_tunable_overrides
 import routes_stream
@@ -264,6 +267,16 @@ async def lifespan(app: FastAPI):
     multiview_watchdog_task = asyncio.create_task(multiview_watchdog(), name="multiview watchdog")
     # Tracked background task: _cancel_background_tasks() stops it at shutdown.
     _spawn_background_task(multiview_output_sweeper(), "multiview output sweep")
+    try:
+        jellyfin_url = get_setting("jellyfin_url", "") or os.getenv("JELLYFIN_URL", "")
+        diaglog.startup_report({
+            "jellyfin": (urllib.parse.urlsplit(jellyfin_url).netloc or "not configured"),
+            "jellyfin_api_key": "set" if (get_setting("jellyfin_api_key", "") or os.getenv("JELLYFIN_API_KEY")) else "not set",
+            "providers": ",".join(p.name for p in provider_settings.filter_enabled(scrapers.ACTIVE_PROVIDERS)) or "none",
+            "provider_priority": os.getenv("STREAM_PROVIDER_PRIORITY", "(default)") or "(default)",
+        })
+    except Exception as exc:  # diagnostics must never stop the server starting
+        _log_failure("write startup report", exc)
     yield
 
     monitor_task.cancel()
@@ -346,6 +359,7 @@ class RequestDiagnosticsMiddleware:
             if message["type"] == "http.response.start":
                 status_holder["status"] = message["status"]
                 elapsed_ms = (time.perf_counter() - started) * 1000
+                diaglog.log_request(scope, message["status"], elapsed_ms)
                 if message["status"] >= 500:
                     LOGGER.warning(
                         "HTTP failure method=%s path=%s status=%d duration_ms=%.0f",

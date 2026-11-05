@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
-from config import _log_failure, DATA_DIR, LOGGER
+from config import register_secret, _log_failure, DATA_DIR, LOGGER
 import migrations_engine
 import migrations_jellyfin
 import migrations_providers
@@ -493,7 +493,9 @@ def get_setting(key: str, default: str = "") -> str:
                                 "An encrypted secret setting cannot be decrypted "
                                 "(wrong key file?); returning the default")
                             return default
+                        register_secret(decrypted)
                         return decrypted
+                    register_secret(value)
                     # Legacy plaintext value: encrypt it in place, transparently.
                     _migrate_secret_to_encrypted(key, value)
                 return value

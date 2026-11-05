@@ -486,6 +486,7 @@ All five are also editable in Advanced Settings ("Legacy proxy" group).
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `PLAYWRIGHT_BROWSERS_PATH` | *(set automatically)* | Playwright's Chromium cache location; override only if you know you need to |
+| `JELLYBALL_LOG_LEVEL` | `INFO` | `DEBUG` adds tracebacks for failures and one line per media segment request; use it while troubleshooting playback, then set it back (the log grows quickly) |
 
 ### Backups
 
