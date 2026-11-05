@@ -445,11 +445,23 @@ async def fetch_bounded_text(
     headers: Dict[str, str],
     timeout: float,
     max_bytes: int = MAX_INSPECTION_BYTES,
+    info: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
+    """GET `url` with SSRF-checked manual redirects and a size cap.
+
+    `info`, when given, is a caller-owned dict filled with what happened, for
+    callers that report *why* a page could not be read: "final_url" (the URL
+    after redirects), "status" (the last HTTP status, if any) and, on failure,
+    "error" (an exception class name, or "redirect"/"too_large"/"blocked_url").
+    """
+    if info is None:
+        info = {}
     current_url = url
     for _ in range(MAX_REDIRECTS + 1):
+        info["final_url"] = current_url
         safe_url = await validate_http_url_async(current_url)
         if not safe_url:
+            info["error"] = "blocked_url"
             return None
         try:
             async with client.stream(
@@ -459,30 +471,53 @@ async def fetch_bounded_text(
                 timeout=timeout,
                 follow_redirects=False,
             ) as response:
+                info["status"] = response.status_code
                 if 300 <= response.status_code < 400:
                     location = response.headers.get("location")
                     if not location:
+                        info["error"] = "redirect"
                         return None
                     current_url = urllib.parse.urljoin(str(response.url), location)
                     continue
                 if response.status_code != 200:
+                    # Keep a little of the body: it tells a bot-check page
+                    # apart from an ordinary error page.
+                    info["body_head"] = await _read_head(response)
                     return None
                 content_length = response.headers.get("content-length")
                 try:
                     if content_length and int(content_length) > max_bytes:
+                        info["error"] = "too_large"
                         return None
                 except ValueError:
                     pass
                 body = bytearray()
                 async for block in response.aiter_bytes():
                     if len(body) + len(block) > max_bytes:
+                        info["error"] = "too_large"
                         return None
                     body.extend(block)
                 return bytes(body).decode(response.encoding or "utf-8", errors="replace")
         except Exception as exc:
             LOGGER.debug("Bounded upstream fetch failed error=%s", type(exc).__name__)
+            info["error"] = type(exc).__name__
+            info["exception"] = exc
             return None
+    info["error"] = "redirect"
     return None
+
+
+async def _read_head(response: httpx.Response, limit: int = 16384) -> str:
+    """The first `limit` bytes of an error response's body, decoded; "" on failure."""
+    body = bytearray()
+    try:
+        async for block in response.aiter_bytes():
+            body.extend(block)
+            if len(body) >= limit:
+                break
+    except Exception:
+        pass
+    return bytes(body[:limit]).decode(response.encoding or "utf-8", errors="replace")
 
 async def verify_stream_live(
     client: httpx.AsyncClient,
