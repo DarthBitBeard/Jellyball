@@ -35,6 +35,7 @@ import catalog
 import dashboard_cards
 import epg
 import provider_telemetry
+from read_cache import cached_thread
 from catalog import _season_resume_label, catalog_group_key, get_catalog_entries
 from leagues import LEAGUES, OPTIONAL_CATALOG_GROUPS, OPTIONAL_GROUPS_SETTING, parse_optional_groups
 from alerts import (
@@ -132,7 +133,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         if data.get("catalog_key")
     }
 
-    provider_health = await asyncio.to_thread(provider_telemetry.leaderboard_sync)
+    provider_health = await cached_thread("provider_leaderboard", provider_telemetry.leaderboard_sync)
 
     catalog_group_defs = (
         *((league.key, league.group_title) for league in LEAGUES),
