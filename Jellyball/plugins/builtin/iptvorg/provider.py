@@ -34,6 +34,9 @@ class IptvOrgScraper(Provider):
     broadcasts, so it belongs in LINEAR_PROVIDERS, not the general team search."""
 
     name = "IPTV-Org"
+    # 24/7 channels only: a team search matched e.g. a snooker channel named
+    # with a "GB" region code for the Packers (issue #48).
+    carries_team_events = False
 
     def __init__(self):
         self.base_url = os.getenv("IPTV_ORG_PLAYLIST_URL", IPTV_ORG_PLAYLIST_URL_DEFAULT)
