@@ -9,8 +9,11 @@ API_VERSION = 1
 """
 
 import asyncio
+import logging
+import re
+import time
 import urllib.parse
-from typing import Any, Dict, List, Optional, Set, TypedDict, cast
+from typing import Any, Dict, List, Optional, Pattern, Set, Tuple, TypedDict, cast
 
 import httpx
 from playwright.async_api import Browser
@@ -108,6 +111,87 @@ async def fetch_html(
     return html
 
 
+# --- Why a provider page could not be used (issue #49) ----------------------------
+# A provider that lists nothing used to look the same whether its site was down,
+# blocked us, was a parked domain or had changed its layout. These helpers name
+# the state for telemetry (error_class) and a throttled log line. Recognising a
+# block is all they do: a blocked site is reported, never worked around.
+_CHALLENGE_TITLES = ("just a moment", "attention required", "access denied", "verify you are human", "ddos-guard")
+_CHALLENGE_MARKERS = ("cf-browser-verification", "cf_chl_opt", "id=\"challenge-form\"", "id=\"challenge-running\"")
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.S)
+_PARKED_MARKERS = (
+    "parklogic.com", "parkingcrew", "sedoparking", "bodis.com", "domain is for sale",
+    "this domain may be for sale", "buy this domain", "domain has expired",
+)
+_BLOCK_STATUSES = frozenset({401, 403, 429})
+_UNREACHABLE_ERRORS = frozenset({"timeout", "connect", "tls", "network"})
+_SITE_STATE_MESSAGES = {
+    "blocked": "site blocked automated access",
+    "unreachable": "site unreachable",
+    "parked": "site is a parked domain with no stream listings",
+    "not_found": "index page not found",
+    "no_channel_directory": "no channel directory at the expected page",
+    "no_event_links": "index pages list no event links (quiet day, or the site layout changed)",
+}
+_SITE_STATE_LOG_COOLDOWN_SECONDS = 900.0
+_SITE_STATE_LOGGED_AT: Dict[str, float] = {}
+
+
+def classify_page_html(page_html: str) -> Optional[Tuple[str, str]]:
+    """("blocked"|"parked", detail) when a fetched page is a bot check or a
+    parked domain rather than the provider's own content, else None."""
+    head = (page_html or "")[:200_000].lower()
+    title_match = _TITLE_RE.search(head)
+    title = title_match.group(1).strip() if title_match else ""
+    if any(marker in title for marker in _CHALLENGE_TITLES) or any(marker in head for marker in _CHALLENGE_MARKERS):
+        return "blocked", "bot-check page"
+    if any(marker in head for marker in _PARKED_MARKERS):
+        return "parked", "parking page"
+    return None
+
+
+def classify_fetch_failure(info: Dict[str, Any]) -> Tuple[str, str]:
+    """(state, detail) for a failed :func:`stream_extractor.fetch_bounded_text`
+    call, from the `info` dict it filled in."""
+    status = info.get("status")
+    exc = info.get("exception")
+    if exc is not None:
+        error_class = telemetry.classify_error(exc)
+        if error_class in _UNREACHABLE_ERRORS:
+            return "unreachable", error_class
+        return error_class, type(exc).__name__
+    error = info.get("error")
+    if error:
+        return str(error), str(error)
+    if isinstance(status, int):
+        body = str(info.get("body_head") or "")
+        if status in _BLOCK_STATUSES or (status == 503 and classify_page_html(body)):
+            return "blocked", f"HTTP {status}"
+        if status in (404, 410):
+            return "not_found", f"HTTP {status}"
+        return f"http_{status}", f"HTTP {status}"
+    return "no_content", "empty response"
+
+
+def log_site_state(provider_name: str, state: str, detail: str, page_url: str, level: int = logging.WARNING) -> None:
+    """One log line (WARNING by default) per provider/state per 15 minutes,
+    DEBUG for the repeats. Logs only the host and path, never the query."""
+    parts = urllib.parse.urlsplit(page_url or "")
+    key = f"{provider_name}|{state}"
+    now = time.monotonic()
+    last = _SITE_STATE_LOGGED_AT.get(key)
+    message = _SITE_STATE_MESSAGES.get(state, "index page unusable")
+    if last is None or now - last >= _SITE_STATE_LOG_COOLDOWN_SECONDS:
+        _SITE_STATE_LOGGED_AT[key] = now
+        LOGGER.log(
+            level,
+            "provider %s: %s (%s) host=%s path=%s",
+            provider_name, message, detail, parts.netloc, parts.path or "/",
+        )
+    else:
+        LOGGER.debug("provider %s: %s again (%s) host=%s", provider_name, message, detail, parts.netloc)
+
+
 def get_setting(provider_name: str, key: str, default: Any = None) -> Any:
     """Read a provider's persisted config by provider name.
 
@@ -194,12 +278,56 @@ def _matched_event(match_url: str, score: int, match_title: str, context: str = 
 class HtmlAggregatorProvider(Provider):
     """Configurable adapter for aggregators that expose linked event pages."""
 
-    def __init__(self, name: str, base_url: str, categories: Optional[List[str]] = None, event_path_hints: Optional[List[str]] = None):
+    def __init__(
+        self,
+        name: str,
+        base_url: str,
+        categories: Optional[List[str]] = None,
+        event_path_hints: Optional[List[str]] = None,
+        event_path_patterns: Optional[List[str]] = None,
+    ):
         super().__init__()
         self.name = name.strip() or "Aggregator"
         self._default_base_url = (base_url or "").strip().rstrip("/")
         self.categories = list(categories or [])
         self.event_path_hints = tuple(hint.lower() for hint in (event_path_hints or []) if hint)
+        # Regular expressions matched (case-insensitively) against an event
+        # link's path, for sites whose event URLs carry no fixed word such as
+        # "/watch/" (e.g. "/<league>/<teams-slug>/<numeric id>"). A link is an
+        # event link when it matches a hint OR a pattern.
+        self.event_path_patterns: Tuple[Pattern[str], ...] = tuple(
+            re.compile(pattern, re.IGNORECASE) for pattern in (event_path_patterns or []) if pattern
+        )
+
+    @property
+    def _page_fetch_state(self) -> Dict[str, Dict[str, Any]]:
+        """Per scan URL: the URL the last fetch ended on (after redirects) and,
+        when it failed, why. Kept on the instance, beside the shared HTML
+        cache, so a cache hit still knows both."""
+        state = self.__dict__.get("_page_fetch_state_store")
+        if state is None:
+            state = {}
+            self.__dict__["_page_fetch_state_store"] = state
+        return state
+
+    def _effective_page_url(self, page_url: str) -> str:
+        """The URL `page_url` was really served from: a redirect target when
+        the site moved (e.g. an old domain answering 301 to its new one)."""
+        return str(self._page_fetch_state.get(page_url, {}).get("final_url") or page_url)
+
+    def _record_page_fetch(self, page_url: str, final_url: str, failure: Optional[Tuple[str, str]]) -> None:
+        requested_host = urllib.parse.urlsplit(page_url).netloc.lower()
+        final_host = urllib.parse.urlsplit(final_url or page_url).netloc.lower()
+        if final_url and final_host and final_host != requested_host and failure is None:
+            key = f"{self.name}|redirect|{final_host}"
+            if key not in _SITE_STATE_LOGGED_AT:
+                _SITE_STATE_LOGGED_AT[key] = time.monotonic()
+                LOGGER.info(
+                    "provider %s: index page moved from host=%s to host=%s; following the redirect "
+                    "(set the provider domain to the new host to skip it)",
+                    self.name, requested_host, final_host,
+                )
+        self._page_fetch_state[page_url] = {"final_url": final_url or page_url, "failure": failure}
 
     @staticmethod
     def _anchor_context(anchor) -> str:
@@ -219,14 +347,22 @@ class HtmlAggregatorProvider(Provider):
         candidate = urllib.parse.urljoin(page_url, href)
         if not _validate_upstream_url(candidate):
             return False
-        base_host = urllib.parse.urlparse(self.base_url).netloc.lower()
-        if urllib.parse.urlparse(candidate).netloc.lower() != base_host:
+        # The provider's own host, plus the host the page was actually served
+        # from when the site redirected its index page to a new domain.
+        site_hosts = {
+            urllib.parse.urlparse(self.base_url).netloc.lower(),
+            urllib.parse.urlparse(page_url).netloc.lower(),
+        }
+        if urllib.parse.urlparse(candidate).netloc.lower() not in site_hosts:
             return False
         if candidate.rstrip("/") == page_url.rstrip("/"):
             return False
-        if self.event_path_hints and not any(hint in candidate.lower() for hint in self.event_path_hints):
-            return False
-        return True
+        if not (self.event_path_hints or self.event_path_patterns):
+            return True
+        if any(hint in candidate.lower() for hint in self.event_path_hints):
+            return True
+        path = urllib.parse.urlparse(candidate).path
+        return any(pattern.search(path) for pattern in self.event_path_patterns)
 
     async def _fetch_html(
         self,
@@ -252,12 +388,16 @@ class HtmlAggregatorProvider(Provider):
         # Resolved via _engine at call time (not the from-import above) so tests
         # patching scrapers.fetch_bounded_text keep working, same as the other
         # _engine.* tunables.
+        info: Dict[str, Any] = {}
         page_html = await _engine.fetch_bounded_text(
             client,
             page_url,
             headers={"User-Agent": DEFAULT_USER_AGENT, "Referer": self.base_url},
             timeout=8.0,
+            info=info,
         )
+        final_url = str(info.get("final_url") or page_url)
+        failure = None if page_html else classify_fetch_failure(info)
         if not page_html and browser and browser.is_connected():
             try:
                 async with playwright_page(browser, user_agent=DEFAULT_USER_AGENT) as page:
@@ -270,8 +410,14 @@ class HtmlAggregatorProvider(Provider):
                         except Exception:
                             pass
                     page_html = await page.content()
+                    rendered_url = getattr(page, "url", "")
+                    if isinstance(rendered_url, str) and rendered_url.startswith(("http://", "https://")):
+                        final_url = rendered_url
+                    if page_html:
+                        failure = None
             except Exception as exc:
                 _engine._log_bypass_failure_throttled(self.name, page_url, exc)
+        self._record_page_fetch(page_url, final_url, failure)
         return page_html
 
     async def _fetch_index_page(self, client: httpx.AsyncClient, page_url: str, browser: Optional[Browser]) -> Optional[str]:
@@ -362,10 +508,21 @@ class HtmlAggregatorProvider(Provider):
 
         async def process(page_url: str) -> None:
             page_html = await _engine._get_cached_index_html(page_url, lambda pu=page_url: fetch_page(client, pu, browser))
+            fetch_state = self._page_fetch_state.get(page_url, {})
             if not page_html:
-                telemetry.report_page_error("no_content")
+                state, detail = fetch_state.get("failure") or ("no_content", "empty response")
+                telemetry.report_page_error(state)
+                log_site_state(self.name, state, detail, page_url)
                 return
-            await asyncio.to_thread(parse_matches, page_html, page_url, search_terms, matches, seen_matches)
+            page_state = classify_page_html(page_html)
+            if page_state is not None:
+                # A bot check or a parked domain: nothing to parse, and no
+                # attempt to get past it. Say so instead of "0 events".
+                telemetry.report_page_error(page_state[0])
+                log_site_state(self.name, page_state[0], page_state[1], self._effective_page_url(page_url))
+                return
+            effective_url = self._effective_page_url(page_url)
+            await asyncio.to_thread(parse_matches, page_html, effective_url, search_terms, matches, seen_matches)
 
         for page_url in self.get_scan_urls():
             if catch_page_errors:
@@ -379,6 +536,13 @@ class HtmlAggregatorProvider(Provider):
             if len(matches) >= _engine.MAX_PROVIDER_EVENTS:
                 break
         telemetry.report_matches(len(matches))
+        run = telemetry.current_run()
+        if run is not None and run.index_pages and not run.index_events and not run.page_errors:
+            # Every page loaded but none listed an event link: either a quiet
+            # day or (when it persists) a layout the link rules no longer fit.
+            log_site_state(
+                self.name, "no_event_links", f"{run.index_pages} page(s) read", self.base_url, level=logging.INFO
+            )
         return matches
 
     async def _find_matches(self, client: httpx.AsyncClient, search_terms: List[str], browser: Optional[Browser] = None) -> List[tuple[str, int, str]]:

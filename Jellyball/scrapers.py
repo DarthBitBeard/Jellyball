@@ -74,6 +74,7 @@ async def _verify_provider_streams(streams: List[dict], http_client: Optional[ht
     client = http_client or httpx.AsyncClient(follow_redirects=False, timeout=12.0)
     try:
         verify_semaphore = asyncio.Semaphore(VERIFY_STREAM_CONCURRENCY)
+        reasons: List[str] = []
 
         async def verify_one(stream: dict) -> Optional[dict]:
             try:
@@ -105,9 +106,13 @@ async def _verify_provider_streams(streams: List[dict], http_client: Optional[ht
                     reject.get("reason", "unknown"),
                     str(stream.get("match_title", ""))[:60],
                 )
+                reasons.append(str(reject.get("reason", "unknown")))
             return stream if is_live else None
 
         results = await asyncio.gather(*(verify_one(stream) for stream in streams), return_exceptions=True)
+        # Lets the engine tell "found nothing" from "found streams that all
+        # failed verification" (and demote a provider that only does the latter).
+        telemetry.report_verification(len(streams), reasons)
         return [result for result in results if isinstance(result, dict)]
     finally:
         if owns_client:
@@ -364,6 +369,11 @@ BUILTIN_PROVIDER_MIRRORS: Dict[str, List[str]] = {
         "https://dlhd.so",
         "https://dlive.sx",
         "https://daddylive.app",
+    ],
+    # StreamEast's old default domain; it redirected to streameast.cool (the
+    # current default) in November 2026, so it may point at the next move too.
+    "StreamEast": [
+        "https://thestreameast.top",
     ],
 }
 
@@ -847,7 +857,21 @@ async def master_scrape(
                     provider.name, elapsed_ms, success=True,
                     outcome=outcome, error_class=error_class, run=run,
                 )
-                _provider_breaker_success(provider.name)
+                if outcome == "error":
+                    # The search ran but was useless: the index page could not
+                    # be read (site down, blocked, parked) or every stream it
+                    # found failed verification. Count it toward the circuit
+                    # breaker so a dead or unplayable provider stops costing
+                    # every team's search its full timeout.
+                    _provider_breaker_failure(provider.name)
+                    if error_class == "rejected" and run is not None:
+                        LOGGER.warning(
+                            "provider %s: all %d stream candidate(s) rejected by verification (reason=%s); "
+                            "counting a circuit-breaker failure",
+                            provider.name, run.candidates, telemetry.common_reject_reason(run),
+                        )
+                else:
+                    _provider_breaker_success(provider.name)
                 LOGGER.info(
                     "Provider returned provider=%s team=%s streams=%d outcome=%s index_events=%d matches=%d elapsed_ms=%d",
                     provider.name, display_title, len(res), outcome,
@@ -879,7 +903,10 @@ async def master_scrape(
             outcome, error_class = telemetry.derive_outcome(res, run, exc=exc_seen, timed_out=timed_out)
             telemetry.finish_run(provider.name, outcome, error_class, run, elapsed, len(res))
             provider_alerts.check_soon(provider.name, _provider_breaker_open(provider.name))
-            if (exc_seen is not None or timed_out) and _provider_breaker_open(provider.name):
+            # A mirror can help when the site itself failed (exception, timeout,
+            # unreadable index page), not when its streams were rejected.
+            site_failed = exc_seen is not None or timed_out or (outcome == "error" and error_class != "rejected")
+            if site_failed and _provider_breaker_open(provider.name):
                 _maybe_probe_provider_mirrors(provider.name)
 
     async def _search_and_report(provider):
