@@ -11,5 +11,8 @@ class OneStreamScraper(HtmlAggregatorProvider):
             "1Stream",
             os.getenv("AGGREGATOR_10_URL", "https://1stream.ws"),
             [],
-            ["/match/", "/stream/", "/live/"],
+            # Event pages are /<league>/<teams>-live-stream/<id> (issue #49).
+            # The per-sport pages hide their schedule in obfuscated script, so
+            # only the home page's listing is read.
+            ["/match/", "/stream/", "/live/", "-live-stream/"],
         )

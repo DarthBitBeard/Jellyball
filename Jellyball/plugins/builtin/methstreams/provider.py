@@ -10,6 +10,8 @@ class MethStreamsScraper(HtmlAggregatorProvider):
         super().__init__(
             "MethStreams",
             os.getenv("AGGREGATOR_3_URL", "https://methstreams.click"),
-            [],
+            # The home page only links the per-sport schedules; the events
+            # (/live/<sport>/<slug>) are listed on these pages (issue #49).
+            ["/nflstreams", "/nbastreams", "/nhlstreams", "/mlbstreams", "/cfbstreams", "/ncaabstreams", "/soccerstreams"],
             ["/game/", "/match/", "/live/"],
         )
