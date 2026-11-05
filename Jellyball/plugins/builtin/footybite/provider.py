@@ -11,5 +11,6 @@ class FootybiteScraper(HtmlAggregatorProvider):
             "Footybite",
             os.getenv("AGGREGATOR_9_URL", "https://footybite.im"),
             [],
-            ["/watch/", "/stream/", "/live/", "/match/"],
+            # Event pages moved to /game/<slug> (issue #49).
+            ["/watch/", "/stream/", "/live/", "/match/", "/game/"],
         )
