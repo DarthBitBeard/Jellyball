@@ -29,13 +29,13 @@ from fastapi.templating import Jinja2Templates
 import diagnostics
 import http_hardening
 from alerts import get_jellyfin_config, refresh_jellyfin_guide
-from catalog import get_catalog_entries
+from catalog import catalog_group_key, get_catalog_entries
 from channels import _set_catalog_entry_enabled
 from config import _log_failure, _public_base_url, _resource_path, _validate_upstream_url
 from dashboard_cards import Card, register_card
 from db import set_setting_async
 from jellyfin_client import refresh_guide
-from leagues import LEAGUES
+from leagues import LEAGUES, OPTIONAL_CATALOG_GROUPS
 from routes_dashboard import _catalog_selection_changes
 from security import verify_dashboard_auth
 from state import stream_state
@@ -55,13 +55,17 @@ async def _setup_needed() -> bool:
 
 def _catalog_groups(entries: List[dict], active_keys: Set[str]) -> List[dict]:
     """Same grouping as the dashboard catalog picker: one section per league."""
-    group_defs = (*((league.key, league.group_title) for league in LEAGUES), ("special", "Always-Live Sports Channels"))
+    group_defs = (
+        *((league.key, league.group_title) for league in LEAGUES),
+        ("special", "Always-Live Sports Channels"),
+        *OPTIONAL_CATALOG_GROUPS,
+    )
     groups = []
     for group_key, group_label in group_defs:
         group_entries = [
             entry
             for entry in entries
-            if ("special" if entry["content_type"] == "channel" else entry["category"]) == group_key
+            if catalog_group_key(entry) == group_key
         ]
         if not group_entries:
             continue

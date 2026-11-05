@@ -35,8 +35,8 @@ import catalog
 import dashboard_cards
 import epg
 import provider_telemetry
-from catalog import _season_resume_label, get_catalog_entries
-from leagues import LEAGUES
+from catalog import _season_resume_label, catalog_group_key, get_catalog_entries
+from leagues import LEAGUES, OPTIONAL_CATALOG_GROUPS, OPTIONAL_GROUPS_SETTING, parse_optional_groups
 from alerts import (
     get_jellyfin_config,
     get_notification_config,
@@ -137,12 +137,13 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
     catalog_group_defs = (
         *((league.key, league.group_title) for league in LEAGUES),
         ("special", "Always-Live Sports Channels"),
+        *OPTIONAL_CATALOG_GROUPS,
     )
     catalog_groups = []
     for group_key, group_label in catalog_group_defs:
         group_entries = [
             entry for entry in catalog_entries
-            if ("special" if entry["content_type"] == "channel" else entry["category"]) == group_key
+            if catalog_group_key(entry) == group_key
         ]
         if not group_entries:
             continue
@@ -330,6 +331,10 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         "catalog_entries_count": len(catalog_entries),
         "active_catalog_count": len(active_catalog_keys),
         "catalog_groups": catalog_groups,
+        "optional_catalog_groups": [
+            {"key": key, "label": label, "enabled": key in catalog.ENABLED_OPTIONAL_GROUPS}
+            for key, label in OPTIONAL_CATALOG_GROUPS
+        ],
         "favorites": favorites_channels,
         "others": other_channels,
         "multiview": multiview,
@@ -508,6 +513,20 @@ async def apply_catalog(
     if changed_count:
         _spawn_background_task(trigger_jellyfin_refresh(), "refresh Jellyfin guide after catalog apply")
     return RedirectResponse(url=f"/?tab=channels&status=catalog_applied&changed={changed_count}", status_code=303)
+
+
+@router.post("/catalog/optional-groups")
+async def set_optional_catalog_groups(
+    groups: Optional[List[str]] = Form(None),
+    auth: bool = Depends(verify_dashboard_auth),
+):
+    """Choose which opt-in leagues and channel groups the catalog offers.
+    Turning one off only hides it from the catalog: channels already enabled
+    from it keep running until they are disabled in the channel list."""
+    enabled = parse_optional_groups(",".join(groups or []))
+    await set_setting_async(OPTIONAL_GROUPS_SETTING, ",".join(enabled))
+    catalog.set_enabled_optional_groups(",".join(enabled))
+    return RedirectResponse(url="/?tab=channels&status=catalog_groups_saved", status_code=303)
 
 
 @router.post("/catalog/toggle")

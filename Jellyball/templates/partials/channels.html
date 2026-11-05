@@ -83,6 +83,23 @@
     <h3>Sports Catalog</h3>
     <p class="hint-text">Turn on exact teams or always-live sports channels. Disabled entries are not scraped and do not appear in the Jellyfin playlist.</p>
     <p class="hint-text">{{ catalog_source_text }} Available entries: {{ catalog_entries_count }}. Select as many entries as needed, then apply them together.</p>
+    <details class="catalog-group" id="optional-catalog-groups">
+        <summary><span>More leagues &amp; channel groups (opt-in)</span><span class="badge">{{ optional_catalog_groups | selectattr('enabled') | list | length }} on</span></summary>
+        <form action="/catalog/optional-groups" method="post" style="padding: 0.5rem 0;">
+            <p class="hint-text">Show these in the catalog below. Turning a group off only hides it here; channels you already enabled from it keep running until you disable them. CFL and PWHL have no schedule source, so their channels keep searching throughout their season.</p>
+            <div class="catalog-grid">
+                {% for group in optional_catalog_groups %}
+                <div class="catalog-item">
+                    <label class="catalog-toggle">
+                        <input type="checkbox" name="groups" value="{{ group.key }}" {{ 'checked' if group.enabled else '' }} aria-label="Show {{ group.label }} in the catalog">
+                        <span class="catalog-name">{{ group.label }}</span>
+                    </label>
+                </div>
+                {% endfor %}
+            </div>
+            <div class="catalog-actions"><button type="submit">Save Catalog Leagues</button></div>
+        </form>
+    </details>
     <form action="/catalog/apply" method="post" id="catalog-form">
         <input id="catalog-filter" class="catalog-filter" type="text" placeholder="Filter teams and channels..." oninput="filterCatalog(this.value)">
         <div id="catalog-filter-empty" class="hint-text" style="display: none; padding: 0.5rem 0;">No catalog entries match &ldquo;<span id="catalog-filter-query"></span>&rdquo;. <button type="button" onclick="clearCatalogFilter()" style="width: auto; padding: 0.25rem 0.6rem; font-size: 0.8rem; background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 6px; cursor: pointer;">Clear filter</button></div>

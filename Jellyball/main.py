@@ -58,6 +58,7 @@ import http_hardening
 import scrapers
 import catalog
 from catalog import _special_channel_for, _sport_labeled_name, resolve_espn_logo
+from leagues import OPTIONAL_GROUPS_SETTING
 from updates import update_check_loop
 import provider_tools
 import legacy_proxy
@@ -160,6 +161,7 @@ async def lifespan(app: FastAPI):
     # Advanced settings saved from the dashboard override the env defaults.
     _load_tunable_overrides()
     catalog.SHOW_OFFSEASON_CHANNELS = get_setting("show_offseason_channels", "0") == "1"
+    catalog.set_enabled_optional_groups(get_setting(OPTIONAL_GROUPS_SETTING, ""))
     _spawn_background_task(update_check_loop(), "update check")
     _spawn_background_task(provider_tools.provider_selftest_loop(), "nightly provider self-test")
     stream_state.clear()
