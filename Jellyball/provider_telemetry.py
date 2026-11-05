@@ -195,24 +195,36 @@ def provider_stats_sync() -> Dict[str, dict]:
     stats: Dict[str, dict] = {}
     try:
         with _db_session() as conn:
-            for provider, ts in conn.execute(
-                "SELECT provider, MAX(timestamp) FROM provider_performance WHERE outcome='ok' GROUP BY provider"
-            ).fetchall():
-                stats.setdefault(provider, {})["last_success"] = ts
+            # The last-success and latest-index_events lookups walk the
+            # (provider, timestamp) index backwards from the newest row and stop at
+            # the first hit. Aggregating them over the whole table instead (MAX ...
+            # GROUP BY, or a correlated "id = (SELECT MAX(id) ...)") reads every row
+            # of the 14-day window, and the correlated form is quadratic: 30k rows
+            # took about 60 s, which made GET / take minutes (issues 49 and 52).
+            providers = [row[0] for row in conn.execute(
+                "SELECT DISTINCT provider FROM provider_performance"
+            ).fetchall()]
+            for provider in providers:
+                row = conn.execute(
+                    "SELECT timestamp FROM provider_performance WHERE provider = ? AND outcome = 'ok' "
+                    "ORDER BY timestamp DESC LIMIT 1", (provider,)
+                ).fetchone()
+                if row is not None and row[0] is not None:
+                    stats.setdefault(provider, {})["last_success"] = row[0]
+                row = conn.execute(
+                    "SELECT index_events, timestamp FROM provider_performance "
+                    "WHERE provider = ? AND index_events IS NOT NULL "
+                    "ORDER BY timestamp DESC, id DESC LIMIT 1", (provider,)
+                ).fetchone()
+                if row is not None:
+                    entry = stats.setdefault(provider, {})
+                    entry["index_events"] = row[0]
+                    entry["index_events_at"] = row[1]
             for provider, outcome, count in conn.execute(
                 "SELECT provider, COALESCE(outcome, CASE success WHEN 1 THEN 'ok' ELSE 'error' END), COUNT(*) "
                 "FROM provider_performance WHERE timestamp > datetime('now', '-1 day') GROUP BY 1, 2"
             ).fetchall():
                 stats.setdefault(provider, {}).setdefault("outcomes_24h", {})[outcome] = count
-            for provider, events, ts in conn.execute(
-                "SELECT p.provider, p.index_events, p.timestamp FROM provider_performance p "
-                "WHERE p.index_events IS NOT NULL AND p.id = ("
-                "  SELECT MAX(id) FROM provider_performance q "
-                "  WHERE q.provider = p.provider AND q.index_events IS NOT NULL)"
-            ).fetchall():
-                entry = stats.setdefault(provider, {})
-                entry["index_events"] = events
-                entry["index_events_at"] = ts
     except Exception as exc:  # noqa: BLE001 - a dashboard read must not raise
         _log_failure("read provider stats", exc)
     return stats
