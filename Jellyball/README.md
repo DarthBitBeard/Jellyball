@@ -377,6 +377,8 @@ Webhook delivery retries up to twice (honoring `Retry-After`, capped at
 | `PROVIDER_BREAKER_COOLDOWN` | `120` | Breaker cooldown (s) | Adv |
 | `MAX_STREAM_CANDIDATES` | `24` | Max stream candidates kept per channel | Adv |
 | `VERIFY_STREAM_CONCURRENCY` | `6` | Concurrent stream-liveness verifications | |
+| `CPU_PARSE_WORKERS` | `1` | Threads for parsing provider pages (CPU-bound; more threads do not speed it up, they starve the dashboard) | |
+| `GIL_SWITCH_INTERVAL_MS` | `0.5` | Python thread switch interval (ms); lower keeps the dashboard responsive while pages are parsed | |
 | `SCRAPE_INDEX_CACHE_SECONDS` | `60` | TTL for cached/single-flighted aggregator index pages | |
 | `PLAYWRIGHT_RECYCLE_HOURS` | `6` | Recycle the shared headless Chromium after this long (0 disables) | |
 | `PLAYWRIGHT_MAX_PAGES` | `3` | Max concurrent Playwright pages across all scrapers | |
