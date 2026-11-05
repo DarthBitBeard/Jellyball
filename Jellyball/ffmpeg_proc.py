@@ -24,6 +24,25 @@ from state import _spawn_background_task
 from network_safety import bounded_float
 
 
+def _jellyfin_service_dir() -> Optional[Path]:
+    """Folder of the installed Jellyfin Server service executable (Windows), or None."""
+    try:
+        import winreg
+    except ImportError:
+        return None
+    for service in ("JellyfinServer", "Jellyfin"):
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, rf"SYSTEM\CurrentControlSet\Services\{service}") as key:
+                image_path, _ = winreg.QueryValueEx(key, "ImagePath")
+        except OSError:
+            continue
+        text = os.path.expandvars(str(image_path)).strip()
+        exe = text[1:].split('"', 1)[0] if text.startswith('"') else text.split(" ", 1)[0]
+        if exe:
+            return Path(exe).parent
+    return None
+
+
 def _jellyfin_ffmpeg_path() -> Optional[str]:
     """Jellyfin's own ffmpeg build, when Jellyball runs on the Jellyfin server."""
     candidates: List[Path] = []
@@ -31,6 +50,12 @@ def _jellyfin_ffmpeg_path() -> Optional[str]:
         for root in (os.getenv("ProgramW6432"), os.getenv("ProgramFiles"), r"C:\Program Files"):
             if root:
                 candidates.append(Path(root) / "Jellyfin" / "Server" / "ffmpeg.exe")
+        # Jellyfin's installer lets you pick the folder (C:\Jellyfin\Server is
+        # common, #48); its service records where jellyfin.exe lives.
+        candidates.append(Path(r"C:\Jellyfin\Server\ffmpeg.exe"))
+        service_dir = _jellyfin_service_dir()
+        if service_dir is not None:
+            candidates.insert(0, service_dir / "ffmpeg.exe")
     else:
         candidates += [Path("/usr/lib/jellyfin-ffmpeg/ffmpeg"), Path("/usr/share/jellyfin-ffmpeg/ffmpeg")]
     for candidate in candidates:

@@ -23,7 +23,20 @@ from config import LOGGER
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 BUILTIN_DIR = PLUGIN_DIR / "builtin"
-THIRD_PARTY_DIR = PLUGIN_DIR / "third_party"
+
+
+def _third_party_dir() -> Path:
+    """Where third-party plugins are hot-loaded from. In the packaged app the
+    bundle sits under Program Files (read-only for the service and replaced on
+    every upgrade), so use the data folder there instead."""
+    if getattr(sys, "frozen", False):
+        from config import DATA_DIR
+
+        return Path(DATA_DIR) / "plugins" / "third_party"
+    return PLUGIN_DIR / "third_party"
+
+
+THIRD_PARTY_DIR = _third_party_dir()
 
 # Deterministic load order for built-ins, matching the historical
 # ACTIVE_PROVIDERS order so rankings and dashboard positions don't shift.
@@ -159,6 +172,19 @@ def _import_plugin_module(slug: str, origin: str, plugin_dir: Path, module_file:
     return module
 
 
+def _entry_module_exists(slug: str, origin: str, plugin_dir: Path, module_file: str) -> bool:
+    """Built-ins are imported by module name, so ask the import system: in the
+    packaged app their code lives in PyInstaller's archive, not as .py files
+    next to the manifest (checking the file made every built-in fail there).
+    Third-party plugins load from their file, so that must exist."""
+    if origin == "builtin":
+        try:
+            return importlib.util.find_spec(f"plugins.builtin.{slug}.{Path(module_file).stem}") is not None
+        except (ImportError, ValueError):
+            return False
+    return (plugin_dir / module_file).is_file()
+
+
 def _load_one(slug: str, origin: str, plugin_dir: Path) -> Optional[PluginRecord]:
     from plugins import sdk
 
@@ -172,7 +198,7 @@ def _load_one(slug: str, origin: str, plugin_dir: Path) -> Optional[PluginRecord
     if manifest is None:
         return None
     module_file, class_name = _ENTRY_RE.match(manifest["entry"]).groups()  # type: ignore[union-attr]
-    if not (plugin_dir / module_file).is_file():
+    if not _entry_module_exists(slug, origin, plugin_dir, module_file):
         _record_error(slug, origin, f"entry module '{module_file}' not found")
         return None
     try:
@@ -234,6 +260,15 @@ def _iter_plugin_dirs() -> List[tuple]:
     return ordered
 
 
+def _warn_if_no_builtins(records: List["PluginRecord"]) -> None:
+    if not any(record.builtin for record in records):
+        LOGGER.error(
+            "No built-in provider plugins were loaded (looked in %s); stream searches will find nothing. "
+            "This is a packaging problem: reinstall, or report it with this log line",
+            BUILTIN_DIR,
+        )
+
+
 def load_plugins() -> List[PluginRecord]:
     """Discover, validate, and instantiate every plugin. Safe to call more than
     once; each call re-scans and rebuilds the registry (used by Reload)."""
@@ -257,6 +292,7 @@ def load_plugins() -> List[PluginRecord]:
             record.version,
             record.origin,
         )
+    _warn_if_no_builtins(_PLUGIN_RECORDS)
     return list(_PLUGIN_RECORDS)
 
 

@@ -43,6 +43,8 @@ CHECKS = (
     ("/static/dashboard.css", lambda body: len(body) > 100),
     ("/playlist.m3u", lambda body: body.startswith("#EXTM3U")),
     ("/epg.xml", lambda body: "<tv" in body),
+    # The bundle must carry the provider plugins (3.0.0 shipped without them, #48).
+    ("/api/providers", lambda body: body.count('"name"') >= 5),
 )
 
 
