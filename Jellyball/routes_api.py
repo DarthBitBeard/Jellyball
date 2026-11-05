@@ -24,6 +24,7 @@ from db import (
 )
 from security import verify_dashboard_auth
 from catalog import _season_resume_label, get_catalog_entries, is_stream_window_active
+from leagues import OPTIONAL_GROUP_KEYS
 from jellyfin_client import load_status as load_jellyfin_status
 from updates import _update_available, _UPDATE_STATE
 import engine_stats
@@ -444,7 +445,9 @@ async def import_config(file: Request, auth: bool = Depends(verify_dashboard_aut
     except Exception as exc:
         _log_failure("import config", exc)
         raise HTTPException(status_code=400, detail="Import failed: not a Jellyball export")
-    result = await config_transfer.apply_import(body, await get_catalog_entries())
+    # Every opt-in group, so an exported opt-in channel resolves even when the
+    # group is turned off here.
+    result = await config_transfer.apply_import(body, await get_catalog_entries(OPTIONAL_GROUP_KEYS))
     return JSONResponse(result)
 
 
