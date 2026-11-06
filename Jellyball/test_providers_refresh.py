@@ -367,19 +367,5 @@ class DaddyLiveStopsWhenEveryManifestIsRejectedTests(OfflineCase):
         self.assertEqual([s["url"] for s in result], [good["url"]])  # deduplicated; all five channels were tried
 
 
-
-
-class PinnedUrlHintTests(unittest.TestCase):
-    def test_a_failing_host_from_an_aggregator_setting_is_called_out(self):
-        from unittest.mock import patch
-
-        import plugins.sdk as sdk
-
-        with patch.dict("os.environ", {"AGGREGATOR_4_URL": "https://old.example.test"}):
-            self.assertIn("AGGREGATOR_4_URL", sdk._pinned_url_hint("old.example.test"))
-            self.assertEqual(sdk._pinned_url_hint("other.example.test"), "")
-            self.assertEqual(sdk._pinned_url_hint(""), "")
-
-
 if __name__ == "__main__":
     unittest.main()

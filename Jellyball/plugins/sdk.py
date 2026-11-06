@@ -10,7 +10,6 @@ API_VERSION = 1
 
 import asyncio
 import logging
-import os
 import re
 import time
 import urllib.parse
@@ -175,18 +174,6 @@ def classify_fetch_failure(info: Dict[str, Any]) -> Tuple[str, str]:
     return "no_content", "empty response"
 
 
-def _pinned_url_hint(host: str) -> str:
-    """When the failing host comes from an AGGREGATOR_<n>_URL setting, say so:
-    a value saved in .env overrides the provider's built-in default, so an old
-    domain stays in use after the app ships a new one."""
-    if not host:
-        return ""
-    for name, value in sorted(os.environ.items()):
-        if name.startswith("AGGREGATOR_") and name.endswith("_URL") and urllib.parse.urlsplit(value).netloc == host:
-            return f" hint=this address comes from {name} in your .env, which overrides the built-in default; remove that line to use the current default"
-    return ""
-
-
 def log_site_state(provider_name: str, state: str, detail: str, page_url: str, level: int = logging.WARNING) -> None:
     """One log line (WARNING by default) per provider/state per 15 minutes,
     DEBUG for the repeats. Logs only the host and path, never the query."""
@@ -199,8 +186,8 @@ def log_site_state(provider_name: str, state: str, detail: str, page_url: str, l
         _SITE_STATE_LOGGED_AT[key] = now
         LOGGER.log(
             level,
-            "provider %s: %s (%s) host=%s path=%s%s",
-            provider_name, message, detail, parts.netloc, parts.path or "/", _pinned_url_hint(parts.netloc),
+            "provider %s: %s (%s) host=%s path=%s",
+            provider_name, message, detail, parts.netloc, parts.path or "/",
         )
     else:
         LOGGER.debug("provider %s: %s again (%s) host=%s", provider_name, message, detail, parts.netloc)

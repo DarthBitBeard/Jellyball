@@ -122,16 +122,6 @@ for _dashboard_dir_name in ("templates", "static"):
             if _path.is_file():
                 datas.append((str(_path), str(Path(_dashboard_dir_name) / _path.relative_to(_dashboard_dir).parent)))
 
-# Provider plugins (3.0): plugins/__init__.py finds them by scanning
-# plugins/builtin/*/manifest.json on disk and imports each provider module by
-# name, so PyInstaller's import tracing sees neither. Ship the manifests (and
-# any other non-Python file) as data and every plugin module as a hidden
-# import; without this the 3.0.0 installer had no providers at all (#48).
-_plugins_dir = ROOT / "plugins"
-for _path in _plugins_dir.rglob("*"):
-    if _path.is_file() and _path.suffix not in (".py", ".pyc") and "__pycache__" not in _path.parts:
-        datas.append((str(_path), str(Path("plugins") / _path.relative_to(_plugins_dir).parent)))
-
 # Opt-in league team seeds, read by optional_leagues from <bundle>/league_seeds.
 for _seed_path in sorted((ROOT / "league_seeds").glob("*.json")):
     datas.append((str(_seed_path), "league_seeds"))

@@ -1,0 +1,1 @@
+Opt-in soccer leagues (issue #46): MLS, English Premier League and UEFA Champions League teams can be turned on under "More leagues & channel groups" in the Sports Catalog. Nothing changes for existing setups until a league is turned on; the lists are bundled with Jellyball and use ESPN team ids, and game times come from ESPN fixtures.
