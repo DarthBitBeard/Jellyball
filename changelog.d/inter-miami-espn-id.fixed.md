@@ -1,1 +1,0 @@
-The hand-mapped Inter Miami entry used ESPN team 10739, which is the Philadelphia Union; it now uses Inter Miami CF (20232) for its schedule and logo. ESPN soccer schedules are requested with fixtures so upcoming games are found.

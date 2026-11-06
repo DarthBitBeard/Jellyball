@@ -5,6 +5,33 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+## [3.0.2] - 2026-11-05
+
+### Added
+
+- Opt-in CFL and PWHL teams (issue #45), turned on the same way. ESPN stopped publishing CFL schedules after 2022 and has no PWHL data, so these channels have no game times: they keep searching for the team throughout the league season instead of only around games.
+- A WARNING (`Event loop blocked for N s`, naming the running task and the code it is stuck in) is logged when the server loop is blocked for more than a second, and again when it recovers. New settings CPU_PARSE_WORKERS and GIL_SWITCH_INTERVAL_MS; docs/DOCKER.md has recommended CPU, memory and concurrency settings for 150+ channels.
+- Opt-in soccer leagues (issue #46): MLS, English Premier League and UEFA Champions League teams can be turned on under "More leagues & channel groups" in the Sports Catalog. Nothing changes for existing setups until a league is turned on; the lists are bundled with Jellyball and use ESPN team ids, and game times come from ESPN fixtures.
+- Opt-in "UK Sports Channels" group (issue #46): always-live Sky Sports (Main Event, Premier League, Football, Cricket, Golf, F1, Action, Tennis, Mix, News, Racing), TNT Sports 1-4 UK and Premier Sports 1-2, each matching only its own provider listing. The US TNT Sports channel no longer picks up provider channels named like "TNT Sports 1 UK".
+
+### Fixed
+
+- Team titles with accents ("Montréal") now match their plain spelling.
+- Streams a provider found for a game listed as a card with a generic "Watch" link (iSportSurge, and any aggregator matched on the card text) are no longer dropped before becoming candidates, so a channel gets every verified stream for the game as a standby. The log now says at INFO why returned streams were dropped and how many candidates a scrape produced (#48).
+- The dashboard (GET /) could take minutes to load with many channels while /healthz and /api/status answered at once (issues 49 and 52). The provider statistics query behind the Performance tab scaled with the square of the stored history (30,000 rows took about a minute) and is now linear; provider page parsing no longer queues in the worker pool that the dashboard reads from, and a thread switch interval of 0.5 ms keeps the page responsive while pages are parsed. With 150 channels and 40 queued parse jobs the dashboard now renders in about 0.3 s instead of tens of seconds.
+- The Windows installer build contains its stream providers again. 3.0.0 packaged
+  none of the provider plugins, so the installed app showed "No providers" and
+  every search found nothing (#48). The release build now checks that the
+  providers load, and a build without them logs an error saying so.
+- The hand-mapped Inter Miami entry used ESPN team 10739, which is the Philadelphia Union; it now uses Inter Miami CF (20232) for its schedule and logo. ESPN soccer schedules are requested with fixtures so upcoming games are found.
+- Jellyfin's ffmpeg is also found when Jellyfin is installed outside Program
+  Files (for example `C:\Jellyfin\Server`): Jellyball reads the folder from the
+  Jellyfin Server service. Third-party plugins in the installed app load from
+  the data folder's `plugins\third_party`, which upgrades keep.
+- Built-in providers that listed 0 events are repaired or now say why: TheTVApp reads the new home-page match list, StreamEast follows its new domain and event URLs, Footybite, 1Stream and MethStreams match their new event links, and a provider whose site blocks automated access, is a parked domain, is unreachable, or whose every stream is rejected is reported with that reason in the logs and provider health and is demoted by the circuit breaker instead of consuming search time.
+- A channel whose source stalls no longer loops on "Retrying the same source": after the retry limit it fails over, and an exhausted channel is not put straight back on the source playback just gave up on because its playlist still answers. Playlists whose media sequence never advances (or whose segment URLs are re-signed on every request) are followed by segment identity instead of being judged stale, a playlist URL that answers a non-HLS page is reported as "playlist not HLS", and the health probe no longer passes an extensionless playlist endpoint on its HEAD content type alone (#48).
+- Team channels no longer search IPTV-Org, which only lists 24/7 linear channels: the Packers' "gb" alias matched a snooker channel's region code (#48). Plugins can set `carries_team_events = False` for the same behaviour.
+
 ## [3.0.1] - 2026-11-05
 
 ### Added

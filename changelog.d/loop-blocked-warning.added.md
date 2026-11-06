@@ -1,1 +1,0 @@
-A WARNING (`Event loop blocked for N s`, naming the running task and the code it is stuck in) is logged when the server loop is blocked for more than a second, and again when it recovers. New settings CPU_PARSE_WORKERS and GIL_SWITCH_INTERVAL_MS; docs/DOCKER.md has recommended CPU, memory and concurrency settings for 150+ channels.

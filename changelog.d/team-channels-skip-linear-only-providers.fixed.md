@@ -1,1 +1,0 @@
-Team channels no longer search IPTV-Org, which only lists 24/7 linear channels: the Packers' "gb" alias matched a snooker channel's region code (#48). Plugins can set `carries_team_events = False` for the same behaviour.
