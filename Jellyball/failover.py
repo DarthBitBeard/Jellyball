@@ -35,6 +35,8 @@ from sessions import _is_placeholder_key, candidate_source_key, SESSIONS
 from multiview import _MULTIVIEW_PROCESSES
 from network_safety import bounded_float, bounded_int
 from stream_extractor import verify_stream_live
+import network_games
+from sports_matcher import get_team_search_terms
 
 
 _SCRAPE_IN_FLIGHT: Set[str] = set()
@@ -276,6 +278,25 @@ def _resolve_schedule_status(
     return previous_start, previous_stop, ("always_live" if always_live else "lookup_failed")
 
 
+async def _scrape_network_game(team_id: str, current: dict, game: "network_games.Game", query: str, team_name: str) -> list:
+    """Streams for the game a network channel carries: the game's own event
+    streams first (searched like a team channel, both teams' names), then for a
+    cable network its linear stream, which carries the game too."""
+    terms = list(dict.fromkeys([*get_team_search_terms(game.home, game.home), *get_team_search_terms(game.away, game.away)]))
+    LOGGER.info("Network channel %s searching for %s (%s)", team_id, game.name or game.short_name, game.league)
+    searches = [master_scrape(game.search_query, team_name=game.name, team_id=team_id, search_terms=terms, always_live=False)]
+    if not network_games.is_broadcast_network(current):
+        searches.append(master_scrape(
+            query, team_name=team_name, team_id=team_id, search_terms=current.get("search_terms") or None, always_live=True,
+        ))
+    results = await asyncio.gather(*searches, return_exceptions=True)
+    merged: list = []
+    for result in results:
+        if isinstance(result, list):
+            merged.extend(stream for stream in result if stream not in merged)
+    return merged
+
+
 async def _trigger_scrape_unlocked(team_id: str, force: bool = False):
     if team_id not in stream_state:
         return
@@ -318,6 +339,28 @@ async def _trigger_scrape_unlocked(team_id: str, force: bool = False):
     if current is None:
         return
 
+    # A network channel (ABC, CBS, ESPN, ...) shows the game it carries, not
+    # whatever its linear stream happens to be (network_games).
+    game = network_games.current_game(current, stream_state) if always_live else None
+    if network_games.network_key(current) is not None:
+        game_id = game.event_id if game else ""
+        if game_id != str(current.get("network_game_id") or ""):
+            # The game to show changed (kick-off, final, next game): start over.
+            current["candidates"] = []
+            current["active_index"] = 0
+            current["is_healthy"] = False
+            current["network_game_id"] = game_id
+            current["network_game"] = game.as_dict() if game else None
+            force = True
+        if game is None and network_games.is_broadcast_network(current) and not network_games.AFFILIATE_FALLBACK:
+            # No game on this over-the-air network: the free affiliate streams
+            # carry local news, so show No Signal rather than a random station.
+            current["candidates"] = []
+            current["active_index"] = 0
+            current["is_healthy"] = False
+            current["exhausted"] = False
+            return
+
     if _stream_window_should_close(team_id, current):
         current["candidates"] = []
         current["active_index"] = 0
@@ -338,13 +381,16 @@ async def _trigger_scrape_unlocked(team_id: str, force: bool = False):
         return
 
     previous_candidates = current.get("candidates", [])
-    new_candidates = await master_scrape(
-        query,
-        team_name=team_name,
-        team_id=team_id,
-        search_terms=current.get("search_terms") or None,
-        always_live=always_live,
-    )
+    if game is not None:
+        new_candidates = await _scrape_network_game(team_id, current, game, query, team_name)
+    else:
+        new_candidates = await master_scrape(
+            query,
+            team_name=team_name,
+            team_id=team_id,
+            search_terms=current.get("search_terms") or None,
+            always_live=always_live,
+        )
     current = stream_state.get(team_id)
     if current is None:
         return

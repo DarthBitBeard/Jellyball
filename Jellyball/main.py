@@ -89,6 +89,7 @@ from failover import (
 )
 from channels import enforce_scheduled_disables
 import diaglog
+import network_games
 import provider_settings
 import epg
 from tunables import _load_tunable_overrides
@@ -168,6 +169,7 @@ async def lifespan(app: FastAPI):
     catalog.SHOW_OFFSEASON_CHANNELS = get_setting("show_offseason_channels", "0") == "1"
     catalog.set_enabled_optional_groups(get_setting(OPTIONAL_GROUPS_SETTING, ""))
     _spawn_background_task(update_check_loop(), "update check")
+    _spawn_background_task(network_games.watch_loop(), "network game watch")
     _spawn_background_task(provider_tools.provider_selftest_loop(), "nightly provider self-test")
     stream_state.clear()
     _TEAM_SCRAPE_TASKS.clear()

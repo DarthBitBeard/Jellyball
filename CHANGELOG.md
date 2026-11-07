@@ -5,6 +5,20 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-11-07
+
+### Changed
+
+- Network channels follow the game. While ESPN's scoreboard says a game is on
+  a network (in progress, or starting within 20 minutes), the ABC, CBS, NBC,
+  FOX, ESPN, FS1, SEC Network, Big Ten Network and other network channels
+  search the event providers for that game, the same way a team channel does;
+  cable networks keep their own linear stream as a fallback. When several games
+  share a network (regional NFL on CBS or FOX), the one with a team you have a
+  channel for wins. ABC, CBS, NBC, FOX and The CW show No Signal between games
+  instead of a local station's news stream (`NETWORK_AFFILIATE_FALLBACK=1`
+  keeps the old behaviour).
+
 ## [3.1.1] - 2026-11-07
 
 ### Changed

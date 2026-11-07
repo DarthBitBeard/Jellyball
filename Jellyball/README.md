@@ -492,6 +492,9 @@ All five are also editable in Advanced Settings ("Legacy proxy" group).
 | `STREAM_LANGUAGES` | `eng` | Languages you watch, in order (ISO 639-3 codes or names, e.g. `eng,spa`); the dashboard's Stream Language card overrides it |
 | `STREAM_LANGUAGE_MODE` | `prefer` | `prefer` ranks your languages first and keeps others as a last resort; `only` never uses a stream known to be in another language |
 | `IPTV_ORG_VERIFY_LIMIT` | `12` | How many matching iptv-org streams (best first) are checked per search |
+| `NETWORK_AFFILIATE_FALLBACK` | `0` | `1` lets ABC/CBS/NBC/FOX/The CW use local-affiliate streams between games (usually local news); by default they show No Signal until a game is on |
+| `NETWORK_GAME_LEAD_MINUTES` | `20` | How long before kick-off a network channel switches to the game |
+| `NETWORK_SCOREBOARD_REFRESH_SECONDS` | `120` | How often ESPN's scoreboards are checked for which game each network carries |
 | `DNS_SERVERS` | *(system)* | Resolve internet names through these DNS servers instead of the system's, e.g. `8.8.8.8,9.9.9.9`, so a filter on your own network (Pi-hole, router blocklist) does not block stream hosts for Jellyball. Local names (LAN hosts, `.local`, `.lan`, single-label) still use the system. Chromium and ffmpeg keep the system resolver |
 | `DNS_OVER_HTTPS` | *(off)* | Same, over HTTPS (e.g. `https://dns.google/dns-query`), for networks that redirect or block outbound DNS; wins over `DNS_SERVERS` |
 
