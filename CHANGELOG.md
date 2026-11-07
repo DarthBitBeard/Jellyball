@@ -9,6 +9,13 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ### Added
 
+- Optional per-app DNS: `DNS_SERVERS` (for example `8.8.8.8,9.9.9.9`) or
+  `DNS_OVER_HTTPS` (for example `https://dns.google/dns-query`) make Jellyball
+  resolve internet names through those resolvers, so a DNS filter on your own
+  network does not block stream hosts for Jellyball without opening it for
+  the whole network. Off by default. Local names keep the system resolver, a
+  resolver outage falls back to it, and the startup report shows which DNS is
+  in use. The headless Chromium and ffmpeg still use the system resolver.
 - Stream language preference (Settings tab, Stream Language). Pick your
   languages in order; "Prefer" ranks streams in them first and keeps others as
   a last resort, "Only" never uses a stream known to be in another language

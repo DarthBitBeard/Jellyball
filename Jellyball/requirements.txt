@@ -20,5 +20,6 @@ pystray==0.19.5
 pillow==13.0.0
 bcrypt==5.0.0
 cryptography==50.0.2
+dnspython==2.9.2
 tzdata==2026.6
 pywin32==312; sys_platform == "win32"

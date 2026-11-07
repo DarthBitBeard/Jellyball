@@ -175,6 +175,7 @@ hiddenimports = [
     "tunables",
     "jellyfin_client",
     "dashboard_cards",
+    "dns_override",
     "stream_language",
     "diaglog",
     "routes_stream",
@@ -223,6 +224,7 @@ hiddenimports = [
     "jinja2",
     "markupsafe",
     "cryptography",
+    "dns",
     # pywin32 service support (jellyball_launcher.py --service)
     "win32timezone",
     "win32serviceutil",
@@ -246,6 +248,7 @@ for package_name in [
     "h2",
     "lxml",
     "cryptography",
+    "dns",
 ]:
     try:
         package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
