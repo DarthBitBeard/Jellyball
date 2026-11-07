@@ -15,6 +15,7 @@ import time
 import urllib.parse
 from typing import Any, Dict, Optional, Tuple
 
+import dns_override
 from config import DATA_DIR, LOG_LEVEL_NAME, LOGGER, PORT
 from state import stream_state
 from version import __version__
@@ -168,6 +169,7 @@ def startup_report(extra: Optional[Dict[str, Any]] = None) -> None:
         f"version={__version__} python={platform.python_version()} os={platform.platform()} "
         f"frozen={bool(getattr(sys, 'frozen', False))} pid={os.getpid()}",
         f"data_dir={DATA_DIR} log_level={LOG_LEVEL_NAME} port={PORT}",
+        f"dns={dns_override.describe()}",
         f"ffmpeg={ffmpeg_proc.FFMPEG_PATH} available={ffmpeg_proc.FFMPEG_AVAILABLE} "
         f"version={(ffmpeg_proc.FFMPEG_VERSION_INFO or '-')[:60]}",
         f"multiview_ffmpeg={ffmpeg_proc.MULTIVIEW_FFMPEG_PATH} hwaccel={os.getenv('MULTIVIEW_HWACCEL', 'auto') or 'auto'}",

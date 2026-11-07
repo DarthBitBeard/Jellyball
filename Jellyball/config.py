@@ -277,6 +277,12 @@ from typing import Dict
 load_dotenv(dotenv_path=USER_ENV_FILE)
 load_dotenv(dotenv_path=APP_DIR / ".env")
 
+# Optional per-app DNS (DNS_SERVERS / DNS_OVER_HTTPS): installed before any
+# module resolves a hostname, so every lookup in this process uses it.
+import dns_override  # noqa: E402
+
+dns_override.install_from_env()
+
 # Imported after load_dotenv(): both read settings at import time
 # (JELLYBALL_USER_AGENT, PLAYWRIGHT_MAX_PAGES, DNS_RESOLVE_TIMEOUT), which
 # previously could only come from the real environment, not from .env.
