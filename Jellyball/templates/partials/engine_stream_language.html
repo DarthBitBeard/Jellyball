@@ -1,0 +1,28 @@
+<div class="card" id="engine-stream-language">
+    <h3>Stream Language</h3>
+    <p class="hint-text">Many channels exist in several language editions (for example ESPN, ESPN Latino and ESPN Brasil). Pick the languages you watch, in order. <strong>Prefer</strong> ranks those streams first and keeps others only as a last resort so the channel still plays; <strong>Only</strong> never uses a stream known to be in another language. Streams that do not say their language are always kept. Saving re-searches the 24/7 channels.</p>
+    {% if ctx.error %}
+    <p style="color: var(--danger);">{{ ctx.error }}</p>
+    {% endif %}
+    <form action="/settings/stream-language" method="post" style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
+        <label for="stream_language_1">First choice</label>
+        <select name="stream_language_1" id="stream_language_1">
+            {% for code, label in (ctx.languages or {}).items() %}
+            <option value="{{ code }}" {% if ctx.first == code %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+        <label for="stream_language_2">Second choice</label>
+        <select name="stream_language_2" id="stream_language_2">
+            <option value="" {% if not ctx.second %}selected{% endif %}>None</option>
+            {% for code, label in (ctx.languages or {}).items() %}
+            <option value="{{ code }}" {% if ctx.second == code %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+        <label for="stream_language_mode">Other languages</label>
+        <select name="stream_language_mode" id="stream_language_mode">
+            <option value="prefer" {% if ctx.mode == "prefer" %}selected{% endif %}>Prefer mine, allow others as a last resort</option>
+            <option value="only" {% if ctx.mode == "only" %}selected{% endif %}>Only my languages</option>
+        </select>
+        <button type="submit" class="btn">Save</button>
+    </form>
+</div>

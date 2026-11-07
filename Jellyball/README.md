@@ -489,6 +489,9 @@ All five are also editable in Advanced Settings ("Legacy proxy" group).
 | :--- | :--- | :--- |
 | `PLAYWRIGHT_BROWSERS_PATH` | *(set automatically)* | Playwright's Chromium cache location; override only if you know you need to |
 | `JELLYBALL_LOG_LEVEL` | `INFO` | `DEBUG` adds tracebacks for failures and one line per media segment request; use it while troubleshooting playback, then set it back (the log grows quickly) |
+| `STREAM_LANGUAGES` | `eng` | Languages you watch, in order (ISO 639-3 codes or names, e.g. `eng,spa`); the dashboard's Stream Language card overrides it |
+| `STREAM_LANGUAGE_MODE` | `prefer` | `prefer` ranks your languages first and keeps others as a last resort; `only` never uses a stream known to be in another language |
+| `IPTV_ORG_VERIFY_LIMIT` | `12` | How many matching iptv-org streams (best first) are checked per search |
 
 ### Backups
 

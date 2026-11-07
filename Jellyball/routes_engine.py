@@ -17,6 +17,7 @@ from fastapi.responses import RedirectResponse
 
 import engine_settings
 import engine_stats
+import stream_language
 from dashboard_cards import Card, register_card
 from scrapers import provider_breaker_snapshot
 from security import verify_dashboard_auth
@@ -44,6 +45,52 @@ async def update_audio_language(
     return RedirectResponse(url="/?tab=playback&status=saved", status_code=303)
 
 
+@router.post("/settings/stream-language")
+async def update_stream_language(
+    stream_language_1: str = Form("eng"),
+    stream_language_2: str = Form(""),
+    stream_language_mode: str = Form("prefer"),
+    auth: bool = Depends(verify_dashboard_auth),
+):
+    await asyncio.to_thread(
+        stream_language.save_preference, [stream_language_1, stream_language_2], stream_language_mode
+    )
+    _rescrape_always_live_channels()
+    return RedirectResponse(url="/?tab=playback&status=saved", status_code=303)
+
+
+def _rescrape_always_live_channels() -> None:
+    """Apply a new language choice now: re-sort (and in "only" mode prune) every
+    channel's existing candidates, and re-search the 24/7 channels rather than
+    waiting for their next scheduled refresh."""
+    from config import LOGGER
+    from failover import trigger_scrape
+    from state import _spawn_background_task, stream_state
+
+    dropped = 0
+    for team_id, data in list(stream_state.items()):
+        if data.get("type") == "multiview":
+            continue
+        dropped += stream_language.apply_to_channel(data)
+        if data.get("always_live"):
+            _spawn_background_task(trigger_scrape(team_id, force=True), f"language rescrape {team_id}")
+    LOGGER.info(
+        "Stream language set to %s (%s); removed %d candidate(s) in other languages",
+        ",".join(stream_language.preferred_languages()), stream_language.language_mode(), dropped,
+    )
+
+
+async def _stream_language_context(request: Request) -> dict:
+    languages = await asyncio.to_thread(stream_language.preferred_languages)
+    mode = await asyncio.to_thread(stream_language.language_mode)
+    return {
+        "first": languages[0] if languages else "eng",
+        "second": languages[1] if len(languages) > 1 else "",
+        "mode": mode,
+        "languages": stream_language.LANGUAGES,
+    }
+
+
 async def _audio_language_context(request: Request) -> dict:
     current = await asyncio.to_thread(engine_settings.preferred_audio_language)
     return {"current": current or "", "languages": engine_settings.AUDIO_LANGUAGES}
@@ -64,4 +111,8 @@ register_card(Card(
 register_card(Card(
     tab="playback", name="engine_audio_language", template="partials/engine_audio_language.html",
     context=_audio_language_context, order=20,
+))
+register_card(Card(
+    tab="playback", name="engine_stream_language", template="partials/engine_stream_language.html",
+    context=_stream_language_context, order=19,
 ))

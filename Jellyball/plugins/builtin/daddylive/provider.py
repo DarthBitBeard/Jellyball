@@ -11,6 +11,7 @@ from playwright.async_api import Browser
 
 from config import _log_failure, LOGGER
 import provider_telemetry as telemetry
+import stream_language
 from stream_extractor import DEFAULT_USER_AGENT, make_soup, playwright_page
 from sports_matcher import clean_sports_text, get_team_search_terms
 from plugins.sdk import HtmlAggregatorProvider
@@ -69,7 +70,7 @@ class DaddyLiveScraper(HtmlAggregatorProvider):
             title = str(anchor.get("title") or anchor.get("data-title") or "")
             raw_text = anchor.get_text(" ", strip=True)
             card_text = " ".join(part for part in (raw_text, title, str(anchor.get("aria-label") or "")) if part)
-            if _is_non_english_channel(card_text):
+            if not stream_language.listing_allowed(card_text, _is_non_english_channel):
                 continue
             matched = _channel_term_matches(card_text, search_terms) or _channel_term_matches(href, search_terms)
             score = max(

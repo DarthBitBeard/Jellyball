@@ -228,12 +228,16 @@ def rank_streams(streams: Iterable[Dict], provider_priority: Optional[Dict[str, 
     """Return stream candidates in a deterministic, best-first order.
 
     Match quality is the primary signal: a wrong game in 4K is still wrong.
+    The viewer's stream language preference comes next (stream_language).
     Measured stream quality (variant playlist resolution/bandwidth) comes next,
     then provider priority, while URL hints provide a safe tie-breaker when
     providers return incomplete metadata. Streams without quality data sort
     exactly as they did before quality ranking existed.
     """
     priority = provider_priority or {}
+    import stream_language  # late: stream_language reads settings lazily
+
+    languages = stream_language.preferred_languages()
 
     def sort_key(stream: Dict) -> tuple:
         url = str(stream.get("url") or "")
@@ -252,7 +256,10 @@ def rank_streams(streams: Iterable[Dict], provider_priority: Optional[Dict[str, 
             provider_rank = int(priority.get(str(stream.get("provider", "")), 10_000))
         except (TypeError, ValueError):
             provider_rank = 10_000
-        return (-match_score, -_quality_tier(stream), -_quality_bandwidth(stream), provider_rank, -hls_hint, url)
+        # The viewer's language comes right after match quality: an English 720p
+        # stream beats a Spanish 1080p one for someone who only speaks English.
+        language_rank = stream_language.language_rank(stream, languages)
+        return (-match_score, language_rank, -_quality_tier(stream), -_quality_bandwidth(stream), provider_rank, -hls_hint, url)
 
     return sorted((stream for stream in streams if stream.get("url")), key=sort_key)
 

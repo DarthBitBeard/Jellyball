@@ -12,6 +12,7 @@ from playwright.async_api import Browser
 from config import _log_failure
 from cpu_pool import run_cpu
 import provider_telemetry as telemetry
+import stream_language
 from network_safety import validate_http_url
 from stream_extractor import DEFAULT_USER_AGENT, make_soup, playwright_page
 from sports_matcher import get_team_search_terms, match_team
@@ -86,7 +87,7 @@ class TheTVAppScraper(HtmlAggregatorProvider):
             if not matched:
                 matched, score, _ = match_team(search_terms, text, href=href)
 
-            if matched and not _is_non_english_channel(text):
+            if matched and stream_language.listing_allowed(text, _is_non_english_channel):
                 # Prefer the most specific matching channel when a page
                 # contains both a base network and numbered variants.
                 specificity = max(
