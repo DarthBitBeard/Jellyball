@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import time
 from typing import List, Optional
 
@@ -21,7 +22,25 @@ from scrapers import (
     _verify_provider_streams,
     IPTV_ORG_PLAYLIST_URL_DEFAULT,
     IPTV_ORG_REFRESH_SECONDS,
+    IPTV_ORG_VERIFY_LIMIT,
 )
+import stream_language
+
+
+_RESOLUTION_RE = re.compile(r"\((\d{3,4})[pi]\)")
+
+
+def _entry_rank(candidate: dict, entry: dict, prefs: List[str]) -> tuple:
+    """Best first: the viewer's languages, then a title that does not name
+    another country's edition ("Fox (Poland)" is listed under English too),
+    then streams that run around the clock, then higher resolution."""
+    title = str(candidate.get("match_title") or "")
+    title_language = stream_language.detect_language(title)
+    other_edition = title_language is not None and title_language not in prefs
+    part_time = "not 24/7" in title.casefold()
+    match = _RESOLUTION_RE.search(title)
+    resolution = int(match.group(1)) if match else 0
+    return (stream_language.language_rank(candidate, prefs), other_edition, part_time, -resolution, title)
 
 
 class IptvOrgScraper(Provider):
@@ -78,7 +97,11 @@ class IptvOrgScraper(Provider):
             return []
         telemetry.report_index_events(len(entries))
 
-        candidates = []
+        prefs = stream_language.preferred_languages()
+        only = stream_language.language_mode() == "only"
+        # The language index lists a stream once per language it is in: merge
+        # those into one candidate carrying every language.
+        merged: dict = {}
         for entry in entries:
             name_text = f"{entry.get('tvg_name', '')} {entry.get('display_name', '')}"
             if not _channel_term_matches(name_text, search_terms):
@@ -86,7 +109,16 @@ class IptvOrgScraper(Provider):
             url = _validate_upstream_url(entry.get("url", ""))
             if not url:
                 continue
-            candidates.append({
+            item = merged.setdefault(url, {"entry": entry, "languages": []})
+            code = stream_language.code_for(entry.get("group_title"))
+            if code and code not in item["languages"]:
+                item["languages"].append(code)
+
+        ranked = []
+        for url, item in merged.items():
+            entry = item["entry"]
+            title = entry.get("tvg_name") or entry.get("display_name") or ""
+            candidate = {
                 "url": url,
                 "referer": "",
                 "origin": "",
@@ -97,9 +129,15 @@ class IptvOrgScraper(Provider):
                 # names with explicit ESPN/ESPN2/ESPN+ disambiguation, not noisy fuzzy
                 # anchor text, so this shouldn't be scored as a weaker match than that.
                 "match_score": 100,
-                "match_title": entry.get("tvg_name") or entry.get("display_name") or "",
+                "match_title": title,
                 "discovery_method": "http",
-            })
+                "language": list(item["languages"]),
+            }
+            if only and stream_language.is_excluded(candidate, prefs, "only"):
+                continue
+            ranked.append((_entry_rank(candidate, entry, prefs), candidate))
+        ranked.sort(key=lambda pair: pair[0])
+        candidates = [candidate for _, candidate in ranked[:IPTV_ORG_VERIFY_LIMIT]]
 
         telemetry.report_matches(len(candidates))
         if not candidates:

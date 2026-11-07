@@ -5,6 +5,29 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-11-07
+
+### Added
+
+- Stream language preference (Settings tab, Stream Language). Pick your
+  languages in order; "Prefer" ranks streams in them first and keeps others as
+  a last resort, "Only" never uses a stream known to be in another language
+  (for example ESPN Latino or ESPN Brasil when you chose English). The language
+  comes from iptv-org's language tags or from markers in the stream title;
+  streams that do not say are always kept. Saving applies to existing
+  candidates at once and re-searches the 24/7 channels. `STREAM_LANGUAGES` and
+  `STREAM_LANGUAGE_MODE` in .env set the defaults (English, prefer).
+
+### Fixed
+
+- 24/7 network channels find streams again: NBC, ABC, CBS and FOX now use the
+  local-affiliate streams that iptv-org lists (for example NBC KNTV, ABC KGTV),
+  because Jellyball reads iptv-org's full language-grouped index instead of only
+  its sports playlist. In a test against a real setup 14 of 16 always-live
+  channels had working streams, up from 4. Spin-offs that share a network's name
+  (NBC Comedy Vault, ABC Entertains, Fox Soul) are not used, and only the best
+  few matches are checked per search (`IPTV_ORG_VERIFY_LIMIT`, default 12).
+
 ## [3.0.2] - 2026-11-05
 
 ### Added

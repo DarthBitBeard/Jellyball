@@ -19,6 +19,7 @@ from playwright.async_api import async_playwright, Browser, Playwright
 from config import _log_failure, _validate_upstream_url, LOGGER
 import provider_alerts
 import provider_settings
+import stream_language
 import provider_telemetry as telemetry
 import state
 from db import _db_session, get_setting, get_setting_async, set_setting_async
@@ -578,11 +579,13 @@ def _is_non_english_channel(text: str) -> bool:
     return re.search(code_pattern, value) is not None
 
 
+# Spin-offs that share a network's name but are not the network (iptv-org lists
+# "NBC Comedy Vault", "ABC Entertains", "Fox Soul" ... next to the affiliates).
 _DISALLOWED_CHANNEL_SUBSTRINGS = {
-    "fox": ("sports", "news", "business", "weather", "cricket", "soccer", "deportes", "league", "hd bulgaria"),
+    "fox": ("sports", "news", "business", "weather", "cricket", "soccer", "deportes", "league", "hd bulgaria", "soul", "radio"),
     "cbs": ("sports", "golazo", "news"),
-    "nbc": ("sports", "news", "universo"),
-    "abc": ("news",),
+    "nbc": ("sports", "news", "universo", "comedy", "vault", "lx", "home"),
+    "abc": ("news", "entertains", "kids"),
     "espn": ("deportes",),
 }
 
@@ -957,6 +960,15 @@ async def master_scrape(
         if owns_client:
             await client.aclose()
 
+    if stream_language.language_mode() == "only":
+        kept = [stream for stream in all_streams if not stream_language.is_excluded(stream)]
+        if len(kept) != len(all_streams):
+            LOGGER.info(
+                "Dropped streams in other languages team=%s dropped=%d kept=%d languages=%s",
+                display_title, len(all_streams) - len(kept), len(kept), ",".join(stream_language.preferred_languages()),
+            )
+        all_streams = kept
+
     seen_urls = set()
     deduped = []
     all_streams = rank_streams(all_streams, await _get_active_provider_priority())
@@ -1048,7 +1060,13 @@ async def _track_provider_response_time(
 
 # IPTV-Org playlist cache. Lives here (not in the builtin plugin module) so the
 # module-level cache stays shared and test-visible as scrapers._IPTV_ORG_CACHE.
-IPTV_ORG_PLAYLIST_URL_DEFAULT = "https://iptv-org.github.io/iptv/categories/sports.m3u"
+# The language-grouped index (group-title = the stream's language) covers every
+# category, so broadcast networks (NBC, ABC, CBS, FOX local affiliates) are found
+# too, not only the sports channels, and each stream says which language it is in.
+IPTV_ORG_PLAYLIST_URL_DEFAULT = "https://iptv-org.github.io/iptv/index.language.m3u"
+# How many matching iptv-org streams (best first) are probed per search: the
+# index lists dozens of affiliates for NBC/ABC/CBS/FOX.
+IPTV_ORG_VERIFY_LIMIT = bounded_int(os.getenv("IPTV_ORG_VERIFY_LIMIT", "12"), 12, 1, 100)
 IPTV_ORG_REFRESH_SECONDS = bounded_float(os.getenv("IPTV_ORG_REFRESH_SECONDS", "21600"), 21600.0, 300.0, 86400.0)
 _IPTV_ORG_CACHE: List[dict] = []
 _IPTV_ORG_CACHE_LOADED_AT = 0.0
