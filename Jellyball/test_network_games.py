@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, patch
 
 import failover
 import network_games
+import scrapers
+from sports_matcher import REQUIRED_TEAMS, get_team_search_terms
 from network_games import Game, game_for_network, parse_scoreboard
 
 NOW = datetime(2026, 11, 7, 21, 0, tzinfo=timezone.utc)
@@ -117,7 +119,7 @@ class ScrapeIntegrationTests(unittest.TestCase):
         calls = []
 
         async def fake_master_scrape(query, **kwargs):
-            calls.append((query, kwargs))
+            calls.append((query, {**kwargs, "required_teams": REQUIRED_TEAMS.get()}))
             return list(scrape_result)
 
         with patch.object(failover, "master_scrape", fake_master_scrape), \
@@ -135,6 +137,8 @@ class ScrapeIntegrationTests(unittest.TestCase):
         self.assertEqual(query, "Oregon Ducks vs Ohio State Buckeyes")
         self.assertFalse(kwargs["always_live"])
         self.assertIn("buckeyes", kwargs["search_terms"])
+        self.assertEqual(len(kwargs["required_teams"]), 2)  # both teams required
+        self.assertEqual(REQUIRED_TEAMS.get(), ())  # and only inside the game search
         self.assertEqual(data["network_game_id"], "2")
         self.assertEqual([c["url"] for c in data["candidates"]], ["https://event.example.test/osu.m3u8"])  # local news dropped
 
@@ -162,6 +166,53 @@ class ScrapeIntegrationTests(unittest.TestCase):
         network_games._GAMES.append(espn_game)
         calls = self.run_scrape("special_espn", [])
         self.assertEqual(sorted(kwargs["always_live"] for _, kwargs in calls), [False, True])
+        linear = next(kwargs for _, kwargs in calls if kwargs["always_live"])
+        self.assertEqual(linear["required_teams"], ())  # the linear stream has no game teams to match
+
+
+class BothTeamsTests(unittest.TestCase):
+    """A game search only opens listings that name both teams."""
+
+    HTML = (
+        "<div><a href='/watch/oregon-vs-ohio-state'>Oregon Ducks vs Ohio State Buckeyes</a></div>"
+        "<div><a href='/watch/ohio-state-vs-purdue'>Ohio State vs Purdue</a></div>"
+        "<div><a href='/watch/oregon-state-vs-utah'>Oregon Ducks Classic Replay</a></div>"
+        "<div><span>Ohio State Buckeyes at Oregon Ducks</span><a href='/watch/event/991'>Watch</a></div>"
+    )
+
+    def setUp(self):
+        self.home = get_team_search_terms("Ohio State Buckeyes", "Ohio State Buckeyes")
+        self.away = get_team_search_terms("Oregon Ducks", "Oregon Ducks")
+        self.terms = list(dict.fromkeys([*self.home, *self.away]))
+        self.scraper = scrapers.HtmlAggregatorScraper("TestAgg", "https://agg.example.test", ["/cfb"], ["/watch/"])
+
+    def parse(self):
+        matches = []
+        self.scraper._parse_matches_from_html(self.HTML, "https://agg.example.test/cfb", self.terms, matches, set())
+        return sorted(m[0].rsplit("/", 1)[-1] for m in matches)
+
+    def test_without_requirement_either_team_matches(self):
+        self.assertIn("ohio-state-vs-purdue", self.parse())
+
+    def test_game_search_keeps_only_listings_naming_both_teams(self):
+        token = REQUIRED_TEAMS.set((tuple(self.home), tuple(self.away)))
+        try:
+            found = self.parse()
+        finally:
+            REQUIRED_TEAMS.reset(token)
+        self.assertEqual(found, ["991", "oregon-vs-ohio-state"])
+
+    def test_event_filter_drops_one_team_streams(self):
+        one = {"match_title": "Ohio State vs Purdue", "match_url": "https://agg.example.test/watch/ohio-state-vs-purdue"}
+        both = {"match_title": "Watch", "match_url": "https://agg.example.test/watch/event/991",
+                "match_context": "Ohio State Buckeyes at Oregon Ducks"}
+        self.assertTrue(scrapers._stream_matches_requested_event(one, self.terms))
+        token = REQUIRED_TEAMS.set((tuple(self.home), tuple(self.away)))
+        try:
+            self.assertFalse(scrapers._stream_matches_requested_event(one, self.terms))
+            self.assertTrue(scrapers._stream_matches_requested_event(both, self.terms))
+        finally:
+            REQUIRED_TEAMS.reset(token)
 
 
 if __name__ == "__main__":

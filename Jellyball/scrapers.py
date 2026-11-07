@@ -24,7 +24,7 @@ import provider_telemetry as telemetry
 import state
 from db import _db_session, get_setting, get_setting_async, set_setting_async
 from network_safety import bounded_float, bounded_int, safe_get, validate_http_url
-from sports_matcher import canonical_team_name, clean_sports_text, get_team_search_terms, match_team
+from sports_matcher import canonical_team_name, clean_sports_text, get_team_search_terms, match_team, matches_required_teams
 from stream_extractor import (
     DEFAULT_USER_AGENT,
     fetch_bounded_text,
@@ -780,7 +780,12 @@ def _stream_matches_requested_event(stream: dict, search_terms: List[str]) -> bo
     matched, _, _ = match_team(search_terms, match_title, href=match_url, title=match_title)
     if not matched and match_context:
         matched, _, _ = match_team(search_terms, match_context, href=match_url, title=match_title)
-    return matched
+    if not matched:
+        return False
+    # A game search (sports_matcher.REQUIRED_TEAMS) needs both teams named.
+    if matches_required_teams(match_title, href=match_url, title=match_title):
+        return True
+    return bool(match_context) and matches_required_teams(match_context, href=match_url, title=match_title)
 
 
 def _log_event_filter_drops(provider: str, team: str, streams: List[dict], kept: int) -> None:

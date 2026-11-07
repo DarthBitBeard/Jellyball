@@ -32,7 +32,7 @@ from stream_extractor import (
     playwright_intercept_streams,
     playwright_page,
 )
-from sports_matcher import get_team_search_terms, match_team
+from sports_matcher import get_team_search_terms, match_team, matches_required_teams
 
 
 API_VERSION = 1
@@ -490,6 +490,14 @@ class HtmlAggregatorProvider(Provider):
                 if context_matched and context_score >= 110:
                     matched, score = context_matched, context_score
                     context = candidate_text
+            if matched and not matches_required_teams(direct_text, href=href, title=title):
+                # A game search needs both teams: the link may name one and
+                # its card the other.
+                candidate_text = context or self._anchor_context(anchor)
+                if candidate_text and matches_required_teams(candidate_text, href=href, title=title):
+                    context = candidate_text
+                else:
+                    matched = False
             if matched:
                 seen_matches.add(match_url)
                 # The card context rides along (as an attribute, so the event

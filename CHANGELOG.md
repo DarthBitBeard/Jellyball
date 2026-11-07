@@ -17,7 +17,9 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
   share a network (regional NFL on CBS or FOX), the one with a team you have a
   channel for wins. ABC, CBS, NBC, FOX and The CW show No Signal between games
   instead of a local station's news stream (`NETWORK_AFFILIATE_FALLBACK=1`
-  keeps the old behaviour).
+  keeps the old behaviour). A game search only opens provider listings that
+  name both teams, so a channel showing Oregon at Ohio State never picks up
+  another Ohio State or Oregon game.
 
 ## [3.1.1] - 2026-11-07
 
