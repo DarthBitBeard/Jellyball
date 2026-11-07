@@ -175,6 +175,7 @@ hiddenimports = [
     "tunables",
     "jellyfin_client",
     "dashboard_cards",
+    "network_games",
     "dns_override",
     "stream_language",
     "diaglog",
