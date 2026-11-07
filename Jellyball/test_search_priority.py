@@ -90,5 +90,28 @@ class StartupWindowTests(unittest.TestCase):
         self.assertIn("window_close_pending_since", data)
 
 
+class ListingTableTests(unittest.TestCase):
+    """A listing table is the parent of every link in it: its text (which names
+    every game) must not make every link match the game in its first row."""
+
+    HTML = (
+        "<table><tr><td>TEAMS</td><td>WATCH</td></tr>"
+        "<tr><td><a href='/watch/cfb/oregon-ducks-ohio-state-buckeyes/1'>In Progress Ohio State Oregon</a></td></tr>"
+        "<tr><td><a href='/watch/cfb/alabama-crimson-tide-lsu-tigers/2'>In Progress LSU Tigers Alabama</a></td></tr>"
+        "<tr><td><a href='/watch/cfb/houston-cougars-cincinnati-bearcats/3'>In Progress Houston Cincinnati</a></td></tr>"
+        "</table>"
+    ).replace("<tr><td><a", "<a").replace("</a></td></tr>", "</a>")  # links directly in the table, like iSportSurge
+
+    def test_only_the_listed_game_matches(self):
+        from sports_matcher import get_team_search_terms
+        scraper = scrapers.HtmlAggregatorScraper("TestAgg", "https://agg.example.test", ["/cfb"], ["/watch/"])
+        matches = []
+        scraper._parse_matches_from_html(
+            self.HTML, "https://agg.example.test/cfb", get_team_search_terms("Ohio State Buckeyes", "Ohio State Buckeyes"),
+            matches, set(),
+        )
+        self.assertEqual([m[0].rsplit("/", 2)[-2] for m in matches], ["oregon-ducks-ohio-state-buckeyes"])
+
+
 if __name__ == "__main__":
     unittest.main()
