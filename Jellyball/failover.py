@@ -907,6 +907,12 @@ def _stream_window_should_close(team_id: str, data: dict) -> bool:
     if is_stream_window_active(data) or _session_flowing(team_id):
         data.pop("window_close_pending_since", None)
         return False
+    if not data.get("candidates") and not is_multiview(data):
+        # Nothing found yet, so no overtime game to protect: skip the search
+        # now. (The grace period used to make every team channel whose game is
+        # another day search every provider at startup, ahead of live games.)
+        data.pop("window_close_pending_since", None)
+        return True
     now = time.monotonic()
     pending_since = data.setdefault("window_close_pending_since", now)
     return now - pending_since >= WINDOW_CLOSE_GRACE_SECONDS

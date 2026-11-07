@@ -5,6 +5,16 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+## [3.2.1] - 2026-11-07
+
+### Fixed
+
+- Live games are searched first after startup. Team channels whose game is on
+  another day no longer search every provider when Jellyball starts (they used
+  to queue dozens of searches ahead of the games on now), and a search for a game
+  (a team channel in its game window, or a network channel following a game) gets
+  the next free provider slot before a 24/7 channel's search.
+
 ## [3.2.0] - 2026-11-07
 
 ### Changed
