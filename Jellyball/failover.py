@@ -36,7 +36,7 @@ from multiview import _MULTIVIEW_PROCESSES
 from network_safety import bounded_float, bounded_int
 from stream_extractor import verify_stream_live
 import network_games
-from sports_matcher import get_team_search_terms
+from sports_matcher import REQUIRED_TEAMS, get_team_search_terms
 
 
 _SCRAPE_IN_FLIGHT: Set[str] = set()
@@ -282,9 +282,22 @@ async def _scrape_network_game(team_id: str, current: dict, game: "network_games
     """Streams for the game a network channel carries: the game's own event
     streams first (searched like a team channel, both teams' names), then for a
     cable network its linear stream, which carries the game too."""
-    terms = list(dict.fromkeys([*get_team_search_terms(game.home, game.home), *get_team_search_terms(game.away, game.away)]))
+    home_terms = get_team_search_terms(game.home, game.home)
+    away_terms = get_team_search_terms(game.away, game.away)
+    terms = list(dict.fromkeys([*home_terms, *away_terms]))
     LOGGER.info("Network channel %s searching for %s (%s)", team_id, game.name or game.short_name, game.league)
-    searches = [master_scrape(game.search_query, team_name=game.name, team_id=team_id, search_terms=terms, always_live=False)]
+
+    async def game_search() -> list:
+        # Runs as its own task (gather), so the requirement stays in this search.
+        token = REQUIRED_TEAMS.set((tuple(home_terms), tuple(away_terms)))
+        try:
+            return await master_scrape(
+                game.search_query, team_name=game.name, team_id=team_id, search_terms=terms, always_live=False,
+            )
+        finally:
+            REQUIRED_TEAMS.reset(token)
+
+    searches = [game_search()]
     if not network_games.is_broadcast_network(current):
         searches.append(master_scrape(
             query, team_name=team_name, team_id=team_id, search_terms=current.get("search_terms") or None, always_live=True,

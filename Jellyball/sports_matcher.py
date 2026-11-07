@@ -5,6 +5,7 @@ and precision token matching with state/short-word guardrails.
 """
 
 import re
+from contextvars import ContextVar
 from functools import lru_cache
 from typing import FrozenSet, List, Pattern, Tuple, Set, Dict, Optional
 
@@ -689,3 +690,15 @@ def match_team(
                     best_term = term_low
 
     return (best_score >= threshold), best_score, best_term
+
+
+# Set while searching for one game (a network channel following the game it
+# carries): one search-term group per team, and a listing counts only when it
+# names every team. Without it a game search matches any listing that mentions
+# either team, and providers spend their time opening the wrong games.
+REQUIRED_TEAMS: ContextVar[Tuple[Tuple[str, ...], ...]] = ContextVar("jellyball_required_teams", default=())
+
+
+def matches_required_teams(text: str, href: str = "", title: str = "") -> bool:
+    """True when no team requirement is active or the text names every required team."""
+    return all(match_team(list(group), text, href=href, title=title)[0] for group in REQUIRED_TEAMS.get())
