@@ -1,4 +1,4 @@
-"""Regenerate the JellyBall 2.1.3 brand assets ("Crystal Trophy" identity).
+"""Regenerate the JellyBall brand assets (3.1.1 "Crystal Trophy" artwork, with laces).
 
 Approach: every shipped asset is derived from one committed master source,
 ``assets/jellyball-logo.jpg`` (the approved crystal-football + crystal
@@ -7,8 +7,8 @@ reproduces the committed files byte-for-byte:
 
     python Jellyball/create_brand_assets.py
 
-The master JPG was produced from Landon-approved reference art
-(a 2240px AI-generated crystal lockup) by downscaling to 1120px wide with
+The master JPG was produced from owner-approved reference art
+(a 2880px AI-generated crystal lockup, 3.1.1) by downscaling to 1120px wide with
 LANCZOS and saving at JPEG quality 88. The derivation below is fully
 deterministic (fixed crop geometry, MEDIANCUT quantization, fixed ICO
 sizes), so the script doubles as the reproducibility proof.
@@ -24,10 +24,10 @@ Derived assets:
     favicon-32.png               32px PNG favicon fallback
     favicon-180.png              180px Apple touch icon
 
-The square icon is a content-aware crop of the crystal football out of the
-top ~62% of the lockup (the wordmark lives below that line): pixels brighter
-than the navy background are boxed, then squared around the box center with
-8% padding. The crop box is deterministic for the fixed master image.
+The square icon is the whole crystal football from the top ~62% of the
+lockup (the wordmark lives below that line): pixels brighter than the navy
+background are boxed and centered on a navy square with 8% padding, so the
+ball's tips are never cut. Deterministic for the fixed master image.
 """
 
 from pathlib import Path
@@ -53,13 +53,29 @@ def _ensure_assets_dir() -> None:
     ASSETS.mkdir(parents=True, exist_ok=True)
 
 
-def ball_mark(lockup: Image.Image) -> Image.Image:
-    """Square crop of the crystal football out of the lockup.
+def _fill_fading(canvas: Image.Image, edge_row: Image.Image, top: int, rows: int, fade_down: bool = True) -> None:
+    """Fill canvas rows [top, top+rows) with edge_row stretched vertically,
+    fading to the canvas background color away from the image edge."""
+    width = canvas.width
+    stretched = edge_row.resize((width, rows))
+    flat = Image.new("RGB", (width, rows), canvas.getpixel((0, canvas.height - 1)) if fade_down else canvas.getpixel((0, 0)))
+    mask = Image.new("L", (1, rows))
+    for y in range(rows):
+        t = (y + 1) / rows
+        mask.putpixel((0, y), int(255 * (1 - t if fade_down else t)))
+    canvas.paste(Image.composite(stretched, flat, mask.resize((width, rows))), (0, top))
 
-    The football sits above the wordmark with no gap between them, so the
-    crop is sized to the largest square that fits between the image top and
-    the wordmark's first content row, centered on the ball. The ball's
-    pointed tips may lose a few pixels per side; invisible at icon sizes.
+
+def ball_mark(lockup: Image.Image) -> Image.Image:
+    """Square image of the whole crystal football from the lockup.
+
+    The ball is wider than the space between the image top and the wordmark,
+    so a plain square crop would cut its tips off. Instead the ball's box
+    (everything brighter than the navy background, above the wordmark) is
+    centered in a square with CROP_PADDING_FRACTION padding around its longer
+    side; the square is filled with the real pixels around the ball, and only
+    the rows above the image top or below the wordmark line get the flat
+    background color (far from the glow, so no visible seam).
     """
     width, height = lockup.size
     gray = lockup.convert("L")
@@ -72,19 +88,36 @@ def ball_mark(lockup: Image.Image) -> Image.Image:
         raise RuntimeError("No football found in lockup ball region")
     left, upper, right, lower = ball_bbox
 
-    # First content row below the ball = top of the wordmark.
+    # First content row below the ball = top of the wordmark; never include it.
     wordmark_top = height
     for y in range(lower, height):
         if mask.crop((0, y, width, y + 1)).getbbox():
             wordmark_top = y
             break
+    lower = min(lower, wordmark_top - 1)
 
-    side = min(int(max(right - left, lower - upper) * (1 + CROP_PADDING_FRACTION)), wordmark_top - 4)
-    cx = (left + right) // 2
-    x0 = min(max(cx - side // 2, 0), width - side)
-    y1 = wordmark_top - 4
-    y0 = max(y1 - side, 0)
-    return lockup.crop((x0, y0, x0 + side, y0 + side))
+    side = int(max(right - left, lower - upper) * (1 + CROP_PADDING_FRACTION))
+    cx, cy = (left + right) // 2, (upper + lower) // 2
+    # Real pixels around the ball (its glow fades into the background) for
+    # the whole square width and every row above the wordmark; only rows the
+    # image does not have are filled with the background color.
+    x0 = cx - side // 2
+    band = lockup.crop((x0, 0, x0 + side, wordmark_top - 1))
+    canvas = Image.new("RGB", (side, side), lockup.getpixel((0, 0)))
+    # Center the ball, but when the band is tall enough keep the square inside
+    # it so no flat strip shows (the ball then sits a little off center).
+    offset = side // 2 - cy
+    if band.height >= side:
+        offset = min(0, max(offset, side - band.height))
+    canvas.paste(band, (0, offset))
+    # Rows the image does not have: continue the band's edge row and fade it
+    # into the background color, which leaves no seam and no streaks.
+    if offset > 0:
+        _fill_fading(canvas, band.crop((0, 0, side, 1)), 0, offset, fade_down=False)
+    bottom = offset + band.height
+    if bottom < side:
+        _fill_fading(canvas, band.crop((0, band.height - 1, side, band.height)), bottom, side - bottom)
+    return canvas
 
 
 def create_assets() -> None:
