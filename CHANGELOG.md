@@ -5,6 +5,16 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+## [3.1.1] - 2026-11-07
+
+### Changed
+
+- New Jellyball logo: the crystal football now has laces and a brighter
+  purple-and-cyan finish. Every image asset is regenerated from it (README
+  logo, dashboard favicons, app and tray icon, Windows icons, the No Signal
+  screen). The square icons now show the whole ball instead of cutting its
+  tips off.
+
 ## [3.1.0] - 2026-11-07
 
 ### Added
