@@ -14,6 +14,9 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
   to queue dozens of searches ahead of the games on now), and a search for a game
   (a team channel in its game window, or a network channel following a game) gets
   the next free provider slot before a 24/7 channel's search.
+- A provider page that lists games in one table no longer makes every game on
+  it match the team or game in its first row (iSportSurge returned 60 games
+  for Oregon at Ohio State, and timed out opening them, instead of the one).
 
 ## [3.2.0] - 2026-11-07
 

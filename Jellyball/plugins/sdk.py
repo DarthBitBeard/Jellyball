@@ -355,6 +355,30 @@ class HtmlAggregatorProvider(Provider):
             parts.append(parent.get_text(" ", strip=True))
         return " ".join(part for part in parts if part)[:600]
 
+    def _card_context(self, anchor, page_url: str, match_url: str, card_links: Dict[int, Set[str]]) -> str:
+        """The text of the card a link sits in, for links that only say "Watch".
+        When the parent is a whole listing (it also links other events) its
+        text names every game on the page, so only the link's own text counts:
+        otherwise every link on a page whose first row is the searched game
+        matched it (60 matches for Oregon at Ohio State on iSportSurge)."""
+        parent = anchor.parent
+        if parent is not None:
+            key = id(parent)
+            if key not in card_links:
+                card_links[key] = {
+                    urllib.parse.urljoin(page_url, str(other.get("href") or ""))
+                    for other in parent.find_all("a", href=True)
+                    if self._is_event_link(str(other.get("href") or ""), page_url)
+                }
+            if card_links[key] - {match_url}:
+                return " ".join(
+                    part for part in (
+                        anchor.get_text(" ", strip=True), str(anchor.get("title") or ""),
+                        str(anchor.get("aria-label") or ""),
+                    ) if part
+                )
+        return self._anchor_context(anchor)
+
     def _is_event_link(self, href: str, page_url: str) -> bool:
         if not href or href.startswith(("#", "javascript:", "mailto:")):
             return False
@@ -461,6 +485,7 @@ class HtmlAggregatorProvider(Provider):
             telemetry.report_index_events(len(listed))
 
     def _parse_anchors(self, soup, page_url, search_terms, matches, seen_matches, listed: Set[str]) -> None:
+        card_links: Dict[int, Set[str]] = {}
         for anchor in soup.find_all("a", href=True):
             href = str(anchor.get("href") or "")
             if not self._is_event_link(href, page_url):
@@ -485,7 +510,7 @@ class HtmlAggregatorProvider(Provider):
                 # Some providers put the team names in the card rather
                 # than the anchor. Only accept that fallback for a
                 # high-confidence full identity, not a generic nickname.
-                candidate_text = self._anchor_context(anchor) or href
+                candidate_text = self._card_context(anchor, page_url, match_url, card_links) or href
                 context_matched, context_score, _ = match_team(search_terms, candidate_text, href=href, title=title)
                 if context_matched and context_score >= 110:
                     matched, score = context_matched, context_score
@@ -493,7 +518,7 @@ class HtmlAggregatorProvider(Provider):
             if matched and not matches_required_teams(direct_text, href=href, title=title):
                 # A game search needs both teams: the link may name one and
                 # its card the other.
-                candidate_text = context or self._anchor_context(anchor)
+                candidate_text = context or self._card_context(anchor, page_url, match_url, card_links)
                 if candidate_text and matches_required_teams(candidate_text, href=href, title=title):
                     context = candidate_text
                 else:
