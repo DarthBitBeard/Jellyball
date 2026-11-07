@@ -4,6 +4,7 @@ browser, and master_scrape() which searches every provider for one channel.
 """
 
 import asyncio
+import heapq
 import json
 import logging
 import os
@@ -132,8 +133,70 @@ VERIFY_STREAM_CONCURRENCY = bounded_int(os.getenv("VERIFY_STREAM_CONCURRENCY", "
 PROVIDER_BREAKER_FAILURES = bounded_int(os.getenv("PROVIDER_BREAKER_FAILURES", "3"), 3, 1, 20)
 PROVIDER_BREAKER_COOLDOWN = bounded_float(os.getenv("PROVIDER_BREAKER_COOLDOWN", "120"), 120.0, 5.0, 3600.0)
 MAX_STREAM_CANDIDATES = bounded_int(os.getenv("MAX_STREAM_CANDIDATES", "24"), 24, 1, 200)
-_PROVIDER_SEARCH_SEMAPHORE: Optional[asyncio.Semaphore] = None
+_PROVIDER_SEARCH_SEMAPHORE: Optional["PrioritySemaphore"] = None
 _PROVIDER_SEARCH_LOOP = None
+# Provider slot priorities: a search for a game (a team channel in its window,
+# a network channel following a game) is served before a 24/7 linear search.
+GAME_SEARCH_PRIORITY = 0
+LINEAR_SEARCH_PRIORITY = 1
+
+
+class PrioritySemaphore:
+    """A semaphore whose waiters are served lowest priority number first, then
+    in arrival order. `async with sem.slot(priority):`."""
+
+    def __init__(self, value: int):
+        self._value = value
+        self._waiters: List[tuple] = []  # heap of (priority, seq, future)
+        self._seq = 0
+
+    def locked(self) -> bool:
+        return self._value <= 0
+
+    async def acquire(self, priority: int = 0) -> None:
+        if self._value > 0 and not self._waiters:
+            self._value -= 1
+            return
+        future = asyncio.get_running_loop().create_future()
+        self._seq += 1
+        heapq.heappush(self._waiters, (priority, self._seq, future))
+        try:
+            await future
+        except asyncio.CancelledError:
+            if future.done() and not future.cancelled():
+                self.release()  # granted just as we were cancelled: pass it on
+            else:
+                self._waiters = [w for w in self._waiters if w[2] is not future]
+                heapq.heapify(self._waiters)
+            raise
+
+    def release(self) -> None:
+        while self._waiters:
+            _, _, future = heapq.heappop(self._waiters)
+            if not future.done():
+                future.set_result(None)  # hand the slot straight to the next waiter
+                return
+        self._value += 1
+
+    def slot(self, priority: int = 0) -> "_PrioritySlot":
+        return _PrioritySlot(self, priority)
+
+    async def __aenter__(self) -> None:  # plain `async with sem:` is a game-priority slot
+        await self.acquire(GAME_SEARCH_PRIORITY)
+
+    async def __aexit__(self, *exc) -> None:
+        self.release()
+
+
+class _PrioritySlot:
+    def __init__(self, semaphore: PrioritySemaphore, priority: int):
+        self._semaphore, self._priority = semaphore, priority
+
+    async def __aenter__(self) -> None:
+        await self._semaphore.acquire(self._priority)
+
+    async def __aexit__(self, *exc) -> None:
+        self._semaphore.release()
 _PROVIDER_BREAKERS: Dict[str, dict] = {}
 
 
@@ -175,11 +238,11 @@ def provider_breaker_snapshot() -> Dict[str, dict]:
     }
 
 
-def _provider_search_semaphore() -> asyncio.Semaphore:
+def _provider_search_semaphore() -> PrioritySemaphore:
     global _PROVIDER_SEARCH_SEMAPHORE, _PROVIDER_SEARCH_LOOP
     loop = asyncio.get_running_loop()
     if _PROVIDER_SEARCH_SEMAPHORE is None or _PROVIDER_SEARCH_LOOP is not loop:
-        _PROVIDER_SEARCH_SEMAPHORE = asyncio.Semaphore(PROVIDER_SEARCH_CONCURRENCY)
+        _PROVIDER_SEARCH_SEMAPHORE = PrioritySemaphore(PROVIDER_SEARCH_CONCURRENCY)
         _PROVIDER_SEARCH_LOOP = loop
     return _PROVIDER_SEARCH_SEMAPHORE
 
@@ -854,6 +917,7 @@ async def master_scrape(
     # simultaneously — so a team stuck on slow providers can't starve other teams'
     # concurrently running scrapes of every global slot.
     team_semaphore = asyncio.Semaphore(min(PER_TEAM_PROVIDER_CONCURRENCY, PROVIDER_SEARCH_CONCURRENCY))
+    search_priority = LINEAR_SEARCH_PRIORITY if always_live else GAME_SEARCH_PRIORITY
 
     async def _jittered_search(provider):
         if _provider_breaker_open(provider.name):
@@ -866,7 +930,7 @@ async def master_scrape(
         exc_seen: Optional[BaseException] = None
         timed_out = False
         try:
-            async with team_semaphore, _provider_search_semaphore():
+            async with team_semaphore, _provider_search_semaphore().slot(search_priority):
                 LOGGER.info("Querying provider=%s team=%s", provider.name, display_title)
                 browser = await get_healthy_browser()
                 dynamic_timeout = await _get_dynamic_provider_timeout(provider.name)
