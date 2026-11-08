@@ -15,4 +15,5 @@ class MyBuffStreamsScraper(HtmlAggregatorProvider):
                 "/nbastreams2", "/nhlstreams2", "/soccer-live-streams",
             ],
             ["/cfb/", "/mlb/", "/nfl/", "/nba/", "/nhl/", "/title-game/", "/watch/", "/soccer/"],
+            series_sections={"f1": ["/f1streams2"]},
         )

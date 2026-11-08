@@ -12,4 +12,5 @@ class StreamedSuScraper(HtmlAggregatorProvider):
             os.getenv("AGGREGATOR_11_URL", "https://streamed.su"),
             ["/category/football", "/category/american-football", "/category/basketball", "/category/baseball", "/category/hockey"],
             ["/watch/", "/live/"],
+            series_sections={"f1": ["/category/motor-sports"]},
         )

@@ -10,3 +10,9 @@ names plus the current round's names and venues ("brazil gp", "interlagos"),
 and rejects titles naming another series (F2, F3, F1 Academy, MotoGP, Moto2/3,
 Formula E, IndyCar, NASCAR, ...) or another round of the series. Stream titles
 are accent-folded before matching ("São Paulo" no longer becomes "s o paulo").
+Providers can list series sections (`Provider.series_sections`, plugin SDK,
+additive): index pages scanned only for a series search, in place of the team
+categories. Built-in F1 sections for iSportSurge, MyBuffStreams, MethStreams,
+StreamEast (on a sister domain: event links may now be on the listing page's
+host), Footybite, 1Stream and Streamed. MethStreams also follows `/live-event/`
+links and Footybite `/game/` links.
