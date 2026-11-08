@@ -155,11 +155,16 @@ OPTIONAL_LEAGUES_BY_KEY: Dict[str, League] = {league.key: league for league in O
 # Opt-in group of always-live channels (sports_catalog.OPTIONAL_SPECIAL_CHANNELS).
 UK_SPORTS_GROUP_KEY = "uk_sports"
 UK_SPORTS_GROUP_TITLE = "UK Sports Channels"
+# Opt-in group of motorsport series channels (SERIES below): one channel per
+# series, following every session of every round.
+MOTORSPORT_GROUP_KEY = "motorsport"
+MOTORSPORT_GROUP_TITLE = "Motorsport"
 
 # Every opt-in catalog group, in catalog order: (key, dashboard/M3U group title).
 OPTIONAL_CATALOG_GROUPS: Tuple[Tuple[str, str], ...] = (
     *((league.key, league.group_title) for league in OPTIONAL_LEAGUES),
     (UK_SPORTS_GROUP_KEY, UK_SPORTS_GROUP_TITLE),
+    (MOTORSPORT_GROUP_KEY, MOTORSPORT_GROUP_TITLE),
 )
 OPTIONAL_GROUP_KEYS: Tuple[str, ...] = tuple(key for key, _ in OPTIONAL_CATALOG_GROUPS)
 # Settings row holding the enabled opt-in groups, comma separated ("" = none).
@@ -197,6 +202,7 @@ class Series:
         every qualifying; the round goes in the episode title.
     group_title: M3U group-title and dashboard catalog section.
     session_kinds: known session codes, in weekend order.
+    logo_url: channel logo (Jellyfin fetches it, so a public URL).
     default_session_duration: length of a session whose code is not listed."""
 
     key: str
@@ -206,6 +212,7 @@ class Series:
     short_name: str
     group_title: str
     session_kinds: Tuple[SessionKind, ...]
+    logo_url: str = ""
     default_session_duration: timedelta = timedelta(hours=1)
 
     def session_label(self, code: str) -> str:
@@ -233,6 +240,7 @@ F1 = Series(
         ("Qual", "Qualifying", timedelta(hours=1)),
         ("Race", "Race", timedelta(hours=2)),
     ),
+    logo_url="https://a.espncdn.com/i/teamlogos/leagues/500/f1.png",
 )
 
 SERIES: Tuple[Series, ...] = (F1,)
