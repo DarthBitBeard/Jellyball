@@ -44,6 +44,7 @@ from alerts import (
     refresh_jellyfin_guide,
     request_jellyfin_guide_refresh_if_changed,
     send_alert,
+    refresh_recording_channels,
     trigger_jellyfin_refresh,
 )
 from jellyfin_client import TESTED_RANGE_TEXT, load_status as load_jellyfin_status
@@ -354,6 +355,9 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         "advanced_settings_groups": _advanced_settings_html(),
         "update_check_enabled": update_check_enabled,
         "show_offseason_channels": catalog.SHOW_OFFSEASON_CHANNELS,
+        "channel_listing_mode": catalog.LISTING_MODE,
+        "channel_listing_lead": catalog.LISTING_LEAD_MINUTES,
+        "channel_listing_leads": catalog.LISTING_LEAD_CHOICES,
         "provider_rotation_enabled": provider_rotation_enabled,
         "dashboard_data": {},
     }
@@ -774,6 +778,25 @@ async def set_offseason_listing(enabled: bool = Form(False), auth: bool = Depend
     if catalog.SHOW_OFFSEASON_CHANNELS != bool(enabled):
         catalog.SHOW_OFFSEASON_CHANNELS = bool(enabled)
         request_jellyfin_guide_refresh_if_changed()
+    return RedirectResponse(url="/?tab=playback&status=saved", status_code=303)
+
+
+@router.post("/settings/channel-listing")
+async def set_channel_listing(
+    mode: str = Form(catalog.LISTING_ALL),
+    lead: str = Form("30"),
+    auth: bool = Depends(verify_dashboard_auth),
+):
+    new_mode, new_lead = catalog.parse_listing_mode(mode), catalog.parse_listing_lead(lead)
+    await set_setting_async("channel_listing_mode", new_mode)
+    await set_setting_async("channel_listing_lead_minutes", str(new_lead))
+    if (catalog.LISTING_MODE, catalog.LISTING_LEAD_MINUTES) != (new_mode, new_lead):
+        catalog.LISTING_MODE, catalog.LISTING_LEAD_MINUTES = new_mode, new_lead
+        if new_mode != catalog.LISTING_ALL:
+            # Recordings decide what stays listed: fetch them before refreshing.
+            await refresh_recording_channels()
+        # A setting the user just changed: show the result in Jellyfin now.
+        _spawn_background_task(trigger_jellyfin_refresh(), "refresh Jellyfin guide after channel listing change")
     return RedirectResponse(url="/?tab=playback&status=saved", status_code=303)
 
 
