@@ -145,6 +145,7 @@ hiddenimports = [
     "optional_leagues",
     "sports_catalog",
     "sports_matcher",
+    "channel_groups",
     "stream_extractor",
     "network_safety",
     "hls_session",

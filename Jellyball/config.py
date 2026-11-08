@@ -7,6 +7,7 @@ holds small helpers every layer shares (_log_failure, escaping, URL checks).
 PORT is rebound by the tray app when the configured port is taken, so other
 modules read it as `config.PORT`.
 """
+import hashlib
 import os
 import sys
 import tempfile
@@ -429,6 +430,22 @@ def _resource_path(relative_path: str) -> Path:
     if bundled.exists():
         return bundled
     return APP_DIR / relative_path
+
+
+_STATIC_VERSIONS: Dict[str, str] = {}
+
+
+def static_url(name: str) -> str:
+    """/static/<name> stamped with a hash of the file, so browsers fetch the
+    new copy after an upgrade instead of reusing a cached one."""
+    version = _STATIC_VERSIONS.get(name)
+    if version is None:
+        try:
+            version = hashlib.sha256((_resource_path("static") / name).read_bytes()).hexdigest()[:12]
+        except OSError:
+            version = ""
+        _STATIC_VERSIONS[name] = version
+    return f"/static/{name}?v={version}" if version else f"/static/{name}"
 
 
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")

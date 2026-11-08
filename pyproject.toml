@@ -142,6 +142,7 @@ warn_unused_configs = true
 # legacy_proxy 5, multiview 7, network_safety 9, stream_extractor 15, epg 25,
 # failover 30.
 files = [
+    "Jellyball/channel_groups.py",
     "Jellyball/channels.py",
     "Jellyball/dashboard_cards.py",
     "Jellyball/engine_settings.py",

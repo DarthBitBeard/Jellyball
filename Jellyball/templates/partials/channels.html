@@ -1,5 +1,5 @@
 {% macro channel_card(channel) %}
-<div class="card channel-card" data-team-id="{{ channel.team_id }}" data-channel-name="{{ channel.name }}" data-candidate-count="{{ channel.candidates_count }}" data-active-provider="{{ channel.active_provider }}" style="margin-bottom: 0;">
+<div class="card channel-card" data-team-id="{{ channel.team_id }}" data-channel-name="{{ channel.name }}" data-candidate-count="{{ channel.candidates_count }}" data-active-provider="{{ channel.active_provider }}" data-status="{{ channel.status }}" data-watching="{{ '1' if channel.watching else '0' }}" style="margin-bottom: 0;">
     <div style="display: flex; gap: 0.75rem; align-items: flex-start;">
         <input type="checkbox" class="team-bulk-select" data-team-id="{{ channel.team_id }}" style="margin-top: 0.5rem; cursor: pointer;">
         <div style="flex: 1;">
@@ -59,6 +59,20 @@
         </div>
     </div>
 </div>
+{% endmacro %}
+
+{% macro channel_section(key, label, channels) %}
+<details class="channel-group" data-group-key="{{ key }}">
+    <summary>
+        <span class="channel-group-chevron" aria-hidden="true">▸</span>
+        <span class="channel-group-title">{{ label }}</span>
+        <span class="channel-group-summary" data-role="group-summary"></span>
+        <span class="badge channel-group-count" data-role="group-count">{{ channels|length }}</span>
+    </summary>
+    <div class="team-grid channel-group-grid">
+        {% for channel in channels %}{{ channel_card(channel) }}{% endfor %}
+    </div>
+</details>
 {% endmacro %}
 
 {% if channels_empty %}
@@ -144,13 +158,29 @@
 <div id="channels-changed-notice" class="channels-changed-notice" onclick="window.location.reload()">Channels changed — click to refresh</div>
 {% if not channels_empty %}
 <input id="channel-filter" class="channel-filter" type="text" placeholder="Filter your channels..." oninput="filterChannels(this.value)" aria-label="Filter enabled channels">
-<div id="channel-filter-empty" class="card" style="display: none; text-align: center; color: var(--text-muted);">No channels match &ldquo;<span id="channel-filter-query"></span>&rdquo;. <button type="button" onclick="clearChannelFilter()" style="width: auto; padding: 0.25rem 0.6rem; font-size: 0.8rem; background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 6px; cursor: pointer;">Clear filter</button></div>
+<div class="channel-status-chips" role="group" aria-label="Show channels by status">
+    <button type="button" class="status-chip active" data-status-filter="all" aria-pressed="true" onclick="setChannelStatusFilter('all')">All <span class="chip-count" data-count-for="all"></span></button>
+    <button type="button" class="status-chip" data-status-filter="live" aria-pressed="false" onclick="setChannelStatusFilter('live')"><span class="dot online"></span>Live <span class="chip-count" data-count-for="live"></span></button>
+    <button type="button" class="status-chip" data-status-filter="watching" aria-pressed="false" onclick="setChannelStatusFilter('watching')">▶ Watching <span class="chip-count" data-count-for="watching"></span></button>
+    <button type="button" class="status-chip" data-status-filter="no_stream" aria-pressed="false" onclick="setChannelStatusFilter('no_stream')" title="Should be live now (always-live, or its event has started) but has no working stream"><span class="dot offline"></span>No stream <span class="chip-count" data-count-for="no_stream"></span></button>
+    <button type="button" class="status-chip" data-status-filter="upcoming" aria-pressed="false" onclick="setChannelStatusFilter('upcoming')" title="No event on now">Upcoming <span class="chip-count" data-count-for="upcoming"></span></button>
+    <button type="button" class="status-chip" data-status-filter="off_season" aria-pressed="false" onclick="setChannelStatusFilter('off_season')">Off-season <span class="chip-count" data-count-for="off_season"></span></button>
+</div>
+<div id="channel-filter-empty" class="card" style="display: none; text-align: center; color: var(--text-muted);">No channels match <span id="channel-filter-query"></span>. <button type="button" onclick="clearChannelFilter()" style="width: auto; padding: 0.25rem 0.6rem; font-size: 0.8rem; background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 6px; cursor: pointer;">Clear filter</button></div>
 {% endif %}
 <div class="team-grid">
     {% if channels_empty %}
     <div class="card" style="grid-column: 1 / -1; text-align: center; color: var(--text-muted); padding: 3rem;">No channels enabled. Select entries from the catalog above.</div>
     {% else %}
     <form id="bulk-actions-form" style="display: none;"><input type="hidden" id="bulk-team-ids" name="team_ids" value=""></form>
+    <div class="channel-accordion">
+    {% if favorites %}
+    {{ channel_section("favorites", "⭐ Your Favorites", favorites) }}
+    {% endif %}
+    {% for group in channel_groups %}
+    {{ channel_section(group.key, group.label, group.channels) }}
+    {% endfor %}
+    </div>
     <div class="card" style="background: var(--accent-card-bg); border-color: var(--accent);">
         <h3 style="margin-top: 0;">🎛️ Bulk Team Management</h3>
         <p class="hint-text">Select multiple teams to perform actions on them at once.</p>
@@ -222,13 +252,5 @@
         </div>
     </div>
     {% endfor %}
-    {% if favorites %}
-    <h3 style="margin-top: 1.5rem; margin-bottom: 0.75rem; grid-column: 1 / -1;">⭐ Your Favorites</h3>
-    {% for channel in favorites %}{{ channel_card(channel) }}{% endfor %}
-    {% endif %}
-    {% if others %}
-    <h3 style="margin-top: 1.5rem; margin-bottom: 0.75rem; grid-column: 1 / -1;">📺 All Channels</h3>
-    {% for channel in others %}{{ channel_card(channel) }}{% endfor %}
-    {% endif %}
     {% endif %}
 </div>
