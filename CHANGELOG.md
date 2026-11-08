@@ -5,6 +5,17 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+## [3.2.2] - 2026-11-07
+
+### Fixed
+
+- A web page is no longer accepted as a stream. Stream checks counted any
+  capital "G" near the end of a page as video, so some providers' home or player
+  pages became stream candidates: a channel looked found, then cycled through
+  them showing No Signal ("Upstream playlist is not HLS ... text/html"). Those
+  pages are now rejected when found, so the dashboard and logs show that no
+  provider has a playable stream instead.
+
 ## [3.2.1] - 2026-11-07
 
 ### Fixed

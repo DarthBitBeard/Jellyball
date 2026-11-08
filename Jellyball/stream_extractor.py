@@ -585,6 +585,11 @@ async def verify_stream_live(
         if not sample:
             return False
         content_type = content_type.lower()
+        if sample.lstrip(b"\xef\xbb\xbf \t\r\n")[:1] == b"<" or content_type.startswith(("text/html", "application/xhtml")):
+            # A web page (block page, home page, player page) is never media,
+            # however many 0x47 bytes it happens to contain. Checked before the
+            # TS scan: a page passed as video and then played as No Signal.
+            return False
         # Some providers prefix real MPEG-TS with a fake image header to dodge
         # naive hotlink/probe checks; find_ts_start skips such a prefix and
         # locates the real aligned TS sync bytes, so check it before rejecting
