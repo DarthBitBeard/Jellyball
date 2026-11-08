@@ -192,6 +192,9 @@ class Series:
         collide with a League key and must never change once stored.
     espn_sport/espn_league: ESPN site API path, sports/<espn_sport>/<espn_league>/scoreboard.
     name: display name of the channel.
+    short_name: prefix of guide titles ("F1 Qualifying"): one title per
+        session kind all season, so a Jellyfin "Record Series" on it records
+        every qualifying; the round goes in the episode title.
     group_title: M3U group-title and dashboard catalog section.
     session_kinds: known session codes, in weekend order.
     default_session_duration: length of a session whose code is not listed."""
@@ -200,6 +203,7 @@ class Series:
     espn_sport: str
     espn_league: str
     name: str
+    short_name: str
     group_title: str
     session_kinds: Tuple[SessionKind, ...]
     default_session_duration: timedelta = timedelta(hours=1)
@@ -219,7 +223,7 @@ class Series:
 
 F1 = Series(
     key="f1", espn_sport="racing", espn_league="f1",
-    name="Formula 1", group_title="Formula 1",
+    name="Formula 1", short_name="F1", group_title="Formula 1",
     session_kinds=(
         ("FP1", "Practice 1", timedelta(hours=1)),
         ("FP2", "Practice 2", timedelta(hours=1)),

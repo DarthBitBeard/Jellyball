@@ -73,7 +73,25 @@ class Session:
 
     @property
     def title(self) -> str:
+        """Full name of the session: "São Paulo GP - Qualifying"."""
         return f"{self.round_name} - {self.label}"
+
+    @property
+    def programme_title(self) -> str:
+        """Guide title: the same all season for a session kind ("F1 Qualifying"),
+        so Jellyfin can record it as a series; the round is the episode title."""
+        series = SERIES_BY_KEY.get(self.series)
+        return f"{series.short_name} {self.label}" if series else self.title
+
+    @property
+    def location(self) -> str:
+        """"Autodromo Jose Carlos Pace, Sao Paulo, Brazil" (missing parts left out)."""
+        return ", ".join(part for part in (self.circuit, self.city, self.country) if part)
+
+    @property
+    def description(self) -> str:
+        where = f" at {self.location}" if self.location else ""
+        return f"{self.label} of the {self.event_name or self.round_name}{where}."
 
 
 # Grand Prix names as Formula 1 uses them ("<place> Grand Prix"). ESPN prefixes
@@ -195,6 +213,8 @@ def parse_series_season(data: object) -> Optional[Tuple[datetime, datetime]]:
 
 
 _SESSIONS_CACHE: Dict[str, Tuple[float, Tuple[Tuple[Session, ...], bool]]] = {}
+# The last successful session list per series, kept through failed lookups.
+_LAST_GOOD_SESSIONS: Dict[str, Tuple[Session, ...]] = {}
 _SEASON_CACHE: Dict[str, Tuple[float, Optional[Tuple[datetime, datetime]]]] = {}
 
 
@@ -235,6 +255,7 @@ async def fetch_series_sessions(series_key: str) -> Tuple[Tuple[Session, ...], b
     data = await _get_json(url, f"{series.key} schedule")
     if isinstance(data, dict) and isinstance(data.get("events", []), list):
         result: Tuple[Tuple[Session, ...], bool] = (tuple(parse_series_sessions(series, data)), True)
+        _LAST_GOOD_SESSIONS[series.key] = result[0]
     else:
         result = ((), False)
     ttl = SERIES_SCHEDULE_CACHE_SECONDS if result[1] else _FAILURE_CACHE_SECONDS
@@ -256,6 +277,16 @@ async def fetch_series_season(series_key: str) -> Optional[Tuple[datetime, datet
     ttl = SERIES_SEASON_CACHE_SECONDS if season else _FAILURE_CACHE_SECONDS
     _SEASON_CACHE[series.key] = (time.monotonic() + ttl, season)
     return season
+
+
+def cached_series_sessions(series_key: str) -> Tuple[Session, ...]:
+    """The last successfully fetched sessions, even past their cache lifetime
+    (the guide and dashboard read this without fetching; a stale list beats an
+    empty guide). () before the first successful lookup."""
+    cached = _SESSIONS_CACHE.get(series_key)
+    if cached is not None and cached[1][1]:
+        return cached[1][0]
+    return _LAST_GOOD_SESSIONS.get(series_key, ())
 
 
 def _cached_season(series_key: str) -> Optional[Tuple[datetime, datetime]]:

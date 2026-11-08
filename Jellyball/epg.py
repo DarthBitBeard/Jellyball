@@ -27,6 +27,7 @@ from catalog import (
     parse_team_schedule,
     xmltv_ts,
 )
+from motorsport_schedule import cached_series_sessions, fetch_series_sessions, is_series_category, Session
 from multiview import _multiview_member_label, MULTIVIEW_AUDIO_CHANNELS
 from stream_extractor import DEFAULT_USER_AGENT
 
@@ -179,6 +180,50 @@ async def _fetch_tvguide_epg() -> Dict[str, List[dict]]:
     return _TVGUIDE_EPG_CACHE
 
 
+def _series_sessions_in(data: dict, start: datetime, end: datetime) -> List[Session]:
+    """The cached sessions of a series channel overlapping [start, end); [] for
+    any other channel, or before the series' first successful lookup."""
+    category = str(data.get("category") or "")
+    if not is_series_category(category):
+        return []
+    return [s for s in cached_series_sessions(category) if s.stop > start and s.start < end]
+
+
+def _series_blocks(
+    name: str,
+    sessions: List[Session],
+    guide_start: datetime,
+    guide_end: datetime,
+    programmes: List[dict],
+    logo: str,
+) -> None:
+    """One programme per session, titled per session kind ("F1 Qualifying")
+    with the round as its episode title, and Standby blocks in the gaps."""
+    cursor = guide_start
+    for session in sessions:
+        start = max(session.start, cursor)
+        stop = min(session.stop, guide_end)
+        if stop <= start:
+            continue  # overlaps the previous session entirely
+        if start > cursor:
+            programmes.append({
+                "start": cursor, "stop": start, "title": f"{name} Standby",
+                "desc": f"Next on {name}: {session.title}.", "category": "", "icon": logo,
+            })
+        programmes.append({
+            "start": start, "stop": stop, "title": session.programme_title,
+            "subtitle": session.round_name, "desc": session.description,
+            "category": "Sports", "icon": logo,
+        })
+        cursor = stop
+    if cursor < guide_end:
+        programmes.append({
+            "start": cursor, "stop": guide_end, "title": f"{name} Standby",
+            "desc": f"No further {name} sessions are scheduled in the next {GUIDE_HORIZON_DAYS} days.",
+            "category": "", "icon": logo,
+        })
+
+
 def _channel_programmes(
     team_id: str,
     data: dict,
@@ -209,6 +254,11 @@ def _channel_programmes(
               f"{name}: Off-season" + (f" (resumes {resumes})" if resumes else ""),
               f"{name} is between seasons. The channel returns to the guide automatically"
               + (f" when the season resumes around {resumes}." if resumes else " when the season resumes."))
+        return programmes
+
+    sessions = _series_sessions_in(data, guide_start, guide_end)
+    if sessions:
+        _series_blocks(name, sessions, guide_start, guide_end, programmes, logo)
         return programmes
 
     dt_start, dt_stop = parse_team_schedule(data)
@@ -264,6 +314,15 @@ def now_next_for_channel(team_id: str, data: dict) -> Dict[str, str]:
             "next": "",
         }
 
+    sessions = _series_sessions_in(data, now, now + timedelta(days=GUIDE_HORIZON_DAYS))
+    if sessions:
+        live = next((s for s in sessions if s.start <= now < s.stop), None)
+        upcoming = next((s for s in sessions if s.start > now), None)
+        return {
+            "now": live.title if live else f"{name} Standby",
+            "next": upcoming.title if upcoming else (f"{name} Standby" if live else ""),
+        }
+
     dt_start, dt_stop = parse_team_schedule(data)
     if dt_start and dt_stop:
         if dt_start <= now < dt_stop:
@@ -298,6 +357,9 @@ def _programme_xml_lines(channel_id: str, programmes: List[dict]) -> List[str]:
             f'  <programme channel="{channel_id_esc}" start="{xmltv_ts(p["start"])}" stop="{xmltv_ts(p["stop"])}">'
         )
         lines.append(f'    <title>{_xml_text(p["title"])}</title>')
+        if p.get("subtitle"):
+            # Jellyfin reads <sub-title> as the episode title.
+            lines.append(f'    <sub-title>{_xml_text(p["subtitle"])}</sub-title>')
         if p.get("category"):
             lines.append(f'    <category>{_xml_text(p["category"])}</category>')
         lines.append(f'    <desc>{_xml_text(p["desc"])}</desc>')
@@ -571,6 +633,11 @@ async def generate_xmltv(request: Request = None):
     guide_start = now_utc - timedelta(hours=1)
     guide_end = now_utc + timedelta(days=GUIDE_HORIZON_DAYS)
     tvguide_schedules = await _fetch_tvguide_epg()
+    # Refresh the session lists the series channels' programmes are built from
+    # (cached; _channel_programmes reads them without fetching).
+    for series_key in sorted({str(d.get("category") or "") for d in stream_state.values()}):
+        if is_series_category(series_key):
+            await fetch_series_sessions(series_key)
 
     for team_id, data in stream_state.items():
         if not _channel_listed(data):
