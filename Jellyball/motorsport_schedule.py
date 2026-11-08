@@ -28,6 +28,7 @@ import httpx
 
 from config import _log_failure, LOGGER
 from leagues import SERIES_BY_KEY, Series
+from motorsport_terms import F1_GRAND_PRIX_PLACES, series_search_terms
 from network_safety import bounded_float, safe_get
 import state
 
@@ -70,6 +71,7 @@ class Session:
     circuit: str = ""
     city: str = ""
     country: str = ""
+    place: str = ""  # motorsport_terms.F1_ROUNDS key, "" when unknown
 
     @property
     def title(self) -> str:
@@ -94,23 +96,23 @@ class Session:
         return f"{self.label} of the {self.event_name or self.round_name}{where}."
 
 
-# Grand Prix names as Formula 1 uses them ("<place> Grand Prix"). ESPN prefixes
-# the title sponsor ("MSC Cruises São Paulo Grand Prix", "Qatar Airways Qatar
-# Grand Prix"), so the display name is the known place right before "Grand
-# Prix". An unknown place keeps ESPN's full name.
-F1_GRAND_PRIX_PLACES: Tuple[str, ...] = (
-    "70th Anniversary", "Abu Dhabi", "Australian", "Austrian", "Azerbaijan", "Bahrain",
-    "Barcelona-Catalunya", "Belgian", "Brazilian", "British", "Canadian", "Chinese", "Dutch",
-    "Eifel", "Emilia Romagna", "French", "German", "Hungarian", "Italian", "Japanese",
-    "Las Vegas", "Madrid", "Mexican", "Mexico City", "Miami", "Monaco", "Portuguese", "Qatar",
-    "Russian", "Sakhir", "São Paulo", "Sao Paulo", "Saudi Arabian", "Singapore", "Spanish",
-    "Styrian", "Turkish", "Tuscan", "United States",
-)
+# ESPN prefixes the title sponsor ("MSC Cruises São Paulo Grand Prix", "Qatar
+# Airways Qatar Grand Prix"), so the display name is the known place
+# (motorsport_terms.F1_ROUNDS) right before "Grand Prix". An unknown place
+# keeps ESPN's full name.
 _PLACE_RE = re.compile(
     r"\b(?P<place>" + "|".join(re.escape(p) for p in sorted(F1_GRAND_PRIX_PLACES, key=len, reverse=True))
     + r")\s+Grand\s+Prix\b(?P<rest>.*)$",
     re.IGNORECASE,
 )
+_PLACES_BY_LOWER = {place.lower(): place for place in F1_GRAND_PRIX_PLACES}
+
+
+def round_place(event_name: str) -> str:
+    """The F1_ROUNDS key of an event ("Qatar Airways Qatar Grand Prix" ->
+    "Qatar"), or "" when the place is unknown."""
+    match = _PLACE_RE.search(re.sub(r"\s+", " ", str(event_name or "")))
+    return _PLACES_BY_LOWER.get(match.group("place").lower(), "") if match else ""
 
 
 def round_display_name(event_name: str) -> str:
@@ -186,6 +188,7 @@ def parse_series_sessions(series: Series, data: object) -> List[Session]:
                 circuit=str(circuit.get("fullName") or "").strip(),
                 city=_place_label(address.get("city")),
                 country=_place_label(address.get("country")),
+                place=round_place(event_name),
             ))
     sessions.sort(key=lambda session: (session.start, session.code))
     return sessions
@@ -338,3 +341,14 @@ async def fetch_series_schedule(series_key: str) -> Tuple[Optional[datetime], Op
 
 def is_series_category(category: str) -> bool:
     return category in SERIES_BY_KEY
+
+
+def current_search_terms(series_key: str, now: Optional[datetime] = None) -> List[str]:
+    """A series channel's search terms right now: the series' names plus the
+    current or next round's names and venues (from the cached sessions; just
+    the series' names before the first lookup). sports_matcher rejects titles
+    naming another round once the round is known."""
+    session = current_or_next_session(cached_series_sessions(series_key), now or datetime.now(timezone.utc))
+    if session is None:
+        return series_search_terms(series_key)
+    return series_search_terms(series_key, session.place, session.city, session.country)

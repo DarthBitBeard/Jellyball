@@ -30,7 +30,12 @@ from catalog import (
     STREAM_TRAIL_TIME,
     xmltv_ts,
 )
-from motorsport_schedule import fetch_series_schedule, fetch_series_season, is_series_category
+from motorsport_schedule import (
+    current_search_terms,
+    fetch_series_schedule,
+    fetch_series_season,
+    is_series_category,
+)
 from alerts import request_jellyfin_guide_refresh_if_changed, send_alert
 from sessions import _is_placeholder_key, candidate_source_key, SESSIONS
 from multiview import _MULTIVIEW_PROCESSES
@@ -311,6 +316,16 @@ async def _scrape_network_game(team_id: str, current: dict, game: "network_games
     return merged
 
 
+def _channel_search_terms(data: dict) -> Optional[List[str]]:
+    """The terms master_scrape searches with: a series channel's follow the
+    current round (motorsport_schedule.current_search_terms), everything else
+    uses the stored terms (None lets master_scrape derive them)."""
+    category = str(data.get("category") or "")
+    if is_series_category(category):
+        return current_search_terms(category)
+    return data.get("search_terms") or None
+
+
 async def _trigger_scrape_unlocked(team_id: str, force: bool = False):
     if team_id not in stream_state:
         return
@@ -410,7 +425,7 @@ async def _trigger_scrape_unlocked(team_id: str, force: bool = False):
             query,
             team_name=team_name,
             team_id=team_id,
-            search_terms=current.get("search_terms") or None,
+            search_terms=_channel_search_terms(current),
             always_live=always_live,
         )
     current = stream_state.get(team_id)
@@ -833,7 +848,7 @@ async def emergency_rescrape(team_id: str) -> None:
             data["query"],
             team_name=data.get("name", team_id),
             team_id=team_id,
-            search_terms=data.get("search_terms") or None,
+            search_terms=_channel_search_terms(data),
             always_live=bool(data.get("always_live")),
             on_partial=_install_partial,
         )

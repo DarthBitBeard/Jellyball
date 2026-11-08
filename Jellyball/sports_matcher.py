@@ -10,6 +10,7 @@ from functools import lru_cache
 from typing import FrozenSet, List, Pattern, Tuple, Set, Dict, Optional
 
 from sports_catalog import STATIC_TEAM_RECORDS, fold_accents, normalize_team_label
+from motorsport_terms import has_series_conflict
 
 try:
     from thefuzz import fuzz
@@ -630,6 +631,13 @@ def match_team(
         all_targets.append(clean_title)
     all_targets = [strip_other_optional_teams(target, search_terms) for target in all_targets]
     optional_names = _optional_team_name_data()[0]
+
+    # Series searches (Formula 1): reject the whole event when any of its text
+    # names another series or another round. Checked once over everything,
+    # since one split side ("formula 1 2026") would hide the round named on
+    # the other ("las vegas gp").
+    if has_series_conflict(search_terms, " | ".join(all_targets)):
+        return False, 0, ""
 
     best_score = 0
     best_term = ""

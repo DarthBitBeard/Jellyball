@@ -163,6 +163,7 @@ files = [
     "Jellyball/config.py",
     "Jellyball/espn_schedule.py",
     "Jellyball/motorsport_schedule.py",
+    "Jellyball/motorsport_terms.py",
     "Jellyball/jellyball_launcher.py",
     "Jellyball/leagues.py",
     "Jellyball/main.py",

@@ -5,3 +5,8 @@ calendar. In the guide each session is its own programme, titled per session
 kind ("F1 Qualifying", so Jellyfin can record it as a series) with the round as
 its `<sub-title>` episode title ("São Paulo GP"), and Standby blocks between
 sessions. The groundwork for a Formula 1 channel; nothing enables one yet.
+Matching a series channel (`motorsport_terms.py`): it searches with the series'
+names plus the current round's names and venues ("brazil gp", "interlagos"),
+and rejects titles naming another series (F2, F3, F1 Academy, MotoGP, Moto2/3,
+Formula E, IndyCar, NASCAR, ...) or another round of the series. Stream titles
+are accent-folded before matching ("São Paulo" no longer becomes "s o paulo").
