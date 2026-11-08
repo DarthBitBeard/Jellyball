@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from config import _log_failure, _public_base_url, _resource_path, _safe_team_id, _validate_upstream_url
+from config import _log_failure, _public_base_url, _resource_path, static_url, _safe_team_id, _validate_upstream_url
 from state import _spawn_background_task, new_channel_state, stream_state
 from db import (
     _bulk_set_favorite_sync,
@@ -98,6 +98,7 @@ def _candidate_option_label(cand: dict, idx: int, active_index: int) -> dict:
 # source tree and the PyInstaller bundle (BUNDLE_DIR/_MEIPASS) find them; see
 # jellyball.spec, which adds both directories to `datas`.
 TEMPLATES = Jinja2Templates(directory=str(_resource_path("templates")))
+TEMPLATES.env.globals["static_url"] = static_url
 
 
 @router.get("/", response_class=HTMLResponse)
