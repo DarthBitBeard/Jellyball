@@ -15,4 +15,5 @@ class OneStreamScraper(HtmlAggregatorProvider):
             # The per-sport pages hide their schedule in obfuscated script, so
             # only the home page's listing is read.
             ["/match/", "/stream/", "/live/", "-live-stream/"],
+            series_sections={"f1": ["/f1streams"]},
         )

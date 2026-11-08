@@ -18,11 +18,16 @@ from leagues import (
     CATALOG_CATEGORIES,
     COLLEGE_CATEGORIES,
     LEAGUES,
+    MOTORSPORT_GROUP_KEY,
     OPTIONAL_LEAGUES,
     OPTIONAL_LEAGUES_BY_KEY,
+    SERIES,
+    SERIES_BY_KEY,
     UK_SPORTS_GROUP_KEY,
+    Series,
     parse_optional_groups,
 )
+from motorsport_terms import series_search_terms
 from network_safety import bounded_float, safe_get
 from optional_leagues import optional_records
 from sports_catalog import (
@@ -37,6 +42,7 @@ from sports_catalog import (
 from sports_matcher import canonical_team_name
 # Defined in espn_schedule.py; re-exported here for `from catalog import ...`.
 from espn_schedule import fetch_espn_team_schedule
+from motorsport_schedule import is_series_category, series_in_season, series_resume_label
 
 
 CATALOG_REFRESH_SECONDS = bounded_float(os.getenv("CATALOG_REFRESH_SECONDS", "3600"), 3600.0, 60.0, 86400.0)
@@ -310,9 +316,11 @@ def _channel_tvg_id(team_id: str, data: dict) -> str:
 def _channel_group_title(data: dict) -> str:
     special_channel = _special_channel_for(data)
     category = data.get("category")
+    series = SERIES_BY_KEY.get(str(category or ""))
     return str(
         data.get("group_title")
         or (special_channel.group_title if special_channel else "")
+        or (series.group_title if series else "")
         or _CATEGORY_GROUP_LABELS.get(category)
         or _OPTIONAL_GROUP_LABELS.get(category)
         or "Team Trackers"
@@ -368,6 +376,26 @@ def _special_catalog_entry(channel) -> dict:
     }
 
 
+def _series_catalog_entry(series: Series) -> dict:
+    """A motorsport series channel: follows every session of every round.
+    Its stored search terms are the series' names; the scrape loop adds the
+    current round's (failover._channel_search_terms)."""
+    return {
+        "catalog_key": f"series:{series.key}",
+        "team_id": _safe_team_id(f"series_{series.key}"),
+        "name": series.name,
+        "query": series.name,
+        "category": series.key,
+        "source_id": "",
+        "content_type": "series",
+        "search_terms": series_search_terms(series.key),
+        "always_live": False,
+        "logo_url": series.logo_url,
+        "group_title": series.group_title,
+        "catalog_group": MOTORSPORT_GROUP_KEY,
+    }
+
+
 def _optional_team_catalog_entry(category: str, record: TeamSlug) -> dict:
     """An opt-in league team: a team entry whose name carries the league's
     suffix ("Arsenal (Champions League)") and whose catalog section is its league."""
@@ -407,6 +435,8 @@ def _optional_catalog_entries(groups: Iterable[str]) -> List[dict]:
             entries.extend(_optional_team_catalog_entry(league.key, record) for record in optional_records(league.key))
     if UK_SPORTS_GROUP_KEY in enabled:
         entries.extend(_optional_special_catalog_entry(channel) for channel in OPTIONAL_SPECIAL_CHANNELS)
+    if MOTORSPORT_GROUP_KEY in enabled:
+        entries.extend(_series_catalog_entry(series) for series in SERIES)
     return entries
 
 
@@ -532,13 +562,16 @@ def is_in_season(category: str, today: Optional[date] = None) -> bool:
     """Return whether `category`'s sport is inside its preseason-to-championship window.
 
     Categories with no defined window (manually added "custom" teams, and
-    non-sport special channels) are always considered in season.
+    non-sport special channels) are always considered in season. A motorsport
+    series uses the season ESPN lists (motorsport_schedule.series_in_season).
     """
+    current = today or datetime.now(timezone.utc).date()
+    if is_series_category(category):
+        return series_in_season(category, current)
     window = SEASON_WINDOWS.get(category) or _OPTIONAL_SEASON_WINDOWS.get(category)
     if not window:
         return True
     start_month, start_day, end_month, end_day = window
-    current = today or datetime.now(timezone.utc).date()
     start = (start_month, start_day)
     end = (end_month, end_day)
     here = (current.month, current.day)
@@ -550,6 +583,8 @@ def is_in_season(category: str, today: Optional[date] = None) -> bool:
 
 def _season_resume_label(category: str) -> str:
     """Return a short "Mon D" label for when `category`'s season window reopens."""
+    if is_series_category(category):
+        return series_resume_label(category, datetime.now(timezone.utc).date())
     window = SEASON_WINDOWS.get(category) or _OPTIONAL_SEASON_WINDOWS.get(category)
     if not window:
         return ""

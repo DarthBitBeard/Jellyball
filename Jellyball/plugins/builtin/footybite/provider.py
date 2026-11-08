@@ -13,4 +13,5 @@ class FootybiteScraper(HtmlAggregatorProvider):
             [],
             # Event pages moved to /game/<slug> (issue #49).
             ["/watch/", "/stream/", "/live/", "/match/", "/game/"],
+            series_sections={"f1": ["/f1-streams"]},
         )

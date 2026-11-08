@@ -1,0 +1,773 @@
+{
+  "leagues": [
+    {
+      "id": "2030",
+      "uid": "s:2000~l:2030",
+      "name": "Formula 1",
+      "abbreviation": "F1",
+      "slug": "f1",
+      "season": {
+        "year": 2026,
+        "startDate": "2026-01-01T08:00Z",
+        "endDate": "2026-12-31T08:00Z",
+        "displayName": "2026",
+        "type": {
+          "id": "2",
+          "type": 2,
+          "name": "Regular Season",
+          "abbreviation": "reg"
+        }
+      },
+      "logos": [
+        {
+          "href": "https://a.espncdn.com/combiner/i?img=/i/teamlogos/leagues/500/f1.png",
+          "width": 500,
+          "height": 500,
+          "alt": "",
+          "rel": [
+            "full",
+            "default"
+          ],
+          "lastUpdated": "2026-11-04T23:48Z"
+        },
+        {
+          "href": "http://a.espncdn.com/combiner/i?img=/i/teamlogos/leagues/500/f1.png",
+          "width": 500,
+          "height": 500,
+          "alt": "",
+          "rel": [
+            "full",
+            "dark"
+          ],
+          "lastUpdated": "2026-11-05T00:12Z"
+        }
+      ],
+      "calendarType": "list",
+      "calendarIsWhitelist": true,
+      "calendarStartDate": "2026-11-05T08:00Z",
+      "calendarEndDate": "2026-11-25T08:00Z",
+      "calendar": [
+        {
+          "label": "MSC Cruises São Paulo Grand Prix",
+          "startDate": "2026-11-06T18:30Z",
+          "endDate": "2026-11-08T20:00Z",
+          "event": {
+            "$ref": "http://sports.core.api.espn.pvt/v2/sports/racing/leagues/f1/events/600057448?lang=en&region=us"
+          }
+        },
+        {
+          "label": "Heineken Las Vegas Grand Prix",
+          "startDate": "2026-11-20T03:30Z",
+          "endDate": "2026-11-22T07:00Z",
+          "event": {
+            "$ref": "http://sports.core.api.espn.pvt/v2/sports/racing/leagues/f1/events/600057449?lang=en&region=us"
+          }
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "id": "600057448",
+      "uid": "s:2000~l:2030~e:600057448",
+      "date": "2026-11-06T15:30Z",
+      "endDate": "2026-11-08T17:00Z",
+      "name": "MSC Cruises São Paulo Grand Prix",
+      "shortName": "MSC Cruises São Paulo GP",
+      "season": {
+        "year": 2026,
+        "type": 2,
+        "slug": "regular-season"
+      },
+      "competitions": [
+        {
+          "id": "401839128",
+          "uid": "s:2000~l:2030~e:600057448~c:401839128",
+          "date": "2026-11-06T15:30Z",
+          "type": {
+            "id": "1",
+            "abbreviation": "FP1"
+          },
+          "timeValid": true,
+          "recent": false,
+          "notes": [],
+          "status": {
+            "clock": 0.0,
+            "displayClock": "0:00",
+            "period": 0,
+            "type": {
+              "id": "1",
+              "name": "STATUS_SCHEDULED",
+              "state": "pre",
+              "completed": false,
+              "description": "Scheduled",
+              "detail": "Fri, November 6th at 10:30 AM EST",
+              "shortDetail": "11/6 - 10:30 AM EST"
+            }
+          },
+          "broadcasts": [
+            {
+              "market": "national",
+              "names": [
+                "Apple TV"
+              ]
+            }
+          ],
+          "startDate": "2026-11-06T15:30Z",
+          "broadcast": "Apple TV",
+          "geoBroadcasts": [
+            {
+              "type": {
+                "id": "4",
+                "shortName": "Streaming"
+              },
+              "market": {
+                "id": "1",
+                "type": "National"
+              },
+              "media": {
+                "shortName": "Apple TV"
+              },
+              "lang": "en",
+              "region": "us"
+            }
+          ],
+          "highlights": []
+        },
+        {
+          "id": "401839129",
+          "uid": "s:2000~l:2030~e:600057448~c:401839129",
+          "date": "2026-11-06T19:00Z",
+          "type": {
+            "id": "1",
+            "abbreviation": "FP2"
+          },
+          "timeValid": true,
+          "recent": false,
+          "notes": [],
+          "status": {
+            "clock": 0.0,
+            "displayClock": "0:00",
+            "period": 0,
+            "type": {
+              "id": "1",
+              "name": "STATUS_SCHEDULED",
+              "state": "pre",
+              "completed": false,
+              "description": "Scheduled",
+              "detail": "Fri, November 6th at 2:00 PM EST",
+              "shortDetail": "11/6 - 2:00 PM EST"
+            }
+          },
+          "broadcasts": [
+            {
+              "market": "national",
+              "names": [
+                "Apple TV"
+              ]
+            }
+          ],
+          "startDate": "2026-11-06T19:00Z",
+          "broadcast": "Apple TV",
+          "geoBroadcasts": [
+            {
+              "type": {
+                "id": "4",
+                "shortName": "Streaming"
+              },
+              "market": {
+                "id": "1",
+                "type": "National"
+              },
+              "media": {
+                "shortName": "Apple TV"
+              },
+              "lang": "en",
+              "region": "us"
+            }
+          ],
+          "highlights": []
+        },
+        {
+          "id": "401839130",
+          "uid": "s:2000~l:2030~e:600057448~c:401839130",
+          "date": "2026-11-07T14:30Z",
+          "type": {
+            "id": "1",
+            "abbreviation": "FP3"
+          },
+          "timeValid": true,
+          "recent": false,
+          "notes": [],
+          "status": {
+            "clock": 0.0,
+            "displayClock": "0:00",
+            "period": 0,
+            "type": {
+              "id": "1",
+              "name": "STATUS_SCHEDULED",
+              "state": "pre",
+              "completed": false,
+              "description": "Scheduled",
+              "detail": "Sat, November 7th at 9:30 AM EST",
+              "shortDetail": "11/7 - 9:30 AM EST"
+            }
+          },
+          "broadcasts": [
+            {
+              "market": "national",
+              "names": [
+                "Apple TV"
+              ]
+            }
+          ],
+          "startDate": "2026-11-07T14:30Z",
+          "broadcast": "Apple TV",
+          "geoBroadcasts": [
+            {
+              "type": {
+                "id": "4",
+                "shortName": "Streaming"
+              },
+              "market": {
+                "id": "1",
+                "type": "National"
+              },
+              "media": {
+                "shortName": "Apple TV"
+              },
+              "lang": "en",
+              "region": "us"
+            }
+          ],
+          "highlights": []
+        },
+        {
+          "id": "401839131",
+          "uid": "s:2000~l:2030~e:600057448~c:401839131",
+          "date": "2026-11-07T18:00Z",
+          "type": {
+            "id": "2",
+            "abbreviation": "Qual"
+          },
+          "timeValid": true,
+          "recent": false,
+          "notes": [],
+          "status": {
+            "clock": 0.0,
+            "displayClock": "0:00",
+            "period": 0,
+            "type": {
+              "id": "1",
+              "name": "STATUS_SCHEDULED",
+              "state": "pre",
+              "completed": false,
+              "description": "Scheduled",
+              "detail": "Sat, November 7th at 1:00 PM EST",
+              "shortDetail": "11/7 - 1:00 PM EST"
+            }
+          },
+          "broadcasts": [
+            {
+              "market": "national",
+              "names": [
+                "Apple TV"
+              ]
+            }
+          ],
+          "startDate": "2026-11-07T18:00Z",
+          "broadcast": "Apple TV",
+          "geoBroadcasts": [
+            {
+              "type": {
+                "id": "4",
+                "shortName": "Streaming"
+              },
+              "market": {
+                "id": "1",
+                "type": "National"
+              },
+              "media": {
+                "shortName": "Apple TV"
+              },
+              "lang": "en",
+              "region": "us"
+            }
+          ],
+          "highlights": []
+        },
+        {
+          "id": "401839132",
+          "uid": "s:2000~l:2030~e:600057448~c:401839132",
+          "date": "2026-11-08T17:00Z",
+          "type": {
+            "id": "3",
+            "abbreviation": "Race"
+          },
+          "timeValid": true,
+          "recent": false,
+          "notes": [],
+          "status": {
+            "clock": 0.0,
+            "displayClock": "0:00",
+            "period": 0,
+            "type": {
+              "id": "1",
+              "name": "STATUS_SCHEDULED",
+              "state": "pre",
+              "completed": false,
+              "description": "Scheduled",
+              "detail": "Sun, November 8th at 12:00 PM EST",
+              "shortDetail": "11/8 - 12:00 PM EST"
+            }
+          },
+          "broadcasts": [
+            {
+              "market": "national",
+              "names": [
+                "Apple TV"
+              ]
+            }
+          ],
+          "startDate": "2026-11-08T17:00Z",
+          "broadcast": "Apple TV",
+          "geoBroadcasts": [
+            {
+              "type": {
+                "id": "4",
+                "shortName": "Streaming"
+              },
+              "market": {
+                "id": "1",
+                "type": "National"
+              },
+              "media": {
+                "shortName": "Apple TV"
+              },
+              "lang": "en",
+              "region": "us"
+            }
+          ],
+          "highlights": []
+        }
+      ],
+      "links": [
+        {
+          "language": "en-US",
+          "rel": [
+            "summary",
+            "desktop",
+            "event"
+          ],
+          "href": "https://www.espn.com/f1/race/_/id/600057448",
+          "text": "Gamecast",
+          "shortText": "Gamecast",
+          "isExternal": false,
+          "isPremium": false
+        },
+        {
+          "language": "en-US",
+          "rel": [
+            "preview",
+            "desktop",
+            "event"
+          ],
+          "href": "https://www.espn.com/f1/preview/_/id/600057448",
+          "text": "Preview",
+          "shortText": "Preview",
+          "isExternal": false,
+          "isPremium": false
+        },
+        {
+          "language": "en-US",
+          "rel": [
+            "circuit",
+            "desktop",
+            "event"
+          ],
+          "href": "https://www.espn.com/f1/circuit/_/id/600057448",
+          "text": "Circuit",
+          "shortText": "Circuit",
+          "isExternal": false,
+          "isPremium": false
+        }
+      ],
+      "circuit": {
+        "id": "617",
+        "fullName": "Autodromo Jose Carlos Pace",
+        "address": {
+          "city": "Sao paulo",
+          "country": "Brazil"
+        }
+      },
+      "status": {
+        "clock": 0.0,
+        "displayClock": "0:00",
+        "period": 0,
+        "type": {
+          "id": "1",
+          "name": "STATUS_SCHEDULED",
+          "state": "pre",
+          "completed": false,
+          "description": "Scheduled",
+          "detail": "Fri, November 6th at 10:30 AM EST",
+          "shortDetail": "11/6 - 10:30 AM EST"
+        }
+      }
+    },
+    {
+      "id": "600057449",
+      "uid": "s:2000~l:2030~e:600057449",
+      "date": "2026-11-20T00:30Z",
+      "endDate": "2026-11-22T04:00Z",
+      "name": "Heineken Las Vegas Grand Prix",
+      "shortName": "Heineken Las Vegas GP",
+      "season": {
+        "year": 2026,
+        "type": 2,
+        "slug": "regular-season"
+      },
+      "competitions": [
+        {
+          "id": "401839133",
+          "uid": "s:2000~l:2030~e:600057449~c:401839133",
+          "date": "2026-11-20T00:30Z",
+          "type": {
+            "id": "1",
+            "abbreviation": "FP1"
+          },
+          "timeValid": true,
+          "recent": false,
+          "notes": [],
+          "status": {
+            "clock": 0.0,
+            "displayClock": "0:00",
+            "period": 0,
+            "type": {
+              "id": "1",
+              "name": "STATUS_SCHEDULED",
+              "state": "pre",
+              "completed": false,
+              "description": "Scheduled",
+              "detail": "Thu, November 19th at 7:30 PM EST",
+              "shortDetail": "11/19 - 7:30 PM EST"
+            }
+          },
+          "broadcasts": [
+            {
+              "market": "national",
+              "names": [
+                "Apple TV"
+              ]
+            }
+          ],
+          "startDate": "2026-11-20T00:30Z",
+          "broadcast": "Apple TV",
+          "geoBroadcasts": [
+            {
+              "type": {
+                "id": "4",
+                "shortName": "Streaming"
+              },
+              "market": {
+                "id": "1",
+                "type": "National"
+              },
+              "media": {
+                "shortName": "Apple TV"
+              },
+              "lang": "en",
+              "region": "us"
+            }
+          ],
+          "highlights": []
+        },
+        {
+          "id": "401839134",
+          "uid": "s:2000~l:2030~e:600057449~c:401839134",
+          "date": "2026-11-20T04:00Z",
+          "type": {
+            "id": "1",
+            "abbreviation": "FP2"
+          },
+          "timeValid": true,
+          "recent": false,
+          "notes": [],
+          "status": {
+            "clock": 0.0,
+            "displayClock": "0:00",
+            "period": 0,
+            "type": {
+              "id": "1",
+              "name": "STATUS_SCHEDULED",
+              "state": "pre",
+              "completed": false,
+              "description": "Scheduled",
+              "detail": "Thu, November 19th at 11:00 PM EST",
+              "shortDetail": "11/19 - 11:00 PM EST"
+            }
+          },
+          "broadcasts": [
+            {
+              "market": "national",
+              "names": [
+                "Apple TV"
+              ]
+            }
+          ],
+          "startDate": "2026-11-20T04:00Z",
+          "broadcast": "Apple TV",
+          "geoBroadcasts": [
+            {
+              "type": {
+                "id": "4",
+                "shortName": "Streaming"
+              },
+              "market": {
+                "id": "1",
+                "type": "National"
+              },
+              "media": {
+                "shortName": "Apple TV"
+              },
+              "lang": "en",
+              "region": "us"
+            }
+          ],
+          "highlights": []
+        },
+        {
+          "id": "401839135",
+          "uid": "s:2000~l:2030~e:600057449~c:401839135",
+          "date": "2026-11-21T00:30Z",
+          "type": {
+            "id": "1",
+            "abbreviation": "FP3"
+          },
+          "timeValid": true,
+          "recent": false,
+          "notes": [],
+          "status": {
+            "clock": 0.0,
+            "displayClock": "0:00",
+            "period": 0,
+            "type": {
+              "id": "1",
+              "name": "STATUS_SCHEDULED",
+              "state": "pre",
+              "completed": false,
+              "description": "Scheduled",
+              "detail": "Fri, November 20th at 7:30 PM EST",
+              "shortDetail": "11/20 - 7:30 PM EST"
+            }
+          },
+          "broadcasts": [
+            {
+              "market": "national",
+              "names": [
+                "Apple TV"
+              ]
+            }
+          ],
+          "startDate": "2026-11-21T00:30Z",
+          "broadcast": "Apple TV",
+          "geoBroadcasts": [
+            {
+              "type": {
+                "id": "4",
+                "shortName": "Streaming"
+              },
+              "market": {
+                "id": "1",
+                "type": "National"
+              },
+              "media": {
+                "shortName": "Apple TV"
+              },
+              "lang": "en",
+              "region": "us"
+            }
+          ],
+          "highlights": []
+        },
+        {
+          "id": "401839136",
+          "uid": "s:2000~l:2030~e:600057449~c:401839136",
+          "date": "2026-11-21T04:00Z",
+          "type": {
+            "id": "2",
+            "abbreviation": "Qual"
+          },
+          "timeValid": true,
+          "recent": false,
+          "notes": [],
+          "status": {
+            "clock": 0.0,
+            "displayClock": "0:00",
+            "period": 0,
+            "type": {
+              "id": "1",
+              "name": "STATUS_SCHEDULED",
+              "state": "pre",
+              "completed": false,
+              "description": "Scheduled",
+              "detail": "Fri, November 20th at 11:00 PM EST",
+              "shortDetail": "11/20 - 11:00 PM EST"
+            }
+          },
+          "broadcasts": [
+            {
+              "market": "national",
+              "names": [
+                "Apple TV"
+              ]
+            }
+          ],
+          "startDate": "2026-11-21T04:00Z",
+          "broadcast": "Apple TV",
+          "geoBroadcasts": [
+            {
+              "type": {
+                "id": "4",
+                "shortName": "Streaming"
+              },
+              "market": {
+                "id": "1",
+                "type": "National"
+              },
+              "media": {
+                "shortName": "Apple TV"
+              },
+              "lang": "en",
+              "region": "us"
+            }
+          ],
+          "highlights": []
+        },
+        {
+          "id": "401839137",
+          "uid": "s:2000~l:2030~e:600057449~c:401839137",
+          "date": "2026-11-22T04:00Z",
+          "type": {
+            "id": "3",
+            "abbreviation": "Race"
+          },
+          "timeValid": true,
+          "recent": false,
+          "notes": [],
+          "status": {
+            "clock": 0.0,
+            "displayClock": "0:00",
+            "period": 0,
+            "type": {
+              "id": "1",
+              "name": "STATUS_SCHEDULED",
+              "state": "pre",
+              "completed": false,
+              "description": "Scheduled",
+              "detail": "Sat, November 21st at 11:00 PM EST",
+              "shortDetail": "11/21 - 11:00 PM EST"
+            }
+          },
+          "broadcasts": [
+            {
+              "market": "national",
+              "names": [
+                "Apple TV"
+              ]
+            }
+          ],
+          "startDate": "2026-11-22T04:00Z",
+          "broadcast": "Apple TV",
+          "geoBroadcasts": [
+            {
+              "type": {
+                "id": "4",
+                "shortName": "Streaming"
+              },
+              "market": {
+                "id": "1",
+                "type": "National"
+              },
+              "media": {
+                "shortName": "Apple TV"
+              },
+              "lang": "en",
+              "region": "us"
+            }
+          ],
+          "highlights": []
+        }
+      ],
+      "links": [
+        {
+          "language": "en-US",
+          "rel": [
+            "summary",
+            "desktop",
+            "event"
+          ],
+          "href": "https://www.espn.com/f1/race/_/id/600057449",
+          "text": "Gamecast",
+          "shortText": "Gamecast",
+          "isExternal": false,
+          "isPremium": false
+        },
+        {
+          "language": "en-US",
+          "rel": [
+            "preview",
+            "desktop",
+            "event"
+          ],
+          "href": "https://www.espn.com/f1/preview/_/id/600057449",
+          "text": "Preview",
+          "shortText": "Preview",
+          "isExternal": false,
+          "isPremium": false
+        },
+        {
+          "language": "en-US",
+          "rel": [
+            "circuit",
+            "desktop",
+            "event"
+          ],
+          "href": "https://www.espn.com/f1/circuit/_/id/600057449",
+          "text": "Circuit",
+          "shortText": "Circuit",
+          "isExternal": false,
+          "isPremium": false
+        }
+      ],
+      "circuit": {
+        "id": "4250",
+        "fullName": "Las Vegas Street Circuit",
+        "address": {
+          "city": "Nevada",
+          "country": "USA"
+        }
+      },
+      "status": {
+        "clock": 0.0,
+        "displayClock": "0:00",
+        "period": 0,
+        "type": {
+          "id": "1",
+          "name": "STATUS_SCHEDULED",
+          "state": "pre",
+          "completed": false,
+          "description": "Scheduled",
+          "detail": "Thu, November 19th at 7:30 PM EST",
+          "shortDetail": "11/19 - 7:30 PM EST"
+        }
+      }
+    }
+  ],
+  "provider": {
+    "id": "100",
+    "name": "Draft Kings",
+    "displayName": "Draft Kings",
+    "priority": 1
+  }
+}

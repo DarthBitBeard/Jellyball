@@ -1,0 +1,354 @@
+"""Motorsport series schedules (Formula 1): every session of the coming race
+weekends, from ESPN's racing scoreboard.
+
+A series channel follows all sessions (practice, sprint, qualifying, race), so
+instead of one team's next game this module keeps the list of sessions in the
+next SCHEDULE_LOOKAHEAD_DAYS, one request per series:
+
+  /apis/site/v2/sports/<sport>/<league>/scoreboard?dates=YYYYMMDD-YYYYMMDD
+
+Each event in the response is a race weekend; each of its competitions is one
+session whose type.abbreviation is the session code (FP1, SS, SR, Qual, Race).
+
+fetch_series_schedule() returns the same (start, stop, lookup_ok) triple as
+espn_schedule.fetch_espn_team_schedule, for the current or next session, so the
+scrape loop's stream-window logic works unchanged. The season (first and last
+round) comes from the scoreboard's calendar, fetched separately because a
+dated request only returns the calendar entries inside its date range.
+"""
+
+import os
+import re
+import time
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
+
+from config import _log_failure, LOGGER
+from leagues import SERIES_BY_KEY, Series
+from motorsport_terms import F1_GRAND_PRIX_PLACES, series_search_terms
+from network_safety import bounded_float, safe_get
+import state
+
+
+ESPN_SITE_API = "https://site.api.espn.com/apis/site/v2/sports"
+
+SERIES_SCHEDULE_CACHE_SECONDS = bounded_float(
+    os.getenv("SERIES_SCHEDULE_CACHE_SECONDS", "1200"), 1200.0, 60.0, 7200.0
+)
+SERIES_SEASON_CACHE_SECONDS = 6 * 3600.0
+# Failed lookups are cached briefly, as in espn_schedule, so an ESPN outage
+# neither hammers the API nor pins a channel to "lookup failed" for long.
+_FAILURE_CACHE_SECONDS = 60.0
+
+# Sessions are requested from yesterday (a session that ran past midnight UTC
+# is still in its trailing window) up to this many days ahead: past the guide
+# horizon (epg.GUIDE_HORIZON_DAYS) and the 14 days team schedules look ahead.
+SCHEDULE_LOOKBACK_DAYS = 1
+SCHEDULE_LOOKAHEAD_DAYS = 14
+# A session still counts as current this long after its assumed end, matching
+# espn_schedule ("ended at most an hour ago").
+CURRENT_SESSION_GRACE = timedelta(hours=1)
+# The season opens this many days before the first round's listed start
+# (the calendar gives the weekend, sessions can start the day before).
+SEASON_OPEN_MARGIN = timedelta(days=7)
+
+
+@dataclass(frozen=True)
+class Session:
+    """One session of a race weekend."""
+
+    series: str
+    event_id: str
+    event_name: str  # ESPN's full name, sponsor included
+    round_name: str  # display name of the weekend, e.g. "São Paulo GP"
+    code: str  # ESPN session code, e.g. "Qual"
+    label: str  # e.g. "Qualifying"
+    start: datetime
+    stop: datetime
+    circuit: str = ""
+    city: str = ""
+    country: str = ""
+    place: str = ""  # motorsport_terms.F1_ROUNDS key, "" when unknown
+
+    @property
+    def title(self) -> str:
+        """Full name of the session: "São Paulo GP - Qualifying"."""
+        return f"{self.round_name} - {self.label}"
+
+    @property
+    def programme_title(self) -> str:
+        """Guide title: the same all season for a session kind ("F1 Qualifying"),
+        so Jellyfin can record it as a series; the round is the episode title."""
+        series = SERIES_BY_KEY.get(self.series)
+        return f"{series.short_name} {self.label}" if series else self.title
+
+    @property
+    def location(self) -> str:
+        """"Autodromo Jose Carlos Pace, Sao Paulo, Brazil" (missing parts left out)."""
+        return ", ".join(part for part in (self.circuit, self.city, self.country) if part)
+
+    @property
+    def description(self) -> str:
+        where = f" at {self.location}" if self.location else ""
+        return f"{self.label} of the {self.event_name or self.round_name}{where}."
+
+
+# ESPN prefixes the title sponsor ("MSC Cruises São Paulo Grand Prix", "Qatar
+# Airways Qatar Grand Prix"), so the display name is the known place
+# (motorsport_terms.F1_ROUNDS) right before "Grand Prix". An unknown place
+# keeps ESPN's full name.
+_PLACE_RE = re.compile(
+    r"\b(?P<place>" + "|".join(re.escape(p) for p in sorted(F1_GRAND_PRIX_PLACES, key=len, reverse=True))
+    + r")\s+Grand\s+Prix\b(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_PLACES_BY_LOWER = {place.lower(): place for place in F1_GRAND_PRIX_PLACES}
+
+
+def round_place(event_name: str) -> str:
+    """The F1_ROUNDS key of an event ("Qatar Airways Qatar Grand Prix" ->
+    "Qatar"), or "" when the place is unknown."""
+    match = _PLACE_RE.search(re.sub(r"\s+", " ", str(event_name or "")))
+    return _PLACES_BY_LOWER.get(match.group("place").lower(), "") if match else ""
+
+
+def round_display_name(event_name: str) -> str:
+    """"MSC Cruises São Paulo Grand Prix" -> "São Paulo GP";
+    "Gulf Air Bahrain Grand Prix in Malaysia" -> "Bahrain GP in Malaysia"."""
+    name = re.sub(r"\s+", " ", str(event_name or "")).strip()
+    match = _PLACE_RE.search(name)
+    if match:
+        return f"{match.group('place')} GP{match.group('rest')}".strip()
+    return re.sub(r"\bGrand\s+Prix\b", "GP", name, flags=re.IGNORECASE)
+
+
+def _parse_espn_time(value: object) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
+_LOWERCASE_PARTICLES = {"de", "do", "da", "di", "del", "la", "le", "of", "and"}
+
+
+def _place_label(value: object) -> str:
+    """ESPN writes some places partly in lower case ("Sao paulo"): capitalise
+    each lower-case word except connecting particles ("Rio de Janeiro")."""
+    words = re.sub(r"\s+", " ", str(value or "")).strip().split(" ")
+    return " ".join(
+        word[:1].upper() + word[1:]
+        if word[:1].islower() and (index == 0 or word not in _LOWERCASE_PARTICLES) else word
+        for index, word in enumerate(words)
+    )
+
+
+def _as_dict(value: object) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def parse_series_sessions(series: Series, data: object) -> List[Session]:
+    """Every session in an ESPN racing scoreboard response, sorted by start.
+    Competitions without a usable date are skipped; a malformed response
+    yields []."""
+    if not isinstance(data, dict):
+        return []
+    sessions: List[Session] = []
+    for event in data.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        event_name = str(event.get("name") or "").strip()
+        round_name = round_display_name(event_name) or series.name
+        circuit = _as_dict(event.get("circuit"))
+        address = _as_dict(circuit.get("address"))
+        for comp in event.get("competitions") or []:
+            if not isinstance(comp, dict):
+                continue
+            start = _parse_espn_time(comp.get("date") or comp.get("startDate"))
+            if start is None:
+                continue
+            code = str(_as_dict(comp.get("type")).get("abbreviation") or "").strip()
+            sessions.append(Session(
+                series=series.key,
+                event_id=str(event.get("id") or ""),
+                event_name=event_name,
+                round_name=round_name,
+                code=code,
+                label=series.session_label(code) if code else "Session",
+                start=start,
+                stop=start + series.session_duration(code),
+                circuit=str(circuit.get("fullName") or "").strip(),
+                city=_place_label(address.get("city")),
+                country=_place_label(address.get("country")),
+                place=round_place(event_name),
+            ))
+    sessions.sort(key=lambda session: (session.start, session.code))
+    return sessions
+
+
+def parse_series_season(data: object) -> Optional[Tuple[datetime, datetime]]:
+    """(first round start, last round end) from a scoreboard's calendar."""
+    if not isinstance(data, dict):
+        return None
+    leagues = data.get("leagues")
+    if not isinstance(leagues, list) or not leagues or not isinstance(leagues[0], dict):
+        return None
+    starts, ends = [], []
+    for entry in leagues[0].get("calendar") or []:
+        if not isinstance(entry, dict):
+            continue
+        start = _parse_espn_time(entry.get("startDate"))
+        end = _parse_espn_time(entry.get("endDate")) or start
+        if start and end:
+            starts.append(start)
+            ends.append(end)
+    if not starts:
+        return None
+    return min(starts), max(ends)
+
+
+_SESSIONS_CACHE: Dict[str, Tuple[float, Tuple[Tuple[Session, ...], bool]]] = {}
+# The last successful session list per series, kept through failed lookups.
+_LAST_GOOD_SESSIONS: Dict[str, Tuple[Session, ...]] = {}
+_SEASON_CACHE: Dict[str, Tuple[float, Optional[Tuple[datetime, datetime]]]] = {}
+
+
+async def _get_json(url: str, what: str) -> Optional[object]:
+    owns_client = state.SHARED_HTTP_CLIENT is None
+    client = state.SHARED_HTTP_CLIENT or httpx.AsyncClient(timeout=8.0, follow_redirects=False, http2=True)
+    try:
+        resp = await safe_get(client, url)
+        if resp is None or resp.status_code != 200:
+            LOGGER.warning("ESPN %s request status=%s", what,
+                           resp.status_code if resp is not None else "fetch-failed")
+            return None
+        return resp.json()
+    except Exception as exc:
+        _log_failure(f"fetch ESPN {what}", exc)
+        return None
+    finally:
+        if owns_client:
+            await client.aclose()
+
+
+async def fetch_series_sessions(series_key: str) -> Tuple[Tuple[Session, ...], bool]:
+    """(sessions, lookup_ok): every session from yesterday to
+    SCHEDULE_LOOKAHEAD_DAYS ahead, sorted by start. ((), False) when the
+    lookup failed or the series is unknown. Cached per series."""
+    series = SERIES_BY_KEY.get(series_key)
+    if series is None:
+        return (), False
+    cached = _SESSIONS_CACHE.get(series.key)
+    if cached is not None and time.monotonic() < cached[0]:
+        return cached[1]
+
+    today = datetime.now(timezone.utc).date()
+    first = today - timedelta(days=SCHEDULE_LOOKBACK_DAYS)
+    last = today + timedelta(days=SCHEDULE_LOOKAHEAD_DAYS)
+    url = (f"{ESPN_SITE_API}/{series.espn_sport}/{series.espn_league}/scoreboard"
+           f"?dates={first:%Y%m%d}-{last:%Y%m%d}")
+    data = await _get_json(url, f"{series.key} schedule")
+    if isinstance(data, dict) and isinstance(data.get("events", []), list):
+        result: Tuple[Tuple[Session, ...], bool] = (tuple(parse_series_sessions(series, data)), True)
+        _LAST_GOOD_SESSIONS[series.key] = result[0]
+    else:
+        result = ((), False)
+    ttl = SERIES_SCHEDULE_CACHE_SECONDS if result[1] else _FAILURE_CACHE_SECONDS
+    _SESSIONS_CACHE[series.key] = (time.monotonic() + ttl, result)
+    return result
+
+
+async def fetch_series_season(series_key: str) -> Optional[Tuple[datetime, datetime]]:
+    """(first round start, last round end) of the season ESPN currently lists,
+    or None when unknown. Cached per series; read back by series_in_season()."""
+    series = SERIES_BY_KEY.get(series_key)
+    if series is None:
+        return None
+    cached = _SEASON_CACHE.get(series.key)
+    if cached is not None and time.monotonic() < cached[0]:
+        return cached[1]
+    url = f"{ESPN_SITE_API}/{series.espn_sport}/{series.espn_league}/scoreboard"
+    season = parse_series_season(await _get_json(url, f"{series.key} season"))
+    ttl = SERIES_SEASON_CACHE_SECONDS if season else _FAILURE_CACHE_SECONDS
+    _SEASON_CACHE[series.key] = (time.monotonic() + ttl, season)
+    return season
+
+
+def cached_series_sessions(series_key: str) -> Tuple[Session, ...]:
+    """The last successfully fetched sessions, even past their cache lifetime
+    (the guide and dashboard read this without fetching; a stale list beats an
+    empty guide). () before the first successful lookup."""
+    cached = _SESSIONS_CACHE.get(series_key)
+    if cached is not None and cached[1][1]:
+        return cached[1][0]
+    return _LAST_GOOD_SESSIONS.get(series_key, ())
+
+
+def _cached_season(series_key: str) -> Optional[Tuple[datetime, datetime]]:
+    cached = _SEASON_CACHE.get(series_key)
+    return cached[1] if cached else None
+
+
+def series_in_season(series_key: str, today: date) -> bool:
+    """Whether `today` falls inside the cached season (from a week before the
+    first round to the day after the last). True while the season is unknown,
+    so a failed or not-yet-made lookup never hides the channel."""
+    season = _cached_season(series_key)
+    if season is None:
+        return True
+    first, last = season
+    return (first - SEASON_OPEN_MARGIN).date() <= today <= last.date() + timedelta(days=1)
+
+
+def series_resume_label(series_key: str, today: date) -> str:
+    """"Mar 6" when the cached season starts after `today`, else ""
+    (the next season is not listed yet)."""
+    season = _cached_season(series_key)
+    if season is None or season[0].date() <= today:
+        return ""
+    return f"{season[0]:%b} {season[0].day}"
+
+
+def current_or_next_session(sessions: Tuple[Session, ...], now: datetime) -> Optional[Session]:
+    """The earliest session that ended at most CURRENT_SESSION_GRACE ago and
+    starts within SCHEDULE_LOOKAHEAD_DAYS."""
+    horizon = now + timedelta(days=SCHEDULE_LOOKAHEAD_DAYS)
+    upcoming = [s for s in sessions if s.stop >= now - CURRENT_SESSION_GRACE and s.start <= horizon]
+    return min(upcoming, key=lambda s: s.start) if upcoming else None
+
+
+async def fetch_series_schedule(series_key: str) -> Tuple[Optional[datetime], Optional[datetime], bool]:
+    """(start, stop, lookup_ok) of the series' current or next session, with
+    the contract of espn_schedule.fetch_espn_team_schedule: (None, None, True)
+    when ESPN lists no session in the window, (None, None, False) when the
+    lookup failed or the series is unknown."""
+    sessions, ok = await fetch_series_sessions(series_key)
+    if not ok:
+        return None, None, False
+    session = current_or_next_session(sessions, datetime.now(timezone.utc))
+    if session is None:
+        return None, None, True
+    return session.start, session.stop, True
+
+
+def is_series_category(category: str) -> bool:
+    return category in SERIES_BY_KEY
+
+
+def current_search_terms(series_key: str, now: Optional[datetime] = None) -> List[str]:
+    """A series channel's search terms right now: the series' names plus the
+    current or next round's names and venues (from the cached sessions; just
+    the series' names before the first lookup). sports_matcher rejects titles
+    naming another round once the round is known."""
+    session = current_or_next_session(cached_series_sessions(series_key), now or datetime.now(timezone.utc))
+    if session is None:
+        return series_search_terms(series_key)
+    return series_search_terms(series_key, session.place, session.city, session.country)

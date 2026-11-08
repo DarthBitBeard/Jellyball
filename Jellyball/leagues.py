@@ -155,11 +155,16 @@ OPTIONAL_LEAGUES_BY_KEY: Dict[str, League] = {league.key: league for league in O
 # Opt-in group of always-live channels (sports_catalog.OPTIONAL_SPECIAL_CHANNELS).
 UK_SPORTS_GROUP_KEY = "uk_sports"
 UK_SPORTS_GROUP_TITLE = "UK Sports Channels"
+# Opt-in group of motorsport series channels (SERIES below): one channel per
+# series, following every session of every round.
+MOTORSPORT_GROUP_KEY = "motorsport"
+MOTORSPORT_GROUP_TITLE = "Motorsport"
 
 # Every opt-in catalog group, in catalog order: (key, dashboard/M3U group title).
 OPTIONAL_CATALOG_GROUPS: Tuple[Tuple[str, str], ...] = (
     *((league.key, league.group_title) for league in OPTIONAL_LEAGUES),
     (UK_SPORTS_GROUP_KEY, UK_SPORTS_GROUP_TITLE),
+    (MOTORSPORT_GROUP_KEY, MOTORSPORT_GROUP_TITLE),
 )
 OPTIONAL_GROUP_KEYS: Tuple[str, ...] = tuple(key for key, _ in OPTIONAL_CATALOG_GROUPS)
 # Settings row holding the enabled opt-in groups, comma separated ("" = none).
@@ -176,3 +181,67 @@ def parse_optional_groups(value: object) -> Tuple[str, ...]:
 def schedule_league(key: str) -> Optional[League]:
     """The league espn_schedule looks up for a team of category `key`."""
     return SCHEDULE_LEAGUES.get(key) or OPTIONAL_LEAGUES_BY_KEY.get(key)
+
+
+# (ESPN session code, guide label, assumed length). ESPN lists every session of
+# a race weekend as one "competition" whose type.abbreviation is the code.
+SessionKind = Tuple[str, str, timedelta]
+
+
+@dataclass(frozen=True)
+class Series:
+    """A motorsport series: one channel follows every session of every round,
+    instead of one team's games.
+
+    key: category key (teams.category; catalog key "series:<key>"). Must not
+        collide with a League key and must never change once stored.
+    espn_sport/espn_league: ESPN site API path, sports/<espn_sport>/<espn_league>/scoreboard.
+    name: display name of the channel.
+    short_name: prefix of guide titles ("F1 Qualifying"): one title per
+        session kind all season, so a Jellyfin "Record Series" on it records
+        every qualifying; the round goes in the episode title.
+    group_title: M3U group-title and dashboard catalog section.
+    session_kinds: known session codes, in weekend order.
+    logo_url: channel logo (Jellyfin fetches it, so a public URL).
+    default_session_duration: length of a session whose code is not listed."""
+
+    key: str
+    espn_sport: str
+    espn_league: str
+    name: str
+    short_name: str
+    group_title: str
+    session_kinds: Tuple[SessionKind, ...]
+    logo_url: str = ""
+    default_session_duration: timedelta = timedelta(hours=1)
+
+    def session_label(self, code: str) -> str:
+        for kind_code, label, _ in self.session_kinds:
+            if kind_code == code:
+                return label
+        return code
+
+    def session_duration(self, code: str) -> timedelta:
+        for kind_code, _, duration in self.session_kinds:
+            if kind_code == code:
+                return duration
+        return self.default_session_duration
+
+
+F1 = Series(
+    key="f1", espn_sport="racing", espn_league="f1",
+    name="Formula 1", short_name="F1", group_title="Formula 1",
+    session_kinds=(
+        ("FP1", "Practice 1", timedelta(hours=1)),
+        ("FP2", "Practice 2", timedelta(hours=1)),
+        ("FP3", "Practice 3", timedelta(hours=1)),
+        ("SS", "Sprint Qualifying", timedelta(hours=1)),  # ESPN: "sprint shootout"
+        ("SR", "Sprint", timedelta(hours=1)),
+        ("Qual", "Qualifying", timedelta(hours=1)),
+        ("Race", "Race", timedelta(hours=2)),
+    ),
+    logo_url="https://a.espncdn.com/i/teamlogos/leagues/500/f1.png",
+)
+
+SERIES: Tuple[Series, ...] = (F1,)
+SERIES_BY_KEY: Dict[str, Series] = {series.key: series for series in SERIES}
