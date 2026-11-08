@@ -25,6 +25,7 @@ from db import (
 from security import verify_dashboard_auth
 from catalog import _season_resume_label, get_catalog_entries, is_stream_window_active
 from leagues import OPTIONAL_GROUP_KEYS
+import channel_groups
 from jellyfin_client import load_status as load_jellyfin_status
 from updates import _update_available, _UPDATE_STATE
 import engine_stats
@@ -182,6 +183,8 @@ async def api_status(auth: bool = Depends(verify_dashboard_auth)):
             "candidates": candidate_entries,
             "active_provider": active.get("provider") if active else None,
             "stream_window_active": is_stream_window_active(data),
+            "status_group": channel_groups.channel_status(data),
+            "group_key": channel_groups.channel_group(data)[0],
             "start_time": data.get("start_time", ""),
             "stop_time": data.get("stop_time", ""),
             "schedule_status": data.get("schedule_status", ""),

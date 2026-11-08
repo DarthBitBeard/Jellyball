@@ -32,6 +32,7 @@ from scrapers import (
     HtmlAggregatorScraper,
 )
 import catalog
+import channel_groups
 import dashboard_cards
 import epg
 import provider_telemetry
@@ -251,6 +252,8 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
             "auto_disable_after": data.get('auto_disable_after', ''),
             "now_title": guide["now"],
             "next_title": guide["next"],
+            "group_key": channel_groups.channel_group(data)[0],
+            "status": channel_groups.channel_status(data),
         }
         channel.update(_channel_watch_fields(t_id, data))
         return channel
@@ -338,6 +341,7 @@ async def dashboard(request: Request, tab: str = "channels", status: str = "", a
         ],
         "favorites": favorites_channels,
         "others": other_channels,
+        "channel_groups": channel_groups.group_channels(other_channels),
         "multiview": multiview,
         "provider_health": provider_health,
         "failover_stats": failover_stats,

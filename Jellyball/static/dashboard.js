@@ -235,23 +235,167 @@ function filterCatalog(value) {
     });
     _updateFilterEmptyState('catalog-filter-empty', 'catalog-filter-query', (value || '').trim(), totalVisible);
 }
-function filterChannels(value) {
-    const query = (value || '').toLowerCase().trim();
-    let visible = 0;
+/* Channels & Streams: collapsible sections + status chips.
+   A card's data-status (live / no_stream / upcoming / off_season, from
+   channel_groups.channel_status) and data-watching are refreshed by every
+   status poll; the chips, section summaries and filtering all read them. */
+const CHANNEL_STATUS_LABELS = {
+    all: 'All', live: 'Live', watching: 'Watching', no_stream: 'No stream',
+    upcoming: 'Upcoming', off_season: 'Off-season',
+};
+const CHANNEL_GROUP_OPEN_KEY = 'jb-channel-group-open';
+let _channelStatusFilter = 'all';
+
+function _cardMatchesStatus(card, status) {
+    if (status === 'all') return true;
+    if (status === 'watching') return card.dataset.watching === '1';
+    return card.dataset.status === status;
+}
+function _savedOpenGroup() {
+    // The section the user last opened ('' = they closed it), or null if they
+    // never chose one.
+    try { return localStorage.getItem(CHANNEL_GROUP_OPEN_KEY); } catch (e) { return null; }
+}
+function _saveOpenGroup(key) {
+    try { localStorage.setItem(CHANNEL_GROUP_OPEN_KEY, key); } catch (e) { /* private mode */ }
+}
+function _channelFiltersActive() {
+    const el = document.getElementById('channel-filter');
+    return _channelStatusFilter !== 'all' || Boolean(el && el.value.trim());
+}
+function updateChannelGroupSummaries() {
+    const counts = { all: 0, live: 0, watching: 0, no_stream: 0, upcoming: 0, off_season: 0 };
     document.querySelectorAll('.channel-card').forEach(card => {
-        const matches = !query || (card.dataset.channelName || '').toLowerCase().includes(query);
-        card.style.display = matches ? '' : 'none';
-        if (matches) visible += 1;
+        counts.all += 1;
+        if (card.dataset.status in counts) counts[card.dataset.status] += 1;
+        if (card.dataset.watching === '1') counts.watching += 1;
     });
-    _updateFilterEmptyState('channel-filter-empty', 'channel-filter-query', (value || '').trim(), visible);
+    document.querySelectorAll('.status-chip').forEach(chip => {
+        const status = chip.dataset.statusFilter;
+        const count = counts[status] || 0;
+        const countEl = chip.querySelector('.chip-count');
+        if (countEl) countEl.textContent = String(count);
+        // Hide empty chips, but never the one in use (or "All").
+        chip.hidden = !count && status !== 'all' && status !== _channelStatusFilter;
+    });
+    document.querySelectorAll('.channel-group').forEach(group => {
+        const cards = group.querySelectorAll('.channel-card');
+        const n = status => Array.from(cards).filter(card => _cardMatchesStatus(card, status)).length;
+        const parts = [];
+        if (n('watching')) parts.push(`<span class="group-stat watching">▶ ${n('watching')} watching</span>`);
+        if (n('live')) parts.push(`<span class="group-stat"><span class="dot online"></span>${n('live')} live</span>`);
+        if (n('no_stream')) parts.push(`<span class="group-stat no-stream"><span class="dot offline"></span>${n('no_stream')} no stream</span>`);
+        if (!parts.length && n('off_season') === cards.length) parts.push('<span class="group-stat">Off-season</span>');
+        const summary = group.querySelector('[data-role="group-summary"]');
+        if (summary) summary.innerHTML = parts.join('<span class="group-stat-sep">·</span>');
+    });
+}
+function filterChannels(value) {
+    const query = (value === undefined
+        ? (document.getElementById('channel-filter') || {}).value || ''
+        : value).toLowerCase().trim();
+    const filtering = _channelFiltersActive();
+    let visible = 0;
+    document.querySelectorAll('.channel-group').forEach(group => {
+        let groupVisible = 0;
+        group.querySelectorAll('.channel-card').forEach(card => {
+            const matches = (!query || (card.dataset.channelName || '').toLowerCase().includes(query))
+                && _cardMatchesStatus(card, _channelStatusFilter);
+            card.style.display = matches ? '' : 'none';
+            if (matches) groupVisible += 1;
+        });
+        group.style.display = groupVisible ? '' : 'none';
+        const countBadge = group.querySelector('[data-role="group-count"]');
+        if (countBadge) {
+            const total = group.querySelectorAll('.channel-card').length;
+            countBadge.textContent = filtering ? `${groupVisible} / ${total}` : String(total);
+        }
+        // While filtering, show every match; afterwards, back to the accordion.
+        if (filtering && groupVisible) _setGroupOpen(group, true);
+        visible += groupVisible;
+    });
+    if (!filtering) _applyGroupOpenState();
+    let label = query ? `“${query}”` : '';
+    if (_channelStatusFilter !== 'all') {
+        const statusLabel = `the “${CHANNEL_STATUS_LABELS[_channelStatusFilter]}” filter`;
+        label = label ? `${label} with ${statusLabel}` : statusLabel;
+    }
+    _updateFilterEmptyState('channel-filter-empty', 'channel-filter-query', label, visible);
+}
+function setChannelStatusFilter(status) {
+    _channelStatusFilter = CHANNEL_STATUS_LABELS[status] ? status : 'all';
+    try { sessionStorage.setItem('jb-channel-status', _channelStatusFilter); } catch (e) { /* private mode */ }
+    document.querySelectorAll('.status-chip').forEach(chip => {
+        const active = chip.dataset.statusFilter === _channelStatusFilter;
+        chip.classList.toggle('active', active);
+        chip.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    updateChannelGroupSummaries();
+    filterChannels();
+}
+function _setGroupOpen(group, open) {
+    if (group.open !== open) {
+        group.dataset.programmaticToggle = '1';
+        group.open = open;
+    }
+}
+function _defaultOpenGroup(groups) {
+    // Until the user picks one: favorites, else the first section with
+    // someone watching, else one missing a stream, else one that's live.
+    const has = (group, test) => Array.from(group.querySelectorAll('.channel-card')).some(test);
+    const tests = [
+        group => group.dataset.groupKey === 'favorites',
+        group => has(group, card => card.dataset.watching === '1'),
+        group => has(group, card => card.dataset.status === 'no_stream'),
+        group => has(group, card => card.dataset.status === 'live'),
+    ];
+    for (const test of tests) {
+        const match = groups.find(test);
+        if (match) return match.dataset.groupKey;
+    }
+    return '';
+}
+function _applyGroupOpenState() {
+    // Accordion: one section open at a time.
+    const groups = Array.from(document.querySelectorAll('.channel-group'));
+    const saved = _savedOpenGroup();
+    const wanted = (saved !== null && (saved === '' || groups.some(g => g.dataset.groupKey === saved)))
+        ? saved
+        : _defaultOpenGroup(groups);
+    groups.forEach(group => _setGroupOpen(group, group.dataset.groupKey === wanted));
+}
+function initChannelGroups() {
+    const groups = Array.from(document.querySelectorAll('.channel-group'));
+    groups.forEach(group => {
+        group.addEventListener('toggle', () => {
+            if (group.dataset.programmaticToggle) {
+                delete group.dataset.programmaticToggle;
+                return;
+            }
+            // While filtering every section with a match is open; don't
+            // remember those as the user's choice.
+            if (_channelFiltersActive()) return;
+            if (group.open) {
+                _saveOpenGroup(group.dataset.groupKey);
+                groups.forEach(other => { if (other !== group) _setGroupOpen(other, false); });
+            } else if (_savedOpenGroup() === group.dataset.groupKey || _savedOpenGroup() === null) {
+                _saveOpenGroup('');
+            }
+        });
+    });
+    _applyGroupOpenState();
+    let saved = 'all';
+    try { saved = sessionStorage.getItem('jb-channel-status') || 'all'; } catch (e) { /* private mode */ }
+    setChannelStatusFilter(saved);
 }
 function clearChannelFilter() {
     const el = document.getElementById('channel-filter');
     if (el) {
         el.value = '';
-        filterChannels('');
-        el.focus();
+        try { sessionStorage.setItem('jb-channel-filter', ''); } catch (e) { /* private mode */ }
     }
+    setChannelStatusFilter('all');
+    if (el) el.focus();
 }
 function clearCatalogFilter() {
     const el = document.getElementById('catalog-filter');
@@ -275,7 +419,8 @@ function _isUserInteracting() {
         const tag = active.tagName;
         if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return true;
     }
-    if (document.querySelector('details[open]')) return true;
+    // Channel sections are layout, not a half-finished edit.
+    if (document.querySelector('details[open]:not(.channel-group)')) return true;
     const filterEl = document.getElementById('channel-filter');
     if (filterEl && filterEl.value.trim()) return true;
     return false;
@@ -304,6 +449,8 @@ function applyStatusSnapshot(snapshot) {
         const activeProvider = channel.active_provider || '';
         card.dataset.candidateCount = String(candidateCount);
         card.dataset.activeProvider = activeProvider;
+        if (channel.status_group) card.dataset.status = channel.status_group;
+        card.dataset.watching = channel.watching ? '1' : '0';
         const dot = card.querySelector('[data-role="status-dot"]');
         const statusText = card.querySelector('[data-role="status-text"]');
         const candidateText = card.querySelector('[data-role="candidate-count"]');
@@ -345,6 +492,8 @@ function applyStatusSnapshot(snapshot) {
             }
         }
     });
+    updateChannelGroupSummaries();
+    if (_channelFiltersActive()) filterChannels();
     if (shouldReload) {
         if (_isUserInteracting()) {
             _showChannelsChangedNotice();
@@ -517,6 +666,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (activeTab && document.getElementById('tab-' + activeTab)) switchTab(activeTab);
     if (activeTab === 'logs') loadLogs();
     updateCatalogSelectionCount();
+    initChannelGroups();
     pollChannelStatus();
     pollMultiviewStatus();
 
