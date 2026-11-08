@@ -308,3 +308,47 @@ async def load_status() -> dict:
         ts = last.get("ts")
         last["when"] = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if isinstance(ts, (int, float)) else ""
     return {"server": server, "last_refresh": last}
+
+
+# Jellyfin's ids for programmes from an XMLTV guide start with the guide's
+# channel id (our tvg-id) followed by the start time:
+# "series_f1_2026-11-07T18:00:00.0000000+00:00_m3u_<hash>".
+_PROGRAM_CHANNEL_RE = re.compile(r"^(.+?)_\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+
+
+def _recording_channel(item: object) -> str:
+    if not isinstance(item, dict):
+        return ""
+    match = _PROGRAM_CHANNEL_RE.match(str(item.get("ExternalProgramId") or ""))
+    return match.group(1) if match else ""
+
+
+async def fetch_recording_channels(cfg: dict) -> Optional[set]:
+    """tvg-ids of the guide channels Jellyfin has a recording or series
+    recording set up on, or None when Jellyfin couldn't be asked (callers keep
+    what they knew). Series recordings set to "any channel" name no channel."""
+    base = _validate_upstream_url(str(cfg.get("jellyfin_url") or ""), allow_private=True)
+    api_key = str(cfg.get("jellyfin_api_key") or "").strip()
+    if not base or not api_key or any(ch in api_key for ch in '"\\\r\n'):
+        return None
+    base = base.rstrip("/")
+    base_key = urllib.parse.urlsplit(base).netloc.lower()
+    channels: set = set()
+    try:
+        async with _make_client() as client:
+            for path in ("/LiveTv/Timers", "/LiveTv/SeriesTimers"):
+                response, _ = await _authed_request(client, "GET", f"{base}{path}", api_key, base_key)
+                if response.status_code != 200:
+                    return None
+                body = response.json()
+                items = body.get("Items") if isinstance(body, dict) else None
+                for item in items if isinstance(items, list) else []:
+                    if isinstance(item, dict) and item.get("RecordAnyChannel"):
+                        continue
+                    channel = _recording_channel(item)
+                    if channel:
+                        channels.add(channel)
+    except (httpx.HTTPError, ValueError) as exc:
+        LOGGER.debug("Could not read Jellyfin recordings: %s", exc)
+        return None
+    return channels
