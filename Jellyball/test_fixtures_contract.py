@@ -362,6 +362,8 @@ class FixtureHygieneTests(unittest.TestCase):
     BARE_HOST = re.compile(r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|tv|ws|su|pk|im|to|sx|xyz|top|live|click|plus|me|cc|co)\b", re.I)
     PUBLIC_API_HOSTS = {
         "a.espncdn.com", "www.espn.com", "m.espn.com", "sports.core.api.espn.pvt", "x-callback-url", "backend.tvguide.com",
+        # Not a host: the Miami Grand Prix title sponsor in the F1 calendar.
+        "Crypto.com",
     }
 
     def hosts(self, path):

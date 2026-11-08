@@ -11,6 +11,9 @@ They are test data and are excluded from the Docker image.
 | --- | --- | --- |
 | `espn/nfl_team_schedule_buf.json` | ESPN NFL team schedule for `buf` | Captured from the public API, trimmed |
 | `espn/mls_team_schedule_inter_miami.json` | ESPN MLS (`usa.1`) schedule for team 20232 | Captured, trimmed |
+| `espn/f1_scoreboard_two_weekends.json` | ESPN F1 scoreboard `?dates=20261105-20261125` (São Paulo and Las Vegas GPs, every session) | Captured, `--keep events=2 --max-list 6` |
+| `espn/f1_scoreboard_sprint_weekend.json` | ESPN F1 scoreboard `?dates=20260313-20260315` (Chinese GP, a sprint weekend) | Captured, `--keep events=1 --max-list 6` |
+| `espn/f1_scoreboard_season.json` | ESPN F1 scoreboard without dates: the full 2026 calendar | Captured, `--keep events=1 --keep leagues.0.calendar=30 --max-list 6` |
 | `espn/nfl_teams.json`, `espn/college_football_teams.json` | ESPN team directories (`?limit=1000`) | Captured, trimmed to 3 teams |
 | `espn/epl_teams.json` | ESPN Premier League (`soccer/eng.1`) team directory, the source of `league_seeds/epl.json` | Captured 2026-11-05 from a saved response, trimmed to 3 teams |
 | `tvguide/schedule.json` | TVGuide schedule: ESPN and FS1 with 4 programmes each | Captured (`duration=1440`), 2 channels picked |

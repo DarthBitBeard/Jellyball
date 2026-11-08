@@ -160,6 +160,7 @@ hiddenimports = [
     "scrapers",
     "catalog",
     "espn_schedule",
+    "motorsport_schedule",
     "alerts",
     "updates",
     "legacy_proxy",

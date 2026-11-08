@@ -162,6 +162,7 @@ files = [
     "Jellyball/routes_sports.py",
     "Jellyball/config.py",
     "Jellyball/espn_schedule.py",
+    "Jellyball/motorsport_schedule.py",
     "Jellyball/jellyball_launcher.py",
     "Jellyball/leagues.py",
     "Jellyball/main.py",

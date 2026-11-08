@@ -37,6 +37,7 @@ from sports_catalog import (
 from sports_matcher import canonical_team_name
 # Defined in espn_schedule.py; re-exported here for `from catalog import ...`.
 from espn_schedule import fetch_espn_team_schedule
+from motorsport_schedule import is_series_category, series_in_season, series_resume_label
 
 
 CATALOG_REFRESH_SECONDS = bounded_float(os.getenv("CATALOG_REFRESH_SECONDS", "3600"), 3600.0, 60.0, 86400.0)
@@ -532,13 +533,16 @@ def is_in_season(category: str, today: Optional[date] = None) -> bool:
     """Return whether `category`'s sport is inside its preseason-to-championship window.
 
     Categories with no defined window (manually added "custom" teams, and
-    non-sport special channels) are always considered in season.
+    non-sport special channels) are always considered in season. A motorsport
+    series uses the season ESPN lists (motorsport_schedule.series_in_season).
     """
+    current = today or datetime.now(timezone.utc).date()
+    if is_series_category(category):
+        return series_in_season(category, current)
     window = SEASON_WINDOWS.get(category) or _OPTIONAL_SEASON_WINDOWS.get(category)
     if not window:
         return True
     start_month, start_day, end_month, end_day = window
-    current = today or datetime.now(timezone.utc).date()
     start = (start_month, start_day)
     end = (end_month, end_day)
     here = (current.month, current.day)
@@ -550,6 +554,8 @@ def is_in_season(category: str, today: Optional[date] = None) -> bool:
 
 def _season_resume_label(category: str) -> str:
     """Return a short "Mon D" label for when `category`'s season window reopens."""
+    if is_series_category(category):
+        return series_resume_label(category, datetime.now(timezone.utc).date())
     window = SEASON_WINDOWS.get(category) or _OPTIONAL_SEASON_WINDOWS.get(category)
     if not window:
         return ""

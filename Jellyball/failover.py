@@ -30,6 +30,7 @@ from catalog import (
     STREAM_TRAIL_TIME,
     xmltv_ts,
 )
+from motorsport_schedule import fetch_series_schedule, fetch_series_season, is_series_category
 from alerts import request_jellyfin_guide_refresh_if_changed, send_alert
 from sessions import _is_placeholder_key, candidate_source_key, SESSIONS
 from multiview import _MULTIVIEW_PROCESSES
@@ -318,10 +319,15 @@ async def _trigger_scrape_unlocked(team_id: str, force: bool = False):
     category = stream_state[team_id].get("category", "")
     source_id = stream_state[team_id].get("source_id", "")
     always_live = bool(stream_state[team_id].get("always_live"))
-    in_season = is_in_season(category)
     logo_url = resolve_espn_logo(team_name, category, source_id)
     previous_start = stream_state[team_id].get("start_time", "")
     previous_stop = stream_state[team_id].get("stop_time", "")
+    series_channel = is_series_category(category)
+    if series_channel and not always_live:
+        # A series' season comes from ESPN's calendar: refresh the cache
+        # is_in_season() reads (cached for hours, so normally no request).
+        await fetch_series_season(category)
+    in_season = is_in_season(category)
     if always_live:
         start_utc, stop_utc = None, None
         schedule_ok = True
@@ -330,6 +336,9 @@ async def _trigger_scrape_unlocked(team_id: str, force: bool = False):
         # polling a league that has no games to find.
         start_utc, stop_utc = None, None
         schedule_ok = True
+    elif series_channel:
+        # Every session of every race weekend: the current or next one.
+        start_utc, stop_utc, schedule_ok = await fetch_series_schedule(category)
     else:
         start_utc, stop_utc, schedule_ok = await fetch_espn_team_schedule(team_name, query, category, source_id)
 
