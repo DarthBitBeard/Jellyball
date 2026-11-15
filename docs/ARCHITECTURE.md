@@ -65,7 +65,7 @@ prefers a normal one when available.
 | `multiview.py`, `ffmpeg_proc.py` | Grid compositing (NVENC/QSV/libx264), restart backoff, watchdog; ffmpeg discovery and child-process control. |
 | `epg.py` | `/playlist.m3u` and `/epg.xml` generation, including Multi-View programme composition. |
 | `alerts.py` | Discord/Telegram alerts and the debounced Jellyfin guide refresh. |
-| `jellyfin_client.py` | The Jellyfin REST client (guide refresh, version check). See [JELLYFIN.md](JELLYFIN.md). |
+| `jellyfin_client.py` | The Jellyfin REST client (guide refresh, version check, reading recording timers for the channel listing). See [JELLYFIN.md](JELLYFIN.md). |
 | `security.py`, `network_safety.py` | Dashboard auth modes and lockout, CSRF origin middleware, HMAC signing of relay URLs; SSRF validation of upstream URLs. |
 | `tunables.py` | The registry behind Advanced Settings (live-editable values). |
 | `updates.py` | Opt-in update check against GitHub Releases. |
