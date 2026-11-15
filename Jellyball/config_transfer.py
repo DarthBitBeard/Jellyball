@@ -48,12 +48,19 @@ SECRET_KEYS = SECRET_SETTING_KEYS
 _FLAG_KEYS = ("show_offseason_channels", "provider_rotation_mode", "update_check_enabled")
 
 
+# Settings limited to a fixed set of values, and where each is applied live.
+_CHOICE_KEYS = {
+    "channel_listing_mode": (catalog.LISTING_MODES, "LISTING_MODE", str),
+    "channel_listing_lead_minutes": (tuple(str(m) for m in catalog.LISTING_LEAD_CHOICES), "LISTING_LEAD_MINUTES", int),
+}
+
+
 def _aggregators() -> Dict[str, HtmlAggregatorScraper]:
     return {p.name: p for p in ACTIVE_PROVIDERS if isinstance(p, HtmlAggregatorScraper)}
 
 
 def _exportable_keys() -> List[str]:
-    keys = [t.key for t in TUNABLES] + list(_FLAG_KEYS) + ["jellyfin_url", "jellyfin_task_id", OPTIONAL_GROUPS_SETTING]
+    keys = [t.key for t in TUNABLES] + list(_FLAG_KEYS) + list(_CHOICE_KEYS) + ["jellyfin_url", "jellyfin_task_id", OPTIONAL_GROUPS_SETTING]
     keys += [_provider_url_setting_key(name) for name in _aggregators()]
     return keys
 
@@ -238,6 +245,15 @@ async def _apply_setting(key: str, value: Any) -> Optional[str]:
             return "not a number"
         await set_setting_async(tunable.key, str(coerced))
         _apply_tunable(tunable, coerced)
+        return None
+    if key in _CHOICE_KEYS:
+        allowed, attribute, kind = _CHOICE_KEYS[key]
+        if text not in allowed:
+            return "must be one of " + ", ".join(allowed)
+        await set_setting_async(key, text)
+        if getattr(catalog, attribute) != kind(text):
+            setattr(catalog, attribute, kind(text))
+            request_jellyfin_guide_refresh_if_changed()
         return None
     if key in _FLAG_KEYS:
         if text not in ("0", "1"):

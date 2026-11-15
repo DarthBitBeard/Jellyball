@@ -28,7 +28,8 @@ fetched it. Fetch the playlist using the address Jellyfin should use later (not
 
 Jellyball itself does not require anything from Jellyfin to work: playback,
 failover and the guide are served to whichever client asks. The Jellyfin
-connection below only automates the guide refresh.
+connection below automates the guide refresh and lets the channel listing
+see Jellyfin's recordings (see below).
 
 ## Automatic guide refresh (optional)
 
@@ -54,6 +55,12 @@ What the code does:
   task whose key is `RefreshGuide`, and starts it with
   `POST /ScheduledTasks/Running/<id>`. A stale saved task id (404) is looked up
   again once.
+* With **Channels Between Games** set to list a channel only on or around game
+  days, it also reads `/LiveTv/Timers` and `/LiveTv/SeriesTimers` with the
+  same key, so a channel with a recording or series recording set up in
+  Jellyfin stays listed. Series recordings set to "any channel" name no
+  channel and are ignored. If Jellyfin cannot be asked, the last known set is
+  kept. Checked every five minutes; the API key created above has the access this needs.
 * It never follows redirects (the API key must not travel to another host) and
   never logs the key. A repeating failure is logged at most once an hour.
 * The last attempt's outcome (time, OK or the failing step, HTTP status, which

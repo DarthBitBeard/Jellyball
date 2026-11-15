@@ -59,6 +59,32 @@
     </form>
 </div>
 <div class="card">
+    <h3>Channels Between Games</h3>
+    <p class="hint-text">A team's channel has nothing on most of the time. Choose when team channels appear in Jellyfin's channel list (the guide always has every channel's schedule, ready for when it appears):</p>
+    <ul class="hint-text" style="margin: 0 0 0.75rem 1.1rem; padding: 0;">
+        <li><strong>Always</strong>: every channel, all the time.</li>
+        <li><strong>On game day</strong>: from midnight on the day of the next game (this server's time zone) until the game is over.</li>
+        <li><strong>Around the game</strong>: shortly before the start, or as soon as a pregame stream is found, until the game is over and its stream has stopped.</li>
+    </ul>
+    <p class="hint-text">A channel someone is watching, or with a recording or series recording set up in Jellyfin, always stays listed. Always-live and Multi-View channels, and channels Jellyball has no schedule for, are not affected. Jellyball refreshes Jellyfin's guide as channels come and go, so set up the Jellyfin connection under Alerts &amp; Integrations first.</p>
+    <form action="/settings/channel-listing" method="post" style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+        <label for="listing-mode">Team channels in Jellyfin</label>
+        <select name="mode" id="listing-mode" style="width: auto;" onchange="document.getElementById('listing-lead-row').hidden = this.value !== 'around'">
+            <option value="all" {{ 'selected' if channel_listing_mode == 'all' else '' }}>Always</option>
+            <option value="game_day" {{ 'selected' if channel_listing_mode == 'game_day' else '' }}>On game day</option>
+            <option value="around" {{ 'selected' if channel_listing_mode == 'around' else '' }}>Around the game</option>
+        </select>
+        <span id="listing-lead-row" {{ '' if channel_listing_mode == 'around' else 'hidden' }}>
+            <label for="listing-lead">appearing</label>
+            <select name="lead" id="listing-lead" style="width: auto;">
+                {% for minutes in channel_listing_leads %}<option value="{{ minutes }}" {{ 'selected' if channel_listing_lead == minutes else '' }}>{{ minutes }} min</option>{% endfor %}
+            </select>
+            <span class="hint-text">before the start</span>
+        </span>
+        <button type="submit" style="width: auto; margin-left: auto;">💾 Save</button>
+    </form>
+</div>
+<div class="card">
     <h3>Provider Rotation</h3>
     <p class="hint-text">When enabled, the preferred provider for tie-broken stream matches rotates hourly instead of always favoring the same aggregator, spreading load across sources.</p>
     <form action="/settings/provider-rotation" method="post" style="display: flex; align-items: center; gap: 0.75rem;">

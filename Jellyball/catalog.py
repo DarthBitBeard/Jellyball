@@ -8,7 +8,7 @@ import os
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import httpx
 
@@ -297,9 +297,126 @@ def _channel_is_off_season(data: dict) -> bool:
 SHOW_OFFSEASON_CHANNELS = False
 
 
-def _channel_listed(data: dict) -> bool:
-    """Whether a channel appears in the M3U playlist and XMLTV guide."""
+# Which team channels Jellyfin lists (Settings tab). "all": every channel.
+# "game_day": from the local day of the next game until it is over. "around":
+# from LISTING_LEAD_MINUTES before the start (sooner if a stream turns up)
+# until the game is over and its stream has stopped. Channels being watched or
+# with a Jellyfin recording set up are always listed. The list changes over
+# time, so alerts.guide_listing_watch_loop refreshes Jellyfin's guide.
+LISTING_ALL = "all"
+LISTING_GAME_DAY = "game_day"
+LISTING_AROUND = "around"
+LISTING_MODES = (LISTING_ALL, LISTING_GAME_DAY, LISTING_AROUND)
+LISTING_LEAD_CHOICES = (15, 30, 60)
+LISTING_MODE = LISTING_ALL
+LISTING_LEAD_MINUTES = 30
+# "around": once a game is past its scheduled end, a stream still playing keeps
+# the channel listed (overtime, a late finish) for at most this long, unless
+# someone is watching.
+LISTING_OVERRUN = timedelta(hours=2)
+# tvg-ids of channels with a Jellyfin recording or series recording, kept
+# listed so the recording can still happen (alerts.refresh_recording_channels).
+RECORDING_TVG_IDS: frozenset = frozenset()
+
+
+def _never_watched(team_id: str) -> bool:
+    return False
+
+
+# Set by main to SESSIONS.is_watched (catalog can't import sessions).
+IS_WATCHED: Callable[[str], bool] = _never_watched
+
+
+def parse_listing_mode(value: object) -> str:
+    text = str(value or "").strip()
+    return text if text in LISTING_MODES else LISTING_ALL
+
+
+def parse_listing_lead(value: object) -> int:
+    try:
+        minutes = int(str(value).strip())
+    except (TypeError, ValueError):
+        return 30
+    return minutes if minutes in LISTING_LEAD_CHOICES else 30
+
+
+def _local_date(moment: datetime) -> date:
+    """The calendar day `moment` falls on in the server's time zone."""
+    return moment.astimezone().date()
+
+
+def _listing_schedule(data: dict) -> Optional[Tuple[datetime, datetime]]:
+    """(start, stop) of the event a team channel is listed around, or None
+    when it must stay listed regardless (not a scheduled team channel, or the
+    schedule is unknown: hiding it could hide a game that is on)."""
+    if data.get("type") == "multiview" or _channel_is_always_live(data):
+        return None
+    if data.get("schedule_status", "unknown") != "scheduled":
+        return None
+    start, stop = parse_team_schedule(data)
+    if not start or not stop:
+        return None
+    return start, stop
+
+
+def _channel_has_game_today(data: dict, now: Optional[datetime] = None) -> bool:
+    """False only for a team channel known to have no game today (in the
+    server's local time) and no stream: when unsure, keep it listed."""
+    if data.get("is_healthy"):
+        return True
+    if data.get("schedule_status") == "no_event" and data.get("type") != "multiview" and not _channel_is_always_live(data):
+        return False
+    window = _listing_schedule(data)
+    if window is None:
+        return True
+    start, stop = window
+    current = now or datetime.now(timezone.utc)
+    if current > stop + STREAM_TRAIL_TIME:
+        return False
+    return _local_date(start) <= _local_date(current)
+
+
+def _channel_around_game(data: dict, now: Optional[datetime] = None) -> bool:
+    """The "around the game" rule: listed from LISTING_LEAD_MINUTES before the
+    start, or as soon as a stream is found (searching starts STREAM_LEAD_TIME
+    before), until the scheduled end; after that only while the stream still
+    plays, for at most LISTING_OVERRUN."""
+    if data.get("schedule_status") == "no_event" and data.get("type") != "multiview" and not _channel_is_always_live(data):
+        return False
+    window = _listing_schedule(data)
+    if window is None:
+        return True
+    start, stop = window
+    current = now or datetime.now(timezone.utc)
+    healthy = bool(data.get("is_healthy"))
+    if current < start - max(timedelta(minutes=LISTING_LEAD_MINUTES), STREAM_LEAD_TIME):
+        return False
+    if current < start - timedelta(minutes=LISTING_LEAD_MINUTES):
+        return healthy  # pregame stream already up
+    if current <= stop:
+        return True
+    return healthy and current <= stop + LISTING_OVERRUN
+
+
+def _channel_in_guide(data: dict) -> bool:
+    """Whether the XMLTV guide carries a channel's programmes. Wider than
+    _channel_listed: Jellyfin keeps a downloaded guide for about an hour, so a
+    channel that appears in the playlist must already have its programmes in
+    the guide (Jellyfin ignores guide channels it has no playlist entry for)."""
     return SHOW_OFFSEASON_CHANNELS or not _channel_is_off_season(data)
+
+
+def _channel_listed(data: dict, now: Optional[datetime] = None, team_id: str = "") -> bool:
+    """Whether a channel appears in the M3U playlist (Jellyfin's channel list)."""
+    if _channel_is_off_season(data):
+        return SHOW_OFFSEASON_CHANNELS
+    if LISTING_MODE == LISTING_ALL:
+        return True
+    if team_id and (IS_WATCHED(team_id) or _channel_tvg_id(team_id, data) in RECORDING_TVG_IDS):
+        return True
+    if LISTING_MODE == LISTING_GAME_DAY:
+        return _channel_has_game_today(data, now)
+    return _channel_around_game(data, now)
 
 
 def _channel_tvg_id(team_id: str, data: dict) -> str:

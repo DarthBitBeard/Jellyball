@@ -40,6 +40,8 @@ class _Base(unittest.TestCase):
         self._state_backup = dict(state.stream_state)
         state.stream_state.clear()
         self._offseason = catalog.SHOW_OFFSEASON_CHANNELS
+        self._listing = (catalog.LISTING_MODE, catalog.LISTING_LEAD_MINUTES)
+        catalog.LISTING_MODE, catalog.LISTING_LEAD_MINUTES = catalog.LISTING_ALL, 30
         self._loops = patch.object(channels, "_start_team_scrape_loop")
         self._loops.start()
         self._refresh = patch.object(config_transfer, "request_jellyfin_guide_refresh_if_changed")
@@ -59,6 +61,7 @@ class _Base(unittest.TestCase):
         _apply_tunable(TUNABLE, _TUNABLE_DEFAULTS[TUNABLE.name])
         _set_provider_url_override(AGGREGATOR, "")
         catalog.SHOW_OFFSEASON_CHANNELS = self._offseason
+        catalog.LISTING_MODE, catalog.LISTING_LEAD_MINUTES = self._listing
         state.stream_state.clear()
         state.stream_state.update(self._state_backup)
         self._db.stop()
@@ -79,6 +82,8 @@ class _Base(unittest.TestCase):
         db.set_setting(TUNABLE.key, str(TUNABLE.minimum))
         db.set_setting(f"provider_url:{AGGREGATOR.name}", "https://mirror.example.test")
         db.set_setting("show_offseason_channels", "1")
+        db.set_setting("channel_listing_mode", "around")
+        db.set_setting("channel_listing_lead_minutes", "60")
         db.set_setting("jellyfin_url", "http://192.168.1.5:8096")
         db.set_setting("jellyfin_task_id", "abc123")
         db.set_setting("jellyfin_last_refresh", json.dumps({"ok": True}))
@@ -96,6 +101,7 @@ class ExportTests(_Base):
         self.assertEqual(settings[TUNABLE.key], str(TUNABLE.minimum))
         self.assertEqual(settings[f"provider_url:{AGGREGATOR.name}"], "https://mirror.example.test")
         self.assertEqual(settings["show_offseason_channels"], "1")
+        self.assertEqual((settings["channel_listing_mode"], settings["channel_listing_lead_minutes"]), ("around", "60"))
         self.assertEqual(settings["jellyfin_url"], "http://192.168.1.5:8096")
         self.assertNotIn("jellyfin_last_refresh", settings)  # status, not configuration
         self.assertEqual(export["redacted_settings"], sorted(SECRETS))
@@ -131,6 +137,7 @@ class ImportTests(_Base):
         self.assertEqual(_tunable_value(TUNABLE), TUNABLE.kind(TUNABLE.minimum))
         self.assertEqual(AGGREGATOR.base_url, "https://mirror.example.test")
         self.assertTrue(catalog.SHOW_OFFSEASON_CHANNELS)
+        self.assertEqual((catalog.LISTING_MODE, catalog.LISTING_LEAD_MINUTES), ("around", 60))
         self.assertEqual(db.get_setting("jellyfin_url"), "http://192.168.1.5:8096")
         self.assertEqual(db.get_setting("jellyfin_task_id"), "abc123")
         # Favorites survive.
@@ -152,6 +159,7 @@ class ImportTests(_Base):
     def test_handcrafted_secrets_and_unknown_settings_are_refused(self):
         body = {"teams": [], "settings": {
             **SECRETS, "made_up_setting": "1", "show_offseason_channels": "yes",
+            "channel_listing_mode": "sometimes", "channel_listing_lead_minutes": "45",
             f"provider_url:{AGGREGATOR.name}": "http://127.0.0.1:9/evil", TUNABLE.key: "not-a-number",
             "update_check_enabled": True,
         }}

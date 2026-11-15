@@ -18,6 +18,7 @@ import state
 from state import stream_state
 from catalog import (
     _channel_group_title,
+    _channel_in_guide,
     _channel_is_always_live,
     _channel_is_off_season,
     _channel_listed,
@@ -57,7 +58,7 @@ async def generate_m3u(request: Request):
         )
     lines = ["#EXTM3U"]
     for team_id, data in stream_state.items():
-        if not _channel_listed(data):
+        if not _channel_listed(data, team_id=team_id):
             continue
         # The .m3u8 extension makes Jellyfin treat the URL as an HLS manifest
         # (always through its own ffmpeg, never "direct play" of our URL or
@@ -552,10 +553,12 @@ def _multiview_programmes(
 async def generate_xmltv(request: Request = None):
     now_utc = datetime.now(timezone.utc)
     xml = ['<?xml version="1.0" encoding="UTF-8"?>', '<tv>']
+    # Every channel's programmes, not only those in the playlist right now
+    # (see catalog._channel_in_guide); decided once, so a channel never gets
+    # programmes without its <channel>.
+    listed = [(team_id, data) for team_id, data in list(stream_state.items()) if _channel_in_guide(data)]
 
-    for team_id, data in stream_state.items():
-        if not _channel_listed(data):
-            continue
+    for team_id, data in listed:
         channel_id = _channel_tvg_id(team_id, data)
         name_esc = _xml_text(data["name"])
         logo = _channel_logo_url(data)
@@ -572,9 +575,7 @@ async def generate_xmltv(request: Request = None):
     guide_end = now_utc + timedelta(days=GUIDE_HORIZON_DAYS)
     tvguide_schedules = await _fetch_tvguide_epg()
 
-    for team_id, data in stream_state.items():
-        if not _channel_listed(data):
-            continue
+    for team_id, data in listed:
         channel_id = _channel_tvg_id(team_id, data)
 
         if data.get("type") == "multiview":

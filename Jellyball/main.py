@@ -61,6 +61,7 @@ import scrapers
 import catalog
 from catalog import _special_channel_for, _sport_labeled_name, resolve_espn_logo
 from leagues import OPTIONAL_GROUPS_SETTING
+from alerts import guide_listing_watch_loop
 from updates import update_check_loop
 import provider_tools
 import legacy_proxy
@@ -168,6 +169,10 @@ async def lifespan(app: FastAPI):
     _load_tunable_overrides()
     catalog.SHOW_OFFSEASON_CHANNELS = get_setting("show_offseason_channels", "0") == "1"
     catalog.set_enabled_optional_groups(get_setting(OPTIONAL_GROUPS_SETTING, ""))
+    catalog.LISTING_MODE = catalog.parse_listing_mode(get_setting("channel_listing_mode", ""))
+    catalog.LISTING_LEAD_MINUTES = catalog.parse_listing_lead(get_setting("channel_listing_lead_minutes", "30"))
+    catalog.IS_WATCHED = SESSIONS.is_watched
+    _spawn_background_task(guide_listing_watch_loop(), "guide listing watch")
     _spawn_background_task(update_check_loop(), "update check")
     _spawn_background_task(network_games.watch_loop(), "network game watch")
     _spawn_background_task(provider_tools.provider_selftest_loop(), "nightly provider self-test")
