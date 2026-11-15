@@ -416,6 +416,8 @@ class RateLimitMiddleware:
     RULES = (
         ("/api/test-stream", 10, 10 / 60.0),
         ("/rescrape/", 20, 20 / 60.0),
+        # One request queues a rescrape of every selected channel.
+        ("/bulk-rescrape", 5, 5 / 60.0),
         ("/api/import-config", 5, 5 / 60.0),
         # Segment relay: generous, a single viewer fetches a segment every few
         # seconds, but an abusive poller still gets throttled.

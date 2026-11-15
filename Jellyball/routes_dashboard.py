@@ -704,6 +704,14 @@ async def manual_rescrape(team_id: str, auth: bool = Depends(verify_dashboard_au
     return RedirectResponse(url="/?tab=channels&status=rescrape_started", status_code=303)
 
 
+@router.post("/bulk-rescrape")
+async def bulk_rescrape(team_ids: str = Form(""), auth: bool = Depends(verify_dashboard_auth)):
+    ids = list(dict.fromkeys(t.strip() for t in team_ids.split(",") if t.strip()))
+    for team_id in ids:
+        _spawn_background_task(trigger_scrape(team_id, force=True), f"bulk rescrape {team_id}")
+    return RedirectResponse(url="/?tab=channels&status=bulk_rescrape_started", status_code=303)
+
+
 @router.post("/bulk-favorite")
 async def bulk_favorite(team_ids: str = Form(""), auth: bool = Depends(verify_dashboard_auth)):
     ids = [t.strip() for t in team_ids.split(",") if t.strip()]
