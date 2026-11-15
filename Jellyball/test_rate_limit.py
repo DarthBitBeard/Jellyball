@@ -115,7 +115,7 @@ class RateLimitMiddlewareTests(unittest.TestCase):
 
     def test_real_rules_cover_the_expensive_paths(self):
         prefixes = [rule[0] for rule in main.RateLimitMiddleware.RULES]
-        for expected in ("/api/test-stream", "/rescrape/", "/api/import-config", "/stream/"):
+        for expected in ("/api/test-stream", "/rescrape/", "/bulk-rescrape", "/api/import-config", "/stream/"):
             self.assertIn(expected, prefixes)
 
 

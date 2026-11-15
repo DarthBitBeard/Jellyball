@@ -445,6 +445,19 @@ function bulkUnfavorite() {
     document.body.appendChild(form);
     form.submit();
 }
+function bulkRescrape() {
+    const ids = updateBulkTeamIds();
+    if (!ids) {
+        showToast('Select teams first', 3000, true);
+        return;
+    }
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/bulk-rescrape';
+    form.innerHTML = `<input type="hidden" name="team_ids" value="${escapeHtml(ids)}">`;
+    document.body.appendChild(form);
+    form.submit();
+}
 function bulkRemove() {
     const ids = updateBulkTeamIds();
     if (!ids) {
@@ -554,6 +567,7 @@ window.addEventListener('DOMContentLoaded', () => {
         'bulk_favorited': '✅ Favorited selected teams',
         'bulk_unfavorited': '✅ Unfavorited selected teams',
         'bulk_removed': '✅ Removed selected teams',
+        'bulk_rescrape_started': '✅ Rescrape started for selected teams',
         'multiview_created': '✅ Multi-View created',
         'multiview_removed': '✅ Multi-View removed',
         'multiview_stopped': '✅ Multi-View stopped',
