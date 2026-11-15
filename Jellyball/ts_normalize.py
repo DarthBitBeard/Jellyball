@@ -116,7 +116,9 @@ def find_ts_start(data: bytes, probe_packets: int = 3) -> int:
         if data[offset] != SYNC_BYTE:
             continue
         needed = min(probe_packets, (len(data) - offset) // TS_PACKET_SIZE)
-        if needed < 1:
+        if needed < min(probe_packets, 2):
+            # One lone 0x47 near the end of the data is not a packet run: any
+            # text with a "G" in its last 376 bytes used to count as TS.
             return -1
         if all(data[offset + k * TS_PACKET_SIZE] == SYNC_BYTE for k in range(needed)):
             return offset
