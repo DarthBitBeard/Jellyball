@@ -13,5 +13,6 @@ class MethStreamsScraper(HtmlAggregatorProvider):
             # The home page only links the per-sport schedules; the events
             # (/live/<sport>/<slug>) are listed on these pages (issue #49).
             ["/nflstreams", "/nbastreams", "/nhlstreams", "/mlbstreams", "/cfbstreams", "/ncaabstreams", "/soccerstreams"],
-            ["/game/", "/match/", "/live/"],
+            ["/game/", "/match/", "/live/", "/live-event/"],
+            series_sections={"f1": ["/formula1streams"]},
         )

@@ -18,9 +18,17 @@ logged and shown on the dashboard's Providers card.
   never search it), and
   `async search(query_or_terms, *, browser=None, http_client=None)` returning
   a list of `StreamDict`.
+- `Provider.series_sections` (optional, default `{}`): index pages scanned only
+  when searching for a motorsport series, by series key, e.g.
+  `{"f1": ["/f1-streams"]}`. Paths are relative to `base_url`; an absolute URL
+  points at a section on a sister domain. A series search scans the home page
+  plus these instead of `categories`; team searches never fetch them.
+  `scan_urls_for(search_terms)` returns the pages a search scans.
 - `class HtmlAggregatorProvider(Provider)`: the shared logic for aggregators
   that expose linked event pages (`_fetch_html` with Playwright fallback,
-  `_is_event_link`, `_parse_anchors`, and the full search pipeline).
+  `_is_event_link`, `_parse_anchors`, and the full search pipeline). Its
+  constructor takes `series_sections=` too. Event links must be on the
+  provider's host or on the host of the page listing them.
 - `StreamDict`: the contract for one stream. Fields: `url`, `referer`,
   `origin`, `provider`, `match_score`, `match_title`, `match_url`,
   `match_context`, `discovery_method`, `quality`. `match_context` is the

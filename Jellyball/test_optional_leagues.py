@@ -31,6 +31,7 @@ from leagues import (
     CATALOG_CATEGORIES,
     OPTIONAL_GROUPS_SETTING,
     LEAGUES_BY_KEY,
+    MOTORSPORT_GROUP_KEY,
     OPTIONAL_GROUP_KEYS,
     OPTIONAL_LEAGUES,
     UK_SPORTS_GROUP_KEY,
@@ -60,7 +61,7 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(keys, ["mls", "epl", "ucl", "cfl", "pwhl"])
         self.assertFalse(set(keys) & set(LEAGUES_BY_KEY))
         self.assertFalse(set(keys) & set(CATALOG_CATEGORIES))
-        self.assertEqual(OPTIONAL_GROUP_KEYS, (*keys, UK_SPORTS_GROUP_KEY))
+        self.assertEqual(OPTIONAL_GROUP_KEYS, (*keys, UK_SPORTS_GROUP_KEY, MOTORSPORT_GROUP_KEY))
 
     def test_parse_optional_groups_drops_unknown_and_orders(self):
         self.assertEqual(parse_optional_groups(" PWHL, nope ,epl,epl"), ("epl", "pwhl"))

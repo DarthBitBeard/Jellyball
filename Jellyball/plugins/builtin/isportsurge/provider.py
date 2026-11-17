@@ -15,4 +15,5 @@ class ISportSurgeScraper(HtmlAggregatorProvider):
                 "/nba/livestreams3", "/nhl/livestreams3", "/soccer/livestreams",
             ],
             ["/watch/", "/event/", "/title-game/"],
+            series_sections={"f1": ["/f1/livestreams2"]},
         )
