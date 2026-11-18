@@ -172,7 +172,7 @@ class RenderingTests(unittest.TestCase):
         register_card(Card(tab="logs", name="demo", template="partials/test_card.html",
                            scripts=("/static/js/demo.js",), styles=("/static/css/demo.css",)))
         text = _get_dashboard().text
-        self.assertLess(text.index('<script src="/static/dashboard.js">'), text.index('<script src="/static/js/demo.js">'))
+        self.assertLess(text.index('<script src="/static/dashboard.js?v='), text.index('<script src="/static/js/demo.js">'))
         self.assertLess(text.index('href="/static/css/demo.css"'), text.index("</head>"))
 
     def test_a_broken_card_does_not_break_the_page(self):

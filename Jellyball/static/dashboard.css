@@ -155,6 +155,36 @@ button:active { transform: translateY(0) scale(0.98); }
 table { width: 100%; border-collapse: collapse; } .hint-text { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.35rem; line-height: 1.4; }
  .catalog-filter { margin: 1rem 0 1.25rem; }
  .channel-filter { margin: 0 0 1.25rem; }
+ .channel-status-chips { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: -0.5rem 0 1.25rem; }
+ .status-chip { width: auto; display: inline-flex; align-items: center; gap: 0.4rem; margin: 0; padding: 0.4rem 0.8rem; border-radius: 999px; font-size: 0.82rem; font-weight: 600; background: var(--surface-2); color: var(--text-soft); border: 1px solid var(--border-strong); cursor: pointer; transition: border-color 0.2s var(--ease), background-color 0.2s var(--ease); }
+ .status-chip[hidden] { display: none; }
+ .status-chip:hover { border-color: var(--accent); }
+ .status-chip.active { background: var(--accent-surface); border-color: var(--accent); color: var(--accent-text); }
+ .status-chip .dot { width: 8px; height: 8px; animation: none; box-shadow: none; }
+ .chip-count { color: var(--text-muted); font-weight: 500; }
+ .status-chip.active .chip-count { color: inherit; }
+ .channel-accordion { grid-column: 1 / -1; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--card-bg); overflow: hidden; }
+ .channel-group + .channel-group { border-top: 1px solid var(--border-strong); }
+ .channel-group > summary { display: flex; align-items: center; gap: 0.65rem; cursor: pointer; padding: 0.8rem 1rem; font-weight: 700; list-style: none; background: var(--surface-1); transition: background-color 0.15s var(--ease); }
+ .channel-group > summary:hover { background: var(--surface-2); }
+ .channel-group > summary::-webkit-details-marker { display: none; }
+ .channel-group-chevron { color: var(--text-muted); font-size: 0.8rem; transition: transform 0.15s var(--ease); }
+ .channel-group[open] > summary .channel-group-chevron { transform: rotate(90deg); }
+ .channel-group-title { flex: 1; min-width: 0; }
+ .channel-group-summary { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; font-weight: 500; color: var(--text-muted); }
+ .channel-group-count { font-size: 0.75rem; }
+ .group-stat { display: inline-flex; align-items: center; gap: 0.35rem; }
+ .group-stat .dot { width: 8px; height: 8px; animation: none; }
+ .group-stat.no-stream { color: var(--danger-text); }
+ .group-stat.watching { color: var(--success); }
+ .group-stat-sep { color: var(--text-dim); }
+ .channel-group-grid { padding: 1rem; border-top: 1px solid var(--border); }
+ /* Red only when a stream is actually missing; idle channels are grey. */
+ .channel-card[data-status="upcoming"] .dot.offline, .channel-card[data-status="off_season"] .dot.offline { background: var(--text-dim); box-shadow: none; }
+ @media (max-width: 640px) {
+     .channel-group-grid { padding: 0.75rem; }
+     .channel-group-summary { display: none; }
+ }
  .channels-changed-notice { display: none; margin-bottom: 1rem; padding: 0.85rem 1rem; background: var(--warning); color: #000; border-radius: 8px; cursor: pointer; font-weight: 600; text-align: center; }
  .first-run-banner { border-color: var(--accent); background: linear-gradient(180deg, var(--card-bg) 0%, var(--surface-1) 100%); }
  .catalog-list { display: flex; flex-direction: column; gap: 0.75rem; max-height: 48rem; overflow-y: auto; padding-right: 0.25rem; }

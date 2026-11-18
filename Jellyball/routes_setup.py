@@ -31,7 +31,7 @@ import http_hardening
 from alerts import get_jellyfin_config, refresh_jellyfin_guide
 from catalog import catalog_group_key, get_catalog_entries
 from channels import _set_catalog_entry_enabled
-from config import _log_failure, _public_base_url, _resource_path, _validate_upstream_url
+from config import _log_failure, _public_base_url, _resource_path, static_url, _validate_upstream_url
 from dashboard_cards import Card, register_card
 from db import set_setting_async
 from jellyfin_client import refresh_guide
@@ -43,6 +43,7 @@ from version import __version__
 
 router = APIRouter()
 TEMPLATES = Jinja2Templates(directory=str(_resource_path("templates")))
+TEMPLATES.env.globals["static_url"] = static_url
 
 
 async def _setup_needed() -> bool:
